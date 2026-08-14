@@ -31,7 +31,9 @@ jobs:
     - name: Compile Modules to DEX
       run: |
         # Находим путь к android.jar
-        ANDROID_JAR=$ANDROID_SDK_ROOT/platforms/android-34/android.jar
+        ANDROID_JAR=$(find $ANDROID_SDK_ROOT/platforms -name "android.jar" | head -n 1)
+        # Путь к d8
+        D8_TOOL=$(find $ANDROID_SDK_ROOT/build-tools -name "d8" | head -n 1)
         # Путь к скомпилированным классам IPlugin
         APP_CLASSES="app/build/tmp/kotlin-classes/debug:app/build/intermediates/javac/debug/classes"
         
@@ -46,8 +48,8 @@ jobs:
             # 2. Создаем временную папку для d8
             mkdir -p "temp_${filename}"
             
-            # 3. Конвертируем в DEX (d8 создаст classes.dex в указанной папке)
-            $ANDROID_SDK_ROOT/build-tools/33.0.1/d8 --output "temp_${filename}/" modules/*.class
+            # 3. Конвертируем в DEX
+            $D8_TOOL --output "temp_${filename}/" modules/*.class
             
             # 4. Переименовываем и перемещаем в итоговую папку
             mv "temp_${filename}/classes.dex" "output_modules/${filename}.dex"
