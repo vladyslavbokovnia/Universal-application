@@ -1,0 +1,52 @@
+name: Build DEX Modules
+
+on:
+  push:
+    paths:
+      - 'modules/**'
+  workflow_dispatch:
+
+jobs:
+  build-modules:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Install Android Build Tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y google-android-build-tools-33.0.1-installer || true
+        # На GitHub Actions d8 уже есть в Android SDK
+        echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
+    - name: Compile Java Modules to DEX
+      run: |
+        mkdir -p output
+        # Находим все Java файлы в папке modules
+        for f in modules/*.java; do
+          if [ -f "$f" ]; then
+            filename=$(basename "$f" .java)
+            echo "Building module: $filename"
+            
+            # Компилируем (используем classpath из основного приложения)
+            javac -cp "$ANDROID_SDK_ROOT/platforms/android-34/android.jar:app/build/intermediates/compile_app_classes_jar/debug/classes.jar" "$f"
+            
+            # Конвертируем в DEX
+            $ANDROID_SDK_ROOT/build-tools/33.0.1/d8 --output "output/${filename}.dex" modules/*.class
+            
+            # Очистка классов
+            rm modules/*.class
+          fi
+        done
+
+    - name: Upload DEX Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: dex-modules
+        path: output/*.dex

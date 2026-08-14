@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">Universal Host</string>
+    <string name="accessibility_service_label">Universal Host Service</string>
+    <string name="accessibility_service_description">Позволяет динамическим модулям управлять интерфейсом и недавними приложениями.</string>
+    <string name="keyboard_label">Universal Host Keyboard</string>
+</resources>
