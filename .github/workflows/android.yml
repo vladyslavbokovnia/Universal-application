@@ -42,8 +42,8 @@ jobs:
             filename=$(basename "$f" .java)
             echo "Building module: $filename"
             
-            # 1. Компилируем Java код модуля
-            javac -cp "$ANDROID_JAR:$APP_CLASSES" "$f"
+            # 1. Компилируем Java код модуля (форсируем Java 8 для совместимости с d8)
+            javac -source 8 -target 8 -cp "$ANDROID_JAR:$APP_CLASSES" "$f"
             
             # 2. Создаем временную папку для d8
             mkdir -p "temp_${filename}"
