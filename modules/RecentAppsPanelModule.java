@@ -8,6 +8,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
@@ -34,6 +35,8 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.util.DisplayMetrics;
+import android.util.Log;
 import android.util.LruCache;
 import android.view.GestureDetector;
 import android.view.Gravity;
@@ -69,6 +72,7 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Панель недавних приложений (порт AppRecent 2.2 в DEX-модуль).
@@ -83,6 +87,10 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
 
     private static final String PREFS = "module_RecentAppsPanel";   // настройки, которые пишет хост
     private static final long EVENT_DEBOUNCE_MS = 80L;
+    private static final long PACKAGE_DEBOUNCE_MS = 400L;   // установка/обновление шлёт пачку событий
+    private static final long RESTART_DEBOUNCE_MS = 300L;   // слайдеры в настройках шлют серию изменений
+    private static final long USAGE_TTL_MS = 60000L;        // как часто перечитывать UsageStats
+    private static final String TAG = "RecentAppsPanel";
 
     // значения по умолчанию совпадают со схемой настроек ниже
     private SharedPreferences cfg;
@@ -104,7 +112,9 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
     private Repo repo;
     private LruCache<String, Drawable.ConstantState> iconCache;
     private volatile boolean active;
-    private int generation;
+    private final AtomicInteger generation = new AtomicInteger();
+    private volatile boolean snapRequested;     // хотя бы один из схлопнутых запросов просил прокрутить к началу
+    private int lastScreenW, lastScreenH;
 
     private PullLayout panel;
     private HorizontalScrollView hScroll;
@@ -128,7 +138,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
     // ---------------------------------------------------------------- IPlugin
 
     @Override public String getName() { return "RecentAppsPanel"; }
-    @Override public int getVersion() { return 3; }
+    @Override public int getVersion() { return 4; }
     @Override public String getDescription() {
         return "Панель недавних приложений: круговое меню, скрытие, раскрытие сеткой";
     }
@@ -138,6 +148,11 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
     public void init(Context context) {
         stop();
         ctx = context;
+        if (!(ctx instanceof AccessibilityService) && Build.VERSION.SDK_INT >= 23
+                && !Settings.canDrawOverlays(ctx)) {
+            Toast.makeText(ctx, "RecentAppsPanel: выдайте разрешение «Поверх других окон»", Toast.LENGTH_LONG).show();
+            return;
+        }
         wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
         handler = new Handler(Looper.getMainLooper());
         bg = Executors.newSingleThreadExecutor();
@@ -146,7 +161,11 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         store = new Store(ctx, cfg);
         repo = new Repo(ctx, store);
         iconCache = new LruCache<String, Drawable.ConstantState>(300);
-        customCache = new LruCache<String, Bitmap>(64);
+        customCache = new LruCache<String, Bitmap>(customCacheBytes()) {
+            @Override protected int sizeOf(String key, Bitmap value) { return value.getByteCount(); }
+        };
+        snapshotScreen();
+        snapRequested = false;
         expanded = false;
         panelShown = true;
         renderedKey = "";
@@ -158,6 +177,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
             registerReceivers();
             refresh(true);
         } catch (Throwable t) {
+            Log.e(TAG, "init failed", t);
             Toast.makeText(ctx, "RecentAppsPanel: не удалось запустить панель", Toast.LENGTH_LONG).show();
             stop();
         }
@@ -171,6 +191,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         if (ctx != null && receiversRegistered) {
             try { ctx.unregisterReceiver(batteryReceiver); } catch (Throwable ignored) { }
             try { ctx.unregisterReceiver(packageReceiver); } catch (Throwable ignored) { }
+            try { ctx.unregisterReceiver(configReceiver); } catch (Throwable ignored) { }
             receiversRegistered = false;
         }
         dismissOverlay();
@@ -199,6 +220,8 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         if (pkg.equals(ctx.getPackageName())) return;      // собственные окна хоста
         dismissOverlay();                                  // смена окна закрывает меню
         if (!repo.isLaunchable(pkg) || pkg.equals(imePackage())) return;  // systemui, клавиатура и т.п.
+        repo.noteUsed(pkg, System.currentTimeMillis());   // время использования держим в памяти
+        store.launched(pkg);                               // приложение открыли не через панель — снимаем ручную позицию
         store.setActive(pkg);
         handler.removeCallbacks(refreshFromEvent);
         handler.postDelayed(refreshFromEvent, EVENT_DEBOUNCE_MS);
@@ -259,12 +282,30 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
     public void onSettingChanged(String key) {
         if (ctx == null || !active || handler == null) return;
         if ("unhide_all".equals(key)) { store.clearHidden(); refresh(false); return; }
-        if ("app_icons".equals(key)) { customCache.evictAll(); renderedKey = ""; refresh(false); return; }
+        if (key != null && key.startsWith("app_icons")) { customCache.evictAll(); renderedKey = ""; refresh(false); return; }
         if ("sort_mode".equals(key)) { refresh(true); return; }
-        // остальные параметры меняют размеры окон и набор окон — проще перезапустить панель
-        Context c = ctx;
-        stop();
-        init(c);
+        // остальные параметры меняют размеры окон и набор окон — перезапускаем панель,
+        // но с задержкой: слайдер присылает десятки изменений подряд
+        scheduleRestart();
+    }
+
+    private final Runnable restartTask = new Runnable() {
+        @Override public void run() {
+            Context c = ctx;
+            if (c != null) init(c);      // init() сам вызывает stop()
+        }
+    };
+
+    private void scheduleRestart() {
+        if (handler == null) return;
+        handler.removeCallbacks(restartTask);
+        handler.postDelayed(restartTask, RESTART_DEBOUNCE_MS);
+    }
+
+    private void snapshotScreen() {
+        DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
+        lastScreenW = dm.widthPixels;
+        lastScreenH = dm.heightPixels;
     }
 
     @Override
@@ -305,7 +346,8 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
             o.inJustDecodeBounds = true;
             BitmapFactory.decodeFile(path, o);
             int sample = 1;
-            while (Math.max(o.outWidth, o.outHeight) / (sample * 2) >= 512) sample *= 2;
+            int need = iconTargetPx();
+            while (Math.max(o.outWidth, o.outHeight) / (sample * 2) >= need) sample *= 2;
             BitmapFactory.Options o2 = new BitmapFactory.Options();
             o2.inSampleSize = sample;
             b = BitmapFactory.decodeFile(path, o2);
@@ -314,6 +356,18 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         }
         if (b != null) customCache.put(key, b);
         return b;
+    }
+
+    /** Сколько пикселей нужно самой большой плитке: больше декодировать нет смысла. */
+    private int iconTargetPx() {
+        int cols = Math.max(1, columns);
+        return Math.max(96, Math.max(Math.max(dp(iconDp), stripH), lastScreenW / cols));
+    }
+
+    /** Кэш картинок ограничиваем байтами, а не штуками: 64 картинки по 512 px — это десятки МБ. */
+    private static int customCacheBytes() {
+        long budget = Runtime.getRuntime().maxMemory() / 8L;
+        return (int) Math.max(8L * 1024L * 1024L, Math.min(32L * 1024L * 1024L, budget));
     }
 
     // ---------------------------------------------------------------- окна
@@ -405,14 +459,17 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
     // ---------------------------------------------------------------- список
 
     private void refresh(final boolean snapStart) {
-        if (!active || bg == null) return;
-        final int gen = ++generation;
+        if (!active || bg == null || !panelShown) return;     // скрытая панель обновится при показе
+        if (snapStart) snapRequested = true;
+        final int gen = generation.incrementAndGet();
         try {
             bg.execute(new Runnable() {
                 @Override public void run() {
+                    if (gen != generation.get()) return;      // уже стоит более свежий запрос — этот не нужен
                     List<Entry> loaded;
                     try { loaded = repo.load(); } catch (Throwable t) { loaded = new ArrayList<Entry>(); }
                     for (Entry e : loaded) {
+                        if (gen != generation.get()) return;
                         if (iconCache.get(e.pkg) == null) {
                             try {
                                 Drawable d = ctx.getPackageManager().getApplicationIcon(e.pkg);
@@ -424,7 +481,10 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
                     final List<Entry> result = loaded;
                     handler.post(new Runnable() {
                         @Override public void run() {
-                            if (active && gen == generation) applyList(result, snapStart);
+                            if (!active || gen != generation.get()) return;
+                            boolean snap = snapRequested;
+                            snapRequested = false;
+                            applyList(result, snap);
                         }
                     });
                 }
@@ -524,6 +584,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
                 if (d.getConstantState() != null) iconCache.put(entry.pkg, d.getConstantState());
                 icon = d;
             } catch (Throwable ignored) { }
+            if (icon == null) icon = ctx.getPackageManager().getDefaultActivityIcon();
         }
         final AlphaIconView v = new AlphaIconView(ctx, icon, fade, cb != null);
         v.setContentDescription(entry.label);
@@ -667,7 +728,20 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
     }
 
     private void showHiddenList() {
-        final List<Entry> hidden = repo.hiddenEntries();
+        if (!active || bg == null) return;
+        try {
+            bg.execute(new Runnable() {
+                @Override public void run() {
+                    final List<Entry> hidden = repo.hiddenEntries();     // может потребовать скан пакетов
+                    handler.post(new Runnable() {
+                        @Override public void run() { if (active) presentHiddenList(hidden); }
+                    });
+                }
+            });
+        } catch (RejectedExecutionException ignored) { }
+    }
+
+    private void presentHiddenList(final List<Entry> hidden) {
         if (hidden.isEmpty()) {
             Toast.makeText(ctx, "Скрытых приложений нет", Toast.LENGTH_SHORT).show();
             return;
@@ -702,7 +776,8 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
             row.setPadding(dp(4), dp(8), dp(4), dp(8));
             ImageView iv = new ImageView(ctx);
             iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            try { iv.setImageDrawable(ctx.getPackageManager().getApplicationIcon(e.pkg)); } catch (Throwable ignored) { }
+            try { iv.setImageDrawable(ctx.getPackageManager().getApplicationIcon(e.pkg)); }
+            catch (Throwable ignored) { iv.setImageDrawable(ctx.getPackageManager().getDefaultActivityIcon()); }
             row.addView(iv, new LinearLayout.LayoutParams(dp(40), dp(40)));
             TextView tv = new TextView(ctx);
             tv.setText(e.label);
@@ -813,10 +888,35 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
 
     private final BroadcastReceiver packageReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent intent) {
-            if (!active) return;
+            if (!active || intent == null) return;
+            Uri data = intent.getData();
+            String pkg = data != null ? data.getSchemeSpecificPart() : null;
+            if (pkg != null) {
+                iconCache.remove(pkg);
+                if (Intent.ACTION_PACKAGE_REMOVED.equals(intent.getAction())
+                        && !intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)) {
+                    store.forget(pkg);      // приложение удалено насовсем — чистим ручной порядок и скрытие
+                }
+            } else {
+                iconCache.evictAll();
+            }
             repo.invalidate();
-            iconCache.evictAll();
-            refresh(false);
+            handler.removeCallbacks(refreshFromPackage);
+            handler.postDelayed(refreshFromPackage, PACKAGE_DEBOUNCE_MS);
+        }
+    };
+
+    private final Runnable refreshFromPackage = new Runnable() {
+        @Override public void run() { refresh(false); }
+    };
+
+    /** Поворот экрана: размеры плиток и число рядов считаются при сборке, поэтому панель пересобираем. */
+    private final BroadcastReceiver configReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context c, Intent intent) {
+            if (!active || ctx == null) return;
+            DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
+            if (dm.widthPixels == lastScreenW && dm.heightPixels == lastScreenH) return;
+            scheduleRestart();
         }
     };
 
@@ -828,13 +928,16 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         pf.addAction(Intent.ACTION_PACKAGE_REPLACED);
         pf.addAction(Intent.ACTION_PACKAGE_CHANGED);
         pf.addDataScheme("package");
-        Intent sticky;
+        IntentFilter cf = new IntentFilter(Intent.ACTION_CONFIGURATION_CHANGED);
+        Intent sticky = null;
         if (Build.VERSION.SDK_INT >= 33) {
-            sticky = ctx.registerReceiver(batteryReceiver, bf, Context.RECEIVER_NOT_EXPORTED);
+            if (batteryEnabled) sticky = ctx.registerReceiver(batteryReceiver, bf, Context.RECEIVER_NOT_EXPORTED);
             ctx.registerReceiver(packageReceiver, pf, Context.RECEIVER_NOT_EXPORTED);
+            ctx.registerReceiver(configReceiver, cf, Context.RECEIVER_NOT_EXPORTED);
         } else {
-            sticky = ctx.registerReceiver(batteryReceiver, bf);
+            if (batteryEnabled) sticky = ctx.registerReceiver(batteryReceiver, bf);
             ctx.registerReceiver(packageReceiver, pf);
+            ctx.registerReceiver(configReceiver, cf);
         }
         receiversRegistered = true;
         if (sticky != null) batteryReceiver.onReceive(ctx, sticky);
@@ -854,39 +957,53 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
 
     /** Настройки модуля хранятся отдельно от настроек хоста. */
     private static final class Store {
-        private final SharedPreferences p;    // служебное состояние панели
-        private final SharedPreferences s;    // настройки из хоста
+        private final SharedPreferences p;             // служебное состояние панели
+        private final SharedPreferences settings;      // настройки из хоста
+        private String activeCache;
+        private boolean activeLoaded;
+
         Store(Context c, SharedPreferences settings) {
             p = c.getSharedPreferences("recent_panel", Context.MODE_PRIVATE);
-            s = settings;
+            this.settings = settings;
         }
-        void clearHidden() { p.edit().remove("hidden").commit(); }
+        // apply() обновляет данные в памяти сразу, поэтому последующее чтение видит новое значение,
+        // а дисковая запись не блокирует главный поток
+        void clearHidden() { p.edit().remove("hidden").apply(); }
 
         /** Возвращает копию: набор из SharedPreferences менять нельзя. */
         Set<String> hidden() {
-            Set<String> s = p.getStringSet("hidden", null);
-            return s == null ? new HashSet<String>() : new HashSet<String>(s);
+            Set<String> stored = p.getStringSet("hidden", null);
+            return stored == null ? new HashSet<String>() : new HashSet<String>(stored);
         }
         void setHidden(String pkg, boolean value) {
-            Set<String> s = hidden();
-            if (value) s.add(pkg); else s.remove(pkg);
-            p.edit().putStringSet("hidden", s).commit();   // синхронно: список читается сразу после
+            Set<String> set = hidden();
+            if (value) set.add(pkg); else set.remove(pkg);
+            p.edit().putStringSet("hidden", set).apply();
         }
-        boolean sortInstall() { return s.getInt("sort_mode", 0) == 1; }
-        void toggleSort() { s.edit().putInt("sort_mode", sortInstall() ? 0 : 1).apply(); }
-        String active() { return p.getString("active", null); }
-        void setActive(String pkg) { p.edit().putString("active", pkg).apply(); }
+        boolean sortInstall() { return settings.getInt("sort_mode", 0) == 1; }
+        void toggleSort() { settings.edit().putInt("sort_mode", sortInstall() ? 0 : 1).apply(); }
+
+        /** Активное приложение держим в памяти: событий окон много, а писать на диск нужно только при смене. */
+        synchronized String active() {
+            if (!activeLoaded) { activeCache = p.getString("active", null); activeLoaded = true; }
+            return activeCache;
+        }
+        synchronized void setActive(String pkg) {
+            if (pkg.equals(active())) return;
+            activeCache = pkg;
+            p.edit().putString("active", pkg).apply();
+        }
 
         List<String> overrides() {
-            List<String> out = new ArrayList<String>();
             String raw = p.getString("order", "");
-            if (raw == null || raw.isEmpty()) return out;
-            for (String s : raw.split("\\|")) if (!s.isEmpty() && !out.contains(s)) out.add(s);
-            return out;
+            if (raw == null || raw.isEmpty()) return new ArrayList<String>();
+            Set<String> uniq = new LinkedHashSet<String>();
+            for (String item : raw.split("\\|")) if (!item.isEmpty()) uniq.add(item);
+            return new ArrayList<String>(uniq);
         }
         void setOverrides(List<String> order) {
             StringBuilder sb = new StringBuilder();
-            for (String s : order) { if (sb.length() > 0) sb.append('|'); sb.append(s); }
+            for (String item : order) { if (sb.length() > 0) sb.append('|'); sb.append(item); }
             p.edit().putString("order", sb.toString()).apply();
         }
 
@@ -913,7 +1030,17 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
             int i = order.indexOf(pkg);
             if (i > 0) { order.remove(i); order.add(i - 1, pkg); setOverrides(order); }
         }
+        /** Приложение стало активным — ручная позиция сбрасывается, оно снова идёт по недавности. */
         void launched(String pkg) {
+            String raw = p.getString("order", "");
+            if (raw == null || !raw.contains(pkg)) return;      // быстрый выход: событий окон много
+            List<String> ov = overrides();
+            if (ov.remove(pkg)) setOverrides(ov);
+        }
+        /** Приложение удалено: убираем его из скрытых и из ручного порядка. */
+        void forget(String pkg) {
+            Set<String> h = hidden();
+            if (h.remove(pkg)) p.edit().putStringSet("hidden", h).apply();
             List<String> ov = overrides();
             if (ov.remove(pkg)) setOverrides(ov);
         }
@@ -924,42 +1051,65 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         private final Context c;
         private final Store store;
         private volatile Map<String, Entry> base;
+        private final AtomicInteger version = new AtomicInteger();          // растёт при каждом invalidate()
+        private final Map<String, Long> usage = new HashMap<String, Long>();  // время последнего использования; под замком usage
+        private long usageLoadedAt;
 
         Repo(Context c, Store store) { this.c = c; this.store = store; }
 
-        void invalidate() { base = null; }
+        void invalidate() { version.incrementAndGet(); base = null; }
 
         boolean isLaunchable(String pkg) {
             Map<String, Entry> b = base;
             return b == null || b.containsKey(pkg);
         }
 
+        /** Событие окна: запоминаем время в памяти, чтобы не опрашивать UsageStats на каждое событие. */
+        void noteUsed(String pkg, long time) {
+            synchronized (usage) { usage.put(pkg, time); }
+        }
+
+        private static void collectLaunchable(PackageManager pm, String category, Map<String, ApplicationInfo> out) {
+            try {
+                Intent li = new Intent(Intent.ACTION_MAIN).addCategory(category);
+                for (ResolveInfo ri : pm.queryIntentActivities(li, PackageManager.MATCH_ALL)) {
+                    ActivityInfo ai = ri.activityInfo;
+                    if (ai != null && ai.applicationInfo != null && !out.containsKey(ai.packageName)) {
+                        out.put(ai.packageName, ai.applicationInfo);
+                    }
+                }
+            } catch (Exception ignored) { }
+        }
+
         private synchronized Map<String, Entry> scan() {
-            if (base != null) return base;
+            Map<String, Entry> cached = base;
+            if (cached != null) return cached;
+            final int v = version.get();
             PackageManager pm = c.getPackageManager();
-            Set<String> pkgs = new LinkedHashSet<String>();
-            Intent li = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
-            for (ResolveInfo ri : pm.queryIntentActivities(li, PackageManager.MATCH_ALL)) {
-                pkgs.add(ri.activityInfo.packageName);
+            // getLaunchIntentForPackage сам ищет LAUNCHER, затем LEANBACK_LAUNCHER — повторяем это двумя запросами,
+            // а не сотней IPC-вызовов по всем установленным пакетам
+            Map<String, ApplicationInfo> infos = new LinkedHashMap<String, ApplicationInfo>();
+            collectLaunchable(pm, Intent.CATEGORY_LAUNCHER, infos);
+            collectLaunchable(pm, Intent.CATEGORY_LEANBACK_LAUNCHER, infos);
+            String own = c.getPackageName();
+            if (!infos.containsKey(own)) {
+                try { infos.put(own, pm.getApplicationInfo(own, 0)); } catch (Exception ignored) { }
             }
-            for (ApplicationInfo ai : pm.getInstalledApplications(PackageManager.MATCH_ALL)) {
-                if (ai.enabled && pm.getLaunchIntentForPackage(ai.packageName) != null) pkgs.add(ai.packageName);
-            }
-            pkgs.add(c.getPackageName());
             Map<String, Entry> map = new LinkedHashMap<String, Entry>();
-            for (String pkg : pkgs) {
+            for (Map.Entry<String, ApplicationInfo> me : infos.entrySet()) {
                 try {
-                    ApplicationInfo ai = pm.getApplicationInfo(pkg, 0);
+                    String pkg = me.getKey();
                     PackageInfo pi = pm.getPackageInfo(pkg, 0);
-                    map.put(pkg, new Entry(pkg, String.valueOf(pm.getApplicationLabel(ai)), 0L, pi.firstInstallTime));
+                    map.put(pkg, new Entry(pkg, String.valueOf(pm.getApplicationLabel(me.getValue())), 0L, pi.firstInstallTime));
                 } catch (Exception ignored) { }
             }
-            base = map;
+            if (v == version.get()) base = map;      // если за время скана был invalidate(), результат устарел и не кэшируется
             return map;
         }
 
         List<Entry> hiddenEntries() {
-            Map<String, Entry> b = base != null ? base : scan();
+            Map<String, Entry> b = base;
+            if (b == null) b = scan();
             List<Entry> out = new ArrayList<Entry>();
             for (String pkg : store.hidden()) {
                 Entry e = b.get(pkg);
@@ -971,31 +1121,42 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
             return out;
         }
 
+        /** Годовой запрос UsageStats тяжёлый: перечитываем его раз в USAGE_TTL_MS, между запросами работает noteUsed(). */
+        private Map<String, Long> usageSnapshot(long now) {
+            synchronized (usage) {
+                if (usageLoadedAt == 0L || now < usageLoadedAt || now - usageLoadedAt > USAGE_TTL_MS) {
+                    usageLoadedAt = now;
+                    try {
+                        UsageStatsManager usm = (UsageStatsManager) c.getSystemService(Context.USAGE_STATS_SERVICE);
+                        if (usm != null) {
+                            List<UsageStats> stats = usm.queryUsageStats(UsageStatsManager.INTERVAL_YEARLY,
+                                    now - 365L * 24L * 60L * 60L * 1000L, now);
+                            if (stats != null) {
+                                for (UsageStats s : stats) {
+                                    Long old = usage.get(s.getPackageName());
+                                    long t = s.getLastTimeUsed();
+                                    if (old == null || t > old) usage.put(s.getPackageName(), t);
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) { }
+                }
+                return new HashMap<String, Long>(usage);
+            }
+        }
+
         List<Entry> load() {
-            Map<String, Entry> b = base != null ? base : scan();
+            Map<String, Entry> b = base;
+            if (b == null) b = scan();
             Set<String> hidden = store.hidden();
             long now = System.currentTimeMillis();
-            Map<String, Long> usage = new HashMap<String, Long>();
-            try {
-                UsageStatsManager usm = (UsageStatsManager) c.getSystemService(Context.USAGE_STATS_SERVICE);
-                if (usm != null) {
-                    List<UsageStats> stats = usm.queryUsageStats(UsageStatsManager.INTERVAL_YEARLY,
-                            now - 365L * 24L * 60L * 60L * 1000L, now);
-                    if (stats != null) {
-                        for (UsageStats s : stats) {
-                            Long old = usage.get(s.getPackageName());
-                            long t = s.getLastTimeUsed();
-                            if (old == null || t > old) usage.put(s.getPackageName(), t);
-                        }
-                    }
-                }
-            } catch (Throwable ignored) { }
+            Map<String, Long> used = usageSnapshot(now);
             String act = store.active();
-            if (act != null) usage.put(act, now);
+            if (act != null) used.put(act, now);
             List<Entry> out = new ArrayList<Entry>();
             for (Entry e : b.values()) {
                 if (hidden.contains(e.pkg)) continue;
-                Long u = usage.get(e.pkg);
+                Long u = used.get(e.pkg);
                 out.add(new Entry(e.pkg, e.label, u == null ? 0L : u, e.installTime));
             }
             final boolean byInstall = store.sortInstall();
