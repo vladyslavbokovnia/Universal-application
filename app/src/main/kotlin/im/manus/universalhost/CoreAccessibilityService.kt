@@ -2,9 +2,6 @@ package im.manus.universalhost
 
 import android.accessibilityservice.AccessibilityService
 import android.view.accessibility.AccessibilityEvent
-import android.os.Environment
-import android.content.Context
-import java.io.File
 
 class CoreAccessibilityService : AccessibilityService() {
 
@@ -22,42 +19,58 @@ class CoreAccessibilityService : AccessibilityService() {
 
     fun refreshPlugins() {
         // Останавливаем старые плагины перед очисткой
-        activePlugins.forEach { it.stop() }
+        activePlugins.forEach { safeStop(it) }
         activePlugins.clear()
 
-        val pluginDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "UniversalPlugins")
-        if (!pluginDir.exists()) pluginDir.mkdirs()
-        
-        val loader = PluginLoader(this)
-        val allPlugins = loader.getPluginsFromFolder(pluginDir.absolutePath)
-        
-        val prefs = getSharedPreferences("plugin_prefs", Context.MODE_PRIVATE)
-        
-        // Загружаем только активные плагины
-        allPlugins.forEach { plugin ->
-            if (prefs.getBoolean(plugin.name, true)) {
+        // Загружаем только включённые модули
+        PluginRegistry.scan(this).forEach { plugin ->
+            if (ModuleStorage.isEnabled(this, plugin.name)) {
                 try {
                     plugin.init(this)
                     activePlugins.add(plugin)
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
                     e.printStackTrace()
                 }
             }
         }
     }
 
+    /** Экран настроек сообщает работающему модулю, что значение изменилось. */
+    fun notifySettingChanged(module: String, key: String) {
+        val provider = activePlugins.firstOrNull { it.name == module } as? ISettingsProvider ?: return
+        try {
+            provider.onSettingChanged(key)
+        } catch (e: Throwable) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun safeStop(p: IPlugin) {
+        try {
+            p.stop()
+        } catch (e: Throwable) {
+            e.printStackTrace()
+        }
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        activePlugins.forEach { it.onAccessibilityEvent(event, this) }
+        activePlugins.forEach {
+            try {
+                it.onAccessibilityEvent(event, this)
+            } catch (e: Throwable) {
+                e.printStackTrace()
+            }
+        }
     }
 
     override fun onInterrupt() {
-        activePlugins.forEach { it.stop() }
+        activePlugins.forEach { safeStop(it) }
         instance = null
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        activePlugins.forEach { it.stop() }
+        activePlugins.forEach { safeStop(it) }
         instance = null
     }
 }
