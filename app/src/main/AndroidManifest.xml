@@ -29,6 +29,9 @@
             </intent-filter>
         </activity>
 
+        <activity android:name=".ModuleSettingsActivity" android:exported="false" />
+        <activity android:name=".AppImagesActivity" android:exported="false" />
+
         <service
             android:name=".CoreAccessibilityService"
             android:label="@string/accessibility_service_label"
