@@ -25,23 +25,31 @@ jobs:
     - name: Compile Modules to DEX
       shell: bash
       run: |
-        set -euo pipefail
+        set -uo pipefail
         ANDROID_JAR="$(find "$ANDROID_SDK_ROOT/platforms" -name android.jar | sort | tail -n 1)"
         D8_TOOL="$(find "$ANDROID_SDK_ROOT/build-tools" -type f -name d8 | sort | tail -n 1)"
         APP_CLASSES="app/build/tmp/kotlin-classes/debug:app/build/intermediates/javac/debug/classes"
         test -f "$ANDROID_JAR"
         test -f "$D8_TOOL"
         shopt -s nullglob
+        fail=0
         for f in modules/*.java; do
           filename="$(basename "$f" .java)"
           workdir="$(mktemp -d)"
           echo "Building module: $filename"
           mkdir -p "$workdir/classes" "$workdir/dex"
-          javac -source 8 -target 8 -d "$workdir/classes" -cp "$ANDROID_JAR:$APP_CLASSES" "$f"
-          "$D8_TOOL" --min-api 24 --output "$workdir/dex" "$workdir/classes"/*.class
+          out="$( { javac -source 8 -target 8 -d "$workdir/classes" -cp "$ANDROID_JAR:$APP_CLASSES" "$f" && "$D8_TOOL" --min-api 24 --lib "$ANDROID_JAR" --output "$workdir/dex" $(find "$workdir/classes" -name '*.class'); } 2>&1 )" || {
+            echo "$out"
+            msg="$(printf '%s' "$out" | head -c 6000 | sed -e 's/%/%25/g' -e ':a;N;$!ba;s/\n/%0A/g')"
+            echo "::error title=Module ${filename} failed::${msg}"
+            fail=1
+            rm -rf "$workdir"
+            continue
+          }
           mv "$workdir/dex/classes.dex" "output_modules/${filename}.dex"
           rm -rf "$workdir"
         done
+        test "$fail" -eq 0
         test -n "$(find output_modules -type f -name "*.dex" -print -quit)"
     - name: Upload APK
       uses: actions/upload-artifact@v4
