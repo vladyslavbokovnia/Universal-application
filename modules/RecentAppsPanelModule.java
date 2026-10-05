@@ -75,6 +75,7 @@ import java.util.concurrent.RejectedExecutionException;
  *
  * - полоса иконок сверху, вертикальный «pull» раскрывает сетку 3 колонки;
  * - раскрытая сетка открывается сразу прокрученной к последним приложениям (без видимой прокрутки);
+ * - фон панели полностью прозрачный, прозрачность задаётся для иконок;
  * - долгое нажатие на иконку открывает круговое меню (предыдущая позиция / скрыть / сортировка /
  *   вернуть скрытые / о приложении);
  * - индикатор заряда снизу и боковая ручка справа (тап — показать/скрыть панель, свайп — прокрутка).
@@ -88,8 +89,8 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
     private SharedPreferences cfg;
     private int iconDp = 128;
     private int columns = 3;
-    private int fadeAlpha = 128;
-    private int bgAlpha = 160;
+    private int fadeAlpha = 128;     // прозрачность нижнего края иконки (0 — нет, 255 — полная)
+    private int iconAlpha = 0;       // прозрачность всех иконок (0 — непрозрачные, 255 — невидимые)
     private long menuTimeoutMs = 6000L;
     private boolean pullEnabled = true;
     private boolean edgeEnabled = true;
@@ -128,7 +129,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
     // ---------------------------------------------------------------- IPlugin
 
     @Override public String getName() { return "RecentAppsPanel"; }
-    @Override public int getVersion() { return 3; }
+    @Override public int getVersion() { return 4; }
     @Override public String getDescription() {
         return "Панель недавних приложений: круговое меню, скрытие, раскрытие сеткой";
     }
@@ -227,7 +228,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         iconDp = clamp(cfg.getInt("icon_dp", 128), 64, 192);
         columns = clamp(cfg.getInt("columns", 3), 2, 5);
         fadeAlpha = clamp(cfg.getInt("fade_alpha", 128), 0, 255);
-        bgAlpha = clamp(cfg.getInt("bg_alpha", 160), 0, 255);
+        iconAlpha = clamp(cfg.getInt("icon_alpha", 0), 0, 255);
         menuTimeoutMs = clamp(cfg.getInt("menu_timeout", 6), 2, 15) * 1000L;
         pullEnabled = cfg.getBoolean("pull_enabled", true);
         edgeEnabled = cfg.getBoolean("edge_handle", true);
@@ -240,8 +241,8 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         l.add(SettingItem.section("Вид панели"));
         l.add(SettingItem.slider("icon_dp", "Ширина иконки", "dp", 64, 192, 8, 128));
         l.add(SettingItem.slider("columns", "Колонок в раскрытой панели", "", 2, 5, 1, 3));
-        l.add(SettingItem.slider("fade_alpha", "Затемнение нижнего края иконок", "", 0, 255, 5, 128));
-        l.add(SettingItem.slider("bg_alpha", "Фон раскрытой панели", "", 0, 255, 5, 160));
+        l.add(SettingItem.slider("fade_alpha", "Прозрачность нижнего края иконок", "", 0, 255, 5, 128));
+        l.add(SettingItem.slider("icon_alpha", "Прозрачность всех иконок", "", 0, 255, 5, 0));
         l.add(SettingItem.section("Поведение"));
         l.add(SettingItem.toggle("pull_enabled", "Раскрытие свайпом вниз", "Список приложений сеткой", true));
         l.add(SettingItem.toggle("edge_handle", "Боковая ручка", "Тап показывает или скрывает панель, свайп прокручивает", true));
@@ -362,6 +363,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         vScroll.setBackgroundColor(Color.TRANSPARENT);
         vItems = new LinearLayout(ctx);
         vItems.setOrientation(LinearLayout.VERTICAL);
+        vItems.setBackgroundColor(Color.TRANSPARENT);   // фон раскрытой панели всегда полностью прозрачный
         vScroll.addView(vItems, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         vScroll.setVisibility(View.GONE);
@@ -479,7 +481,6 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
             }
             vItems.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, rowH));
         }
-        vItems.setBackgroundColor(Color.argb(bgAlpha, 0, 0, 0));
         int maxRows = Math.max(1, (ctx.getResources().getDisplayMetrics().heightPixels / 2) / rowH);
         snapTarget = Math.min(rows, maxRows) * rowH;
         pendingSnap = true;
@@ -525,7 +526,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
                 icon = d;
             } catch (Throwable ignored) { }
         }
-        final AlphaIconView v = new AlphaIconView(ctx, icon, fade, cb != null);
+        final AlphaIconView v = new AlphaIconView(ctx, icon, fade, iconAlpha, cb != null);
         v.setContentDescription(entry.label);
         v.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { launch(entry); }
@@ -1188,17 +1189,19 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
 
     private static final class AlphaIconView extends View {
         private final Drawable icon;
-        private final int fade;
+        private final int fade;          // прозрачность нижнего края
+        private final int opacity;       // непрозрачность иконки целиком: 255 - «прозрачность всех иконок»
         private final boolean custom;
         private final Paint mask = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path path = new Path();
         private final RectF rect = new RectF();
         private final float radius;
 
-        AlphaIconView(Context c, Drawable icon, int fade, boolean custom) {
+        AlphaIconView(Context c, Drawable icon, int fade, int iconAlpha, boolean custom) {
             super(c);
             this.icon = icon;
             this.fade = fade;
+            this.opacity = 255 - Math.max(0, Math.min(255, iconAlpha));
             this.custom = custom;
             this.radius = 12f * c.getResources().getDisplayMetrics().density;
             mask.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_IN));
@@ -1223,23 +1226,25 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
                 float dw = iw * scale, dh = ih * scale;
                 float left = (w - dw) / 2f, top = (h - dh) / 2f;
                 icon.setBounds((int) left, (int) top, (int) (left + dw), (int) (top + dh));
-                icon.setAlpha(255);
+                icon.setAlpha(255);      // общая прозрачность применяется слоем в onDraw
             }
         }
 
         @Override protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
-            if (icon == null) return;
-            if (fade == 0) {
+            if (icon == null || opacity <= 0) return;
+            if (fade == 0 && opacity == 255) {
                 int sc = canvas.save();
                 canvas.clipPath(path);
                 icon.draw(canvas);
                 canvas.restoreToCount(sc);
             } else {
-                int sc = canvas.saveLayer(0f, 0f, getWidth(), getHeight(), null);
+                // слой рисуется целиком и только потом блендится с нужной прозрачностью,
+                // поэтому слои адаптивной иконки не просвечивают друг через друга
+                int sc = canvas.saveLayerAlpha(0f, 0f, getWidth(), getHeight(), opacity);
                 canvas.clipPath(path);
                 icon.draw(canvas);
-                canvas.drawRect(rect, mask);
+                if (fade > 0) canvas.drawRect(rect, mask);
                 canvas.restoreToCount(sc);
             }
         }
