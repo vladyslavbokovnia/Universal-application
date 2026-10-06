@@ -63,9 +63,12 @@ class CoreAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * Система вызывает это, когда другая служба (например TalkBack) прерывает озвучку.
+     * Модули при этом останавливать нельзя: вместе с ними пропадали панели, датчики и таймеры,
+     * а перезапустить их было некому.
+     */
     override fun onInterrupt() {
-        activePlugins.forEach { safeStop(it) }
-        instance = null
     }
 
     override fun onDestroy() {
