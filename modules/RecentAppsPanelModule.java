@@ -245,7 +245,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         l.add(SettingItem.slider("icon_alpha", "Прозрачность всех иконок", "", 0, 255, 5, 0));
         l.add(SettingItem.section("Поведение"));
         l.add(SettingItem.toggle("pull_enabled", "Раскрытие свайпом вниз", "Список приложений сеткой", true));
-        l.add(SettingItem.toggle("edge_handle", "Боковая ручка", "Тап показывает или скрывает панель, свайп прокручивает", true));
+        l.add(SettingItem.toggle("edge_handle", "Боковая ручка", "Тап показывает или скрывает панель, свайп прокручивает, долгое нажатие раскрывает", true));
         l.add(SettingItem.toggle("battery_bar", "Полоса заряда", "Тонкая полоса внизу экрана", true));
         l.add(SettingItem.slider("menu_timeout", "Автозакрытие меню, сек", "", 2, 15, 1, 6));
         l.add(SettingItem.choice("sort_mode", "Сортировка", "", Arrays.asList("По использованию", "По времени установки"), 0));
@@ -752,6 +752,17 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         handle.setBackgroundColor(Color.TRANSPARENT);
         final GestureDetector detector = new GestureDetector(ctx, new GestureDetector.SimpleOnGestureListener() {
             @Override public boolean onDown(MotionEvent e) { return true; }
+            @Override public void onLongPress(MotionEvent e) {
+                // Долгое нажатие на край раскрывает панель, даже если она была скрыта.
+                if (!active || panel == null) return;
+                if (!panelShown) {
+                    panelShown = true;
+                    panel.setVisibility(View.VISIBLE);
+                    setPanelWindow(stripH, false);
+                    refresh(true);
+                }
+                toggleExpand(true);
+            }
             @Override public boolean onSingleTapUp(MotionEvent e) { toggleVisibility(); return true; }
             @Override public boolean onScroll(MotionEvent first, MotionEvent cur, float dx, float dy) {
                 if (!panelShown) return true;
