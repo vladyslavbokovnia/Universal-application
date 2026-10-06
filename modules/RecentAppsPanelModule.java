@@ -78,7 +78,9 @@ import java.util.concurrent.RejectedExecutionException;
  * - фон панели полностью прозрачный, прозрачность задаётся для иконок;
  * - долгое нажатие на иконку открывает круговое меню (предыдущая позиция / скрыть / сортировка /
  *   вернуть скрытые / о приложении);
- * - индикатор заряда снизу и боковая ручка справа (тап — показать/скрыть панель, свайп — прокрутка).
+ * - индикатор заряда снизу и боковая ручка справа: тап — показать/скрыть панель, долгое нажатие —
+ *   раскрыть сетку (если узкая полоса была скрыта, после сворачивания она снова скрывается),
+ *   свайп — прокрутка.
  */
 public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
 
@@ -116,6 +118,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
     private int stripH;
     private boolean expanded;
     private boolean panelShown = true;
+    private boolean restoreHidden;      // сетку раскрыли из скрытого состояния: после сворачивания полоса снова скрывается
     private boolean pendingSnap;
     private int snapTarget;
     private List<Entry> entries = new ArrayList<Entry>();
@@ -129,7 +132,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
     // ---------------------------------------------------------------- IPlugin
 
     @Override public String getName() { return "RecentAppsPanel"; }
-    @Override public int getVersion() { return 4; }
+    @Override public int getVersion() { return 5; }
     @Override public String getDescription() {
         return "Панель недавних приложений: круговое меню, скрытие, раскрытие сеткой";
     }
@@ -150,6 +153,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         customCache = new LruCache<String, Bitmap>(64);
         expanded = false;
         panelShown = true;
+        restoreHidden = false;
         renderedKey = "";
         active = true;
         try {
@@ -182,6 +186,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         battery = null; edgeHandle = null;
         entries = new ArrayList<Entry>();
         pendingSnap = false;
+        restoreHidden = false;
     }
 
     @Override
@@ -343,7 +348,10 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
             @Override public boolean isExpanded() { return expanded; }
             @Override public boolean listAtBottom() { return vScroll == null || !vScroll.canScrollVertically(1); }
             @Override public boolean pullEnabled() { return pullEnabled; }
-            @Override public void onPull(boolean expand) { toggleExpand(expand); }
+            @Override public void onPull(boolean expand) {
+                if (expand) restoreHidden = false;      // тянули за видимую полосу — вернёмся к ней
+                toggleExpand(expand);
+            }
         });
         panel.setBackgroundColor(Color.TRANSPARENT);
 
@@ -509,6 +517,29 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         expanded = expand;
         renderedKey = "";
         applyList(entries, true);
+        if (!expand && restoreHidden) {
+            // узкой полосы до раскрытия не было — возвращаем скрытый режим
+            restoreHidden = false;
+            panelShown = false;
+            if (panel != null) panel.setVisibility(View.GONE);
+            setPanelWindow(stripH, false);      // добавит FLAG_NOT_TOUCHABLE
+        }
+    }
+
+    /** Долгое нажатие на боковую ручку: раскрыть сетку из любого состояния или свернуть её. */
+    private void longPressExpand() {
+        if (!active || panel == null) return;
+        if (expanded) { toggleExpand(false); return; }
+        if (!panelShown) {
+            panelShown = true;
+            restoreHidden = true;               // после сворачивания полоса снова скроется
+            panel.setVisibility(View.VISIBLE);
+            setPanelWindow(stripH, false);      // снимет FLAG_NOT_TOUCHABLE
+            refresh(true);
+        } else {
+            restoreHidden = false;              // полоса была видна — вернёмся к ней
+        }
+        toggleExpand(true);
     }
 
     private View createAppView(final Entry entry, int fade) {
@@ -752,17 +783,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         handle.setBackgroundColor(Color.TRANSPARENT);
         final GestureDetector detector = new GestureDetector(ctx, new GestureDetector.SimpleOnGestureListener() {
             @Override public boolean onDown(MotionEvent e) { return true; }
-            @Override public void onLongPress(MotionEvent e) {
-                // Долгое нажатие на край раскрывает панель, даже если она была скрыта.
-                if (!active || panel == null) return;
-                if (!panelShown) {
-                    panelShown = true;
-                    panel.setVisibility(View.VISIBLE);
-                    setPanelWindow(stripH, false);
-                    refresh(true);
-                }
-                toggleExpand(true);
-            }
+            @Override public void onLongPress(MotionEvent e) { longPressExpand(); }
             @Override public boolean onSingleTapUp(MotionEvent e) { toggleVisibility(); return true; }
             @Override public boolean onScroll(MotionEvent first, MotionEvent cur, float dx, float dy) {
                 if (!panelShown) return true;
@@ -784,7 +805,9 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
 
     private void toggleVisibility() {
         if (panel == null) return;
+        if (expanded) { toggleExpand(false); return; }     // тап по ручке при раскрытой сетке сворачивает её
         panelShown = !panelShown;
+        restoreHidden = false;
         dismissOverlay();
         panel.setVisibility(panelShown ? View.VISIBLE : View.GONE);
         if (panelShown) {
