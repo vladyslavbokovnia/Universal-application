@@ -16,6 +16,7 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.net.ConnectivityManager;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.speech.tts.TextToSpeech;
@@ -29,6 +30,7 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 import im.manus.universalhost.IPlugin;
 import im.manus.universalhost.ISettingsProvider;
 import im.manus.universalhost.SettingItem;
@@ -38,26 +40,35 @@ import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * AnTTS как DEX-модуль (порт github.com/vladyslavbokovnia/AnTTS, MIT).
  *
- * - полоса сверху: чёрный фон, тонкая белая цифра месячного мобильного трафика (ГБ), полоса прогресса;
+ * - полоса: чёрный фон, тонкая белая цифра месячного мобильного трафика (ГБ), полоса прогресса;
  *   тап — старт/пауза, горизонтальный свайп — к соседнему блоку текста;
- * - озвучка основного содержимого страницы блок за блоком, с прокруткой (плавной или по страницам);
- * - озвучка поля ввода: предложение у курсора (после голосового ввода или по тапу на полосу);
- * - учёт мобильного трафика за период с выбранного дня месяца (нужен доступ к статистике использования).
+ * - озвучка страницы блок за блоком; блоки идут в порядке дерева приложения (как у TalkBack),
+ *   а не по координатам; режим «весь текст экрана» читает всё, что видно;
+ * - во время чтения страница постоянно и медленно прокручивается (скорость в настройках);
+ * - озвучка поля ввода: предложение у курсора;
+ * - учёт мобильного трафика за период с выбранного дня месяца (нужен доступ к статистике использования);
+ * - если чтение не стартует, тост объясняет причину (движок речи, пустое окно, сколько узлов отсеяно).
  */
 public class AnTTSModule implements IPlugin, ISettingsProvider {
 
     private static final String PREFS = "module_AnTTS";            // настройки, которые пишет хост
     private static final long REFRESH_DEBOUNCE_MS = 200L;
     private static final long TRAFFIC_REFRESH_MS = 2000L;
+    private static final long CHUNK_MS = 1000L;                     // длина одного отрезка непрерывного жеста
     private static final int MAX_INVISIBLE_RETRIES = 20;
+    private static final int SCROLL_SMOOTH = 0;
+    private static final int SCROLL_PAGES = 1;
+    private static final int SCROLL_NONE = 2;
 
     // значения по умолчанию совпадают со схемой настроек ниже
     private SharedPreferences cfg;
@@ -65,8 +76,12 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
     private int backgroundAlpha = 82;
     private int progressAlpha = 90;
     private int trafficStartDay = 1;
-    private boolean smoothScroll = true;
     private boolean speakInput = true;
+    private boolean extractAll;
+    private boolean orderByTree = true;
+    private int scrollMode = SCROLL_SMOOTH;
+    private int scrollSpeedDp = 40;
+    private boolean barBottom;
 
     private AccessibilityService svc;
     private Handler main;
@@ -76,6 +91,7 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
     private volatile boolean active;
 
     private final List<Block> blocks = new ArrayList<Block>();
+    private final Set<String> spoken = new HashSet<String>();
     private int current;
     private boolean reading;
     private boolean speakingInput;
@@ -88,10 +104,24 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
     private long speechGeneration;
     private int invisibleRetries;
 
+    // непрерывная прокрутка
+    private boolean scrollWanted;
+    private boolean scrollRunning;
+    private int scrollIdle;
+    private String scrollSnapshotBefore = "";
+    private float chainX;
+    private float chainMinY;
+
+    // диагностика
+    private Stats lastStats;
+    private boolean lastRootNull;
+    private String lastRootPkg = "";
+    private String lastError;
+
     // ---------------------------------------------------------------- IPlugin
 
     @Override public String getName() { return "AnTTS"; }
-    @Override public int getVersion() { return 1; }
+    @Override public int getVersion() { return 2; }
     @Override public String getDescription() {
         return "Озвучка страницы и поля ввода, полоса прогресса, учёт мобильного трафика";
     }
@@ -106,6 +136,7 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
         cfg = svc.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         loadConfig();
         blocks.clear();
+        spoken.clear();
         current = 0;
         reading = false;
         speakingInput = false;
@@ -113,14 +144,15 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
         pendingInputNode = null;
         lastRecordedCursor = -1;
         invisibleRetries = 0;
+        scrollWanted = false;
+        scrollRunning = false;
         active = true;
         try {
-            tts = new TextToSpeech(svc, new TextToSpeech.OnInitListener() {
-                @Override public void onInit(int status) { onTtsInit(status); }
-            });
+            createTts();
             bar = new Bar();
             bar.show();
             refreshBlocks();
+            main.postDelayed(raiseTask, 2000L);     // другие модули добавляют окна позже и могут оказаться поверх полосы
         } catch (Throwable t) {
             stop();
         }
@@ -129,6 +161,8 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
     @Override
     public void stop() {
         active = false;
+        scrollWanted = false;
+        scrollRunning = false;
         if (main != null) main.removeCallbacksAndMessages(null);
         reading = false;
         speakingInput = false;
@@ -190,6 +224,7 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
             lastRecordedCursor = -1;
             if (reading) {
                 reading = false;
+                stopAutoScroll();
                 if (tts != null) tts.stop();
                 if (bar != null) bar.setPlaying(false);
             }
@@ -210,6 +245,10 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
         @Override public void run() { if (active) refreshBlocks(); }
     };
 
+    private final Runnable raiseTask = new Runnable() {
+        @Override public void run() { if (active && bar != null) bar.raise(); }
+    };
+
     // ---------------------------------------------------------------- настройки (экран в хосте)
 
     private static int clamp(int v, int lo, int hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -219,19 +258,30 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
         backgroundAlpha = clamp(cfg.getInt("background_alpha", 82), 0, 100);
         progressAlpha = clamp(cfg.getInt("progress_alpha", 90), 10, 100);
         trafficStartDay = clamp(cfg.getInt("traffic_start_day", 1), 1, 31);
-        smoothScroll = cfg.getInt("scroll_mode", 0) == 0;
         speakInput = cfg.getBoolean("speak_input", true);
+        extractAll = cfg.getInt("extract_mode", 0) == 1;
+        orderByTree = cfg.getInt("order_mode", 0) == 0;
+        scrollMode = clamp(cfg.getInt("scroll_mode", 0), 0, 2);
+        scrollSpeedDp = clamp(cfg.getInt("scroll_speed", 40), 10, 200);
+        barBottom = cfg.getInt("bar_position", 0) == 1;
     }
 
     @Override
     public List<SettingItem> getSettingsSchema() {
         List<SettingItem> l = new ArrayList<SettingItem>();
         l.add(SettingItem.section("Полоса"));
+        l.add(SettingItem.choice("bar_position", "Положение полосы", "", Arrays.asList("Сверху", "Снизу"), 0));
         l.add(SettingItem.slider("bar_height_dp", "Высота полосы", "dp", 16, 64, 2, 28));
         l.add(SettingItem.slider("background_alpha", "Непрозрачность фона", "%", 0, 100, 5, 82));
         l.add(SettingItem.slider("progress_alpha", "Непрозрачность полосы прогресса", "%", 10, 100, 5, 90));
         l.add(SettingItem.section("Чтение"));
-        l.add(SettingItem.choice("scroll_mode", "Прокрутка", "", Arrays.asList("Плавная", "По страницам"), 0));
+        l.add(SettingItem.choice("extract_mode", "Какой текст читать", "",
+                Arrays.asList("Основной текст страницы", "Весь текст экрана (как TalkBack)"), 0));
+        l.add(SettingItem.choice("order_mode", "Порядок блоков", "",
+                Arrays.asList("По дереву приложения (как TalkBack)", "По положению на экране"), 0));
+        l.add(SettingItem.choice("scroll_mode", "Прокрутка", "",
+                Arrays.asList("Постоянная медленная", "По страницам", "Без прокрутки"), 0));
+        l.add(SettingItem.slider("scroll_speed", "Скорость прокрутки", "dp/с", 10, 200, 5, 40));
         l.add(SettingItem.toggle("speak_input", "Озвучивать поле ввода",
                 "Читает предложение у курсора (по тапу на полосу, когда выбрано поле ввода)", true));
         l.add(SettingItem.section("Мобильный трафик"));
@@ -270,8 +320,42 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
 
     // ---------------------------------------------------------------- речь
 
+    private void toast(final String text) {
+        if (main == null || svc == null) return;
+        final Context c = svc;
+        main.post(new Runnable() {
+            @Override public void run() {
+                try { Toast.makeText(c, text, Toast.LENGTH_LONG).show(); } catch (Throwable ignored) { }
+            }
+        });
+    }
+
+    private void createTts() {
+        ttsReady = false;
+        try {
+            tts = new TextToSpeech(svc, new TextToSpeech.OnInitListener() {
+                @Override public void onInit(int status) { onTtsInit(status); }
+            });
+        } catch (Throwable t) {
+            tts = null;
+            toast("AnTTS: не удалось создать движок речи: " + t);
+        }
+    }
+
+    private void restartTts() {
+        if (tts != null) {
+            try { tts.shutdown(); } catch (Throwable ignored) { }
+            tts = null;
+        }
+        createTts();
+    }
+
     private void onTtsInit(int status) {
-        if (status != TextToSpeech.SUCCESS || tts == null || !active) return;
+        if (!active || tts == null) return;
+        if (status != TextToSpeech.SUCCESS) {
+            toast("AnTTS: движок речи не запустился (код " + status + ")");
+            return;
+        }
         ttsReady = true;
         tts.setLanguage(Locale.getDefault());
         tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
@@ -284,6 +368,7 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
                         if (active && utteranceId != null && utteranceId.equals(activeUtteranceId)) {
                             speakingInput = false;
                             reading = false;
+                            stopAutoScroll();
                             if (bar != null) bar.setPlaying(false);
                         }
                     }
@@ -362,13 +447,18 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
         List<SentenceSpan> sentences = InputSentenceParser.parse(cs == null ? "" : cs.toString());
         if (sentences.isEmpty() || tts == null) return;
         inputSentenceIndex = clamp(index, 0, sentences.size() - 1);
-        String spoken = sentences.get(inputSentenceIndex).text;
-        if (spoken.trim().isEmpty()) return;
+        String text = sentences.get(inputSentenceIndex).text;
+        if (text.trim().isEmpty()) return;
 
         speakingInput = true;
         if (bar != null) bar.setPlaying(true);
         activeUtteranceId = "antts-input-" + inputRevision + "-" + System.nanoTime();
-        tts.speak(spoken, TextToSpeech.QUEUE_FLUSH, null, activeUtteranceId);
+        int rc = tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, activeUtteranceId);
+        if (rc != TextToSpeech.SUCCESS) {
+            speakingInput = false;
+            if (bar != null) bar.setPlaying(false);
+            toast("AnTTS: движок речи отказался читать (код " + rc + ")");
+        }
     }
 
     // ---------------------------------------------------------------- чтение страницы
@@ -385,55 +475,101 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
         return id > 0 ? clamp(svc.getResources().getDimensionPixelSize(id), 0, 160) : dp(48);
     }
 
+    private int topEdge() {
+        return barBottom ? statusBarHeight() : Math.max(statusBarHeight(), dp(barHeightDp));
+    }
+
     private ScreenMetrics screenMetrics() {
         android.util.DisplayMetrics dm = svc.getResources().getDisplayMetrics();
-        int top = Math.max(statusBarHeight(), dp(barHeightDp));
-        int bottom = dm.heightPixels - navigationBarHeight();
+        int top = topEdge();
+        int bottom = barBottom
+                ? dm.heightPixels - Math.max(navigationBarHeight(), dp(barHeightDp))
+                : dm.heightPixels - navigationBarHeight();
         return new ScreenMetrics(dm.widthPixels, dm.heightPixels, dm.density, top, bottom);
+    }
+
+    private int indexOfBlock(Block b) {
+        for (int i = 0; i < blocks.size(); i++) if (blocks.get(i).node.equals(b.node)) return i;
+        for (int i = 0; i < blocks.size(); i++) if (blocks.get(i).text.equals(b.text)) return i;
+        return -1;
     }
 
     private void refreshBlocks() {
         if (svc == null) return;
         AccessibilityNodeInfo root = svc.getRootInActiveWindow();
+        lastRootNull = root == null;
         if (root == null) return;
+        CharSequence pkg = root.getPackageName();
+        lastRootPkg = pkg == null ? "?" : pkg.toString();
+
+        Stats st = new Stats();
         List<Block> fresh;
         try {
-            fresh = Extractor.extract(root, screenMetrics());
-        } catch (Exception e) {
+            fresh = Extractor.extract(root, screenMetrics(), extractAll, orderByTree, st);
+        } catch (Throwable e) {
+            lastError = e.toString();
+            return;
+        }
+        lastError = null;
+        lastStats = st;
+        if (fresh.isEmpty()) {
+            if (!reading) { blocks.clear(); lastSnapshot = ""; }     // не читаем устаревшие узлы прошлой страницы
             return;
         }
         StringBuilder sb = new StringBuilder();
         for (Block b : fresh) {
-            CharSequence id = b.node.getViewIdResourceName();
             sb.append(b.text).append('|').append(b.rect.top).append('|').append(b.rect.bottom)
-                    .append('|').append(id).append('\u0000');
+                    .append('|').append(b.node.getViewIdResourceName()).append('\u0000');
         }
         String snapshot = sb.toString();
-        if (!fresh.isEmpty() && !snapshot.equals(lastSnapshot)) {
+        if (!snapshot.equals(lastSnapshot)) {
+            Block old = (current >= 0 && current < blocks.size()) ? blocks.get(current) : null;
             blocks.clear();
             blocks.addAll(fresh);
             lastSnapshot = snapshot;
-            current = clamp(current, 0, blocks.size() - 1);
+            int idx = (reading && old != null) ? indexOfBlock(old) : -1;     // озвучиваемый блок остаётся «текущим»
+            current = idx >= 0 ? idx : clamp(current, 0, blocks.size() - 1);
             if (bar != null) bar.setProgress(current, blocks.size());
         }
+    }
+
+    private String diagText() {
+        if (lastRootNull) return "AnTTS: нет доступа к содержимому окна (корневой узел пуст)";
+        if (lastError != null) return "AnTTS: ошибка разбора окна: " + lastError;
+        Stats s = lastStats;
+        if (s == null) return "AnTTS: окно ещё не разобрано, попробуйте ещё раз";
+        return "AnTTS: текст не найден. Окно " + lastRootPkg + ": узлов " + s.visited
+                + ", с текстом " + s.withText + ", пропущено панелями " + s.panel
+                + ", кнопками " + s.control + ", невидимых " + s.invisible
+                + ", вне экрана " + s.offscreen;
     }
 
     private void startOrPause() {
         if (reading || speakingInput) {
             reading = false;
             speakingInput = false;
+            stopAutoScroll();
             if (tts != null) tts.stop();
             if (bar != null) bar.setPlaying(false);
             return;
         }
+        if (!ttsReady) {
+            toast("AnTTS: движок речи не готов, запускаю заново. Нажмите ещё раз через пару секунд");
+            restartTts();
+            return;
+        }
         if (speakPendingInput()) return;
         refreshBlocks();
-        if (blocks.isEmpty() || !ttsReady) return;
+        if (blocks.isEmpty()) { toast(diagText()); return; }
+        toast("AnTTS: блоков " + blocks.size());        // временная диагностика
         current = 0;
+        spoken.clear();
         reading = true;
         invisibleRetries = 0;
+        scrollIdle = 0;
         if (bar != null) bar.setPlaying(true);
         speakCurrent();
+        if (scrollMode == SCROLL_SMOOTH) startAutoScroll();
     }
 
     private void speakCurrent() {
@@ -446,7 +582,7 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
                 if (current + 1 < blocks.size()) { current++; speakCurrent(); } else finishReading();
                 return;
             }
-            bringIntoView(block.node);
+            if (scrollMode == SCROLL_PAGES) bringIntoView(block.node);
             final long generation = speechGeneration;
             main.postDelayed(new Runnable() {
                 @Override public void run() {
@@ -458,79 +594,201 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
         invisibleRetries = 0;
         block.node.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS);
         activeUtteranceId = "antts-block-" + current + "-" + (speechGeneration++) + "-" + System.nanoTime();
-        tts.speak(block.text, TextToSpeech.QUEUE_FLUSH, null, activeUtteranceId);
+        int rc = tts.speak(block.text, TextToSpeech.QUEUE_FLUSH, null, activeUtteranceId);
+        if (rc != TextToSpeech.SUCCESS) {
+            toast("AnTTS: движок речи отказался читать (код " + rc + ")");
+            finishReading();
+            return;
+        }
+        spoken.add(block.text);
         if (bar != null) bar.setProgress(current, blocks.size());
     }
 
     private void advanceAfterSpeech() {
         if (!reading) return;
+        if (scrollMode == SCROLL_SMOOTH) { advanceSmooth(0); return; }
         if (current + 1 < blocks.size()) {
-            Block next = blocks.get(current + 1);
-            if (smoothScroll && nearBottom(next.node)) {
-                final long generation = speechGeneration;
-                final String nextText = next.text;
-                smoothScrollBy(next.node, new Runnable() {
-                    @Override public void run() {
-                        if (active && reading && speechGeneration == generation) {
-                            refreshBlocks();
-                            int matched = -1;
-                            for (int i = 0; i < blocks.size(); i++) {
-                                if (blocks.get(i).text.equals(nextText)) { matched = i; break; }
-                            }
-                            current = matched >= 0 ? matched : Math.min(current + 1, blocks.size() - 1);
-                            speakCurrent();
-                        }
-                    }
-                });
-            } else {
-                current++;
-                speakCurrent();
-            }
-        } else {
+            current++;
+            speakCurrent();
+        } else if (scrollMode == SCROLL_PAGES) {
             scrollAndLoadNextPage();
+        } else {
+            finishReading();
         }
     }
 
-    private boolean nearBottom(AccessibilityNodeInfo node) {
-        Rect rect = new Rect();
-        node.getBoundsInScreen(rect);
-        return rect.bottom > svc.getResources().getDisplayMetrics().heightPixels - navigationBarHeight() - dp(72);
-    }
-
-    private AccessibilityNodeInfo scrollParent(AccessibilityNodeInfo node) {
-        AccessibilityNodeInfo parent = node.getParent();
-        while (parent != null) {
-            if (parent.isScrollable()) return parent;
-            parent = parent.getParent();
+    /** Постоянная прокрутка: после блока заново читаем экран и берём следующий за только что озвученным. */
+    private void advanceSmooth(final int attempt) {
+        if (!active || !reading) return;
+        Block done = (current >= 0 && current < blocks.size()) ? blocks.get(current) : null;
+        refreshBlocks();
+        int next = nextIndexAfter(done);
+        if (next >= 0) {
+            current = next;
+            speakCurrent();
+            return;
         }
-        return null;
+        // следующего блока пока нет на экране — ждём, пока прокрутка принесёт новый текст
+        if ((scrollRunning || scrollWanted) && attempt < 40) {
+            main.postDelayed(new Runnable() {
+                @Override public void run() { advanceSmooth(attempt + 1); }
+            }, 400L);
+            return;
+        }
+        finishReading();
     }
 
-    /** Плавная прокрутка: медленно тянет прокручиваемый контейнер вместо прыжка на страницу. */
-    private void smoothScrollBy(AccessibilityNodeInfo node, final Runnable onDone) {
-        AccessibilityNodeInfo target = scrollParent(node);
-        if (target == null) { onDone.run(); return; }
-        Rect rect = new Rect();
-        target.getBoundsInScreen(rect);
-        if (rect.height() < 100) { onDone.run(); return; }
-        float x = (rect.left + rect.right) / 2f;
-        float startY = rect.bottom - rect.height() * 0.1f;
-        float endY = rect.top + rect.height() * 0.1f;
+    private int nextIndexAfter(Block done) {
+        int idx = done == null ? -1 : indexOfBlock(done);
+        if (idx >= 0) return idx + 1 < blocks.size() ? idx + 1 : -1;
+        // озвученный блок уже уехал за край экрана: берём первый ещё не читанный
+        for (int i = 0; i < blocks.size(); i++) {
+            if (!spoken.contains(blocks.get(i).text)) return i;
+        }
+        return -1;
+    }
+
+    // ---------------------------------------------------------------- непрерывная прокрутка
+
+    private void startAutoScroll() {
+        scrollWanted = true;
+        scrollIdle = 0;
+        if (!scrollRunning) beginScrollChain();
+    }
+
+    private void stopAutoScroll() {
+        scrollWanted = false;       // цепочка жестов сама закончится на ближайшем отрезке (не позже секунды)
+    }
+
+    private final Runnable scrollRestart = new Runnable() {
+        @Override public void run() {
+            if (active && reading && scrollWanted && !scrollRunning) beginScrollChain();
+        }
+    };
+
+    private void scheduleScrollRestart(long delayMs) {
+        if (main == null || !active || !reading || !scrollWanted) return;
+        main.removeCallbacks(scrollRestart);
+        main.postDelayed(scrollRestart, delayMs);
+    }
+
+    private float chunkPx() {
+        return scrollSpeedDp * svc.getResources().getDisplayMetrics().density * (CHUNK_MS / 1000f);
+    }
+
+    /** Прокрутка не должна уносить озвучиваемый блок за верхний край, пока он читается. */
+    private boolean scrollAllowed() {
+        if (blocks.isEmpty() || current < 0 || current >= blocks.size()) return true;
+        AccessibilityNodeInfo n = blocks.get(current).node;
+        try {
+            if (!n.refresh()) return true;
+        } catch (Throwable t) {
+            return true;
+        }
+        Rect r = new Rect();
+        n.getBoundsInScreen(r);
+        return r.top > topEdge() + dp(16);
+    }
+
+    private void beginScrollChain() {
+        if (!active || !reading || !scrollWanted || svc == null) { scrollRunning = false; return; }
+        if (!scrollAllowed()) { scrollRunning = false; scheduleScrollRestart(300L); return; }
+        AccessibilityNodeInfo target = findScrollable(svc.getRootInActiveWindow());
+        if (target == null) { scrollRunning = false; scrollWanted = false; return; }
+        Rect r = new Rect();
+        target.getBoundsInScreen(r);
+        if (r.height() < dp(120)) { scrollRunning = false; scrollWanted = false; return; }
+        chainX = (r.left + r.right) / 2f;
+        chainMinY = r.top + r.height() * 0.15f;
+        float startY = r.bottom - r.height() * 0.15f;
+        scrollRunning = true;
+        scrollSnapshotBefore = lastSnapshot;
+        scrollChunk(null, startY);
+    }
+
+    /** Один отрезок непрерывного жеста; на API 26+ палец не отрывается между отрезками. */
+    private void scrollChunk(final GestureDescription.StrokeDescription prev, final float fromY) {
+        boolean go = active && reading && scrollWanted && scrollAllowed();
+        if (!go) {
+            if (prev != null) endStroke(prev, fromY);        // отпускаем палец
+            else { scrollRunning = false; scheduleScrollRestart(300L); }
+            return;
+        }
+        final float step = chunkPx();
+        final float toY = fromY - step;
+        final boolean cont = Build.VERSION.SDK_INT >= 26 && (toY - step) >= chainMinY;
         Path path = new Path();
-        path.moveTo(x, startY);
-        path.lineTo(x, endY);
+        path.moveTo(chainX, fromY);
+        path.lineTo(chainX, toY);
+        final GestureDescription.StrokeDescription stroke;
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                stroke = (prev == null)
+                        ? new GestureDescription.StrokeDescription(path, 0L, CHUNK_MS, cont)
+                        : prev.continueStroke(path, 0L, CHUNK_MS, cont);
+            } else {
+                stroke = new GestureDescription.StrokeDescription(path, 0L, CHUNK_MS);
+            }
+        } catch (Throwable t) {
+            scrollRunning = false;
+            scrollWanted = false;
+            toast("AnTTS: не удалось построить жест прокрутки: " + t);
+            return;
+        }
         boolean dispatched = false;
         try {
-            GestureDescription gesture = new GestureDescription.Builder()
-                    .addStroke(new GestureDescription.StrokeDescription(path, 0L, 700L))
-                    .build();
-            dispatched = svc.dispatchGesture(gesture, new AccessibilityService.GestureResultCallback() {
-                @Override public void onCompleted(GestureDescription g) { onDone.run(); }
-                @Override public void onCancelled(GestureDescription g) { onDone.run(); }
-            }, main);
+            dispatched = svc.dispatchGesture(new GestureDescription.Builder().addStroke(stroke).build(),
+                    new AccessibilityService.GestureResultCallback() {
+                        @Override public void onCompleted(GestureDescription g) {
+                            if (cont) scrollChunk(stroke, toY); else onScrollChainDone(true);
+                        }
+                        @Override public void onCancelled(GestureDescription g) {
+                            scrollRunning = false;
+                            scheduleScrollRestart(500L);
+                        }
+                    }, main);
         } catch (Throwable ignored) { }
-        if (!dispatched) onDone.run();      // нет права жестов — просто читаем дальше
+        if (!dispatched) {
+            scrollRunning = false;
+            scrollWanted = false;
+            toast("AnTTS: система не приняла жест прокрутки (нужно право жестов у службы)");
+        }
     }
+
+    private void endStroke(GestureDescription.StrokeDescription prev, float y) {
+        boolean ok = false;
+        try {
+            Path p = new Path();
+            p.moveTo(chainX, y);
+            p.lineTo(chainX, y);
+            GestureDescription.StrokeDescription end = prev.continueStroke(p, 0L, 1L, false);
+            ok = svc.dispatchGesture(new GestureDescription.Builder().addStroke(end).build(),
+                    new AccessibilityService.GestureResultCallback() {
+                        @Override public void onCompleted(GestureDescription g) { onScrollChainDone(false); }
+                        @Override public void onCancelled(GestureDescription g) {
+                            scrollRunning = false;
+                            scheduleScrollRestart(500L);
+                        }
+                    }, main);
+        } catch (Throwable ignored) { }
+        if (!ok) {
+            scrollRunning = false;
+            scheduleScrollRestart(500L);
+        }
+    }
+
+    private void onScrollChainDone(boolean travelled) {
+        scrollRunning = false;
+        if (!active || !reading) return;
+        if (travelled) {
+            refreshBlocks();
+            if (lastSnapshot.equals(scrollSnapshotBefore)) scrollIdle++; else scrollIdle = 0;
+            if (scrollIdle >= 2) { scrollWanted = false; return; }     // страница кончилась
+        }
+        scheduleScrollRestart(travelled ? 30L : 300L);
+    }
+
+    // ---------------------------------------------------------------- прокрутка по страницам
 
     private void scrollAndLoadNextPage() {
         if (!reading) return;
@@ -558,6 +816,7 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
     private void finishReading() {
         reading = false;
         activeUtteranceId = null;
+        stopAutoScroll();
         if (bar != null) bar.setPlaying(false);
     }
 
@@ -572,15 +831,20 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
                 return;
             }
         }
+        if (!ttsReady) { toast("AnTTS: движок речи не готов"); return; }
         refreshBlocks();
-        if (blocks.isEmpty()) return;
+        if (blocks.isEmpty()) { toast(diagText()); return; }
         current = clamp(current + delta, 0, blocks.size() - 1);
+        boolean started = false;
         if (!reading) {
             reading = true;
+            spoken.clear();
+            started = true;
             if (bar != null) bar.setPlaying(true);
         }
         if (tts != null) tts.stop();
         speakCurrent();
+        if (started && scrollMode == SCROLL_SMOOTH) startAutoScroll();
     }
 
     private void bringIntoView(AccessibilityNodeInfo node) {
@@ -669,6 +933,7 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
         private final FrameLayout root = new FrameLayout(svc);
         private final View progress = new View(svc);
         private final TextView traffic = new TextView(svc);
+        private WindowManager.LayoutParams lp;
         private boolean shown;
         private float downX;
         private String trafficText = "";
@@ -721,18 +986,27 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
                 }
             });
 
-            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+            lp = new WindowManager.LayoutParams(
                     -1, dp(barHeightDp), WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                             | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                             | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                     PixelFormat.TRANSLUCENT);
-            lp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+            lp.gravity = (barBottom ? Gravity.BOTTOM : Gravity.TOP) | Gravity.CENTER_HORIZONTAL;
             lp.x = 0;
             lp.y = 0;
             wm.addView(root, lp);
             shown = true;
             main.postDelayed(trafficRefresh, TRAFFIC_REFRESH_MS);
+        }
+
+        /** Переставляет окно полосы поверх остальных окон службы (добавленных после неё). */
+        void raise() {
+            if (!shown || lp == null) return;
+            try {
+                wm.removeView(root);
+                wm.addView(root, lp);
+            } catch (Throwable ignored) { }
         }
 
         void setProgress(final int index, final int total) {
@@ -742,10 +1016,10 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
                     int full = root.getWidth() > 0 ? root.getWidth()
                             : svc.getResources().getDisplayMetrics().widthPixels;
                     int width = clamp((int) (full * (index + 1f) / total), 1, full);
-                    FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) progress.getLayoutParams();
-                    if (lp.width != width) {
-                        lp.width = width;
-                        progress.setLayoutParams(lp);
+                    FrameLayout.LayoutParams plp = (FrameLayout.LayoutParams) progress.getLayoutParams();
+                    if (plp.width != width) {
+                        plp.width = width;
+                        progress.setLayoutParams(plp);
                     }
                 }
             });
@@ -764,6 +1038,18 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
     }
 
     // ---------------------------------------------------------------- модель
+
+    private static final class Stats {
+        int visited;
+        int invisible;
+        int offscreen;
+        int panel;
+        int withText;
+        int control;
+        int parentOfText;
+        int collected;
+        boolean fallback;
+    }
 
     private static final class ScreenMetrics {
         final int screenWidth;
@@ -854,11 +1140,12 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
         }
     }
 
-    /** Отбор основного текста страницы: без панелей, кнопок, реклам и полей ввода. */
+    /** Отбор текста страницы: «основной» (без панелей, кнопок, реклам, полей ввода) или весь, как у TalkBack. */
     private static final class Extractor {
         private static final int MAX_ANCESTOR_DEPTH = 4;
         private static final int MAX_DEPTH = 100;
         private static final int MAX_NODES = 8000;
+        private static final int MIN_VISIBLE_PIXELS = 15;
 
         private static final String[] TOP_PANEL = {
                 "toolbar", "actionbar", "action_bar", "appbar", "app_bar",
@@ -880,9 +1167,22 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
                 "floatingactionbutton", "ratingbar", "progressbar"};
         private static final String[] AD = {"adview", "ad_view", "banner", "advertisement"};
 
-        static List<Block> extract(AccessibilityNodeInfo root, ScreenMetrics m) {
+        static List<Block> extract(AccessibilityNodeInfo root, ScreenMetrics m, boolean all,
+                                   boolean byTree, Stats st) {
+            List<Block> out = all ? collectAllText(root, m, st) : collectMainText(root, m, st);
+            if (out.isEmpty() && !all) {                    // фильтры отсеяли всё — читаем весь видимый текст
+                out = collectAllText(root, m, st);
+                st.fallback = true;
+            }
+            if (!byTree) out = sortByRows(out, m);
+            return out;
+        }
+
+        // ---- основной текст страницы (порт AnTTS)
+
+        private static List<Block> collectMainText(AccessibilityNodeInfo root, ScreenMetrics m, Stats st) {
             List<AccessibilityNodeInfo> candidates = new ArrayList<AccessibilityNodeInfo>();
-            collect(root, candidates, m, 0, new int[]{0});
+            collect(root, candidates, m, 0, new int[]{0}, st);
 
             Map<String, Block> unique = new LinkedHashMap<String, Block>();
             for (AccessibilityNodeInfo node : candidates) {
@@ -892,9 +1192,89 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
                 String key = text + "|" + (b.rect.top / 12) + "|" + (b.rect.left / 12);
                 if (!unique.containsKey(key)) unique.put(key, b);
             }
+            return new ArrayList<Block>(unique.values());          // порядок обхода дерева сохраняется
+        }
 
-            // сверху вниз; узлы на одной «строке» (в пределах допуска) — слева направо
-            List<Block> byTop = new ArrayList<Block>(unique.values());
+        private static void collect(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> out,
+                                    ScreenMetrics m, int depth, int[] counter, Stats st) {
+            if (node == null || depth > MAX_DEPTH || ++counter[0] > MAX_NODES) return;
+            st.visited++;
+            if (!node.isVisibleToUser()) { st.invisible++; return; }
+
+            Rect rect = new Rect();
+            node.getBoundsInScreen(rect);
+            if (rect.bottom <= m.topBoundary || rect.top >= m.bottomBoundary
+                    || rect.right <= 0 || rect.left >= m.screenWidth
+                    || rect.width() <= 0 || rect.height() <= 0) {
+                st.offscreen++;
+                return;
+            }
+            if (isAuxiliaryPanel(node, rect, m)) { st.panel++; return; }
+
+            String value = str(node.getText());
+            if (!value.isEmpty()) {
+                st.withText++;
+                if (isAuxiliaryControl(node, rect, m)) st.control++;
+                else if (hasTextInChildren(node, 0)) st.parentOfText++;
+                else { out.add(node); st.collected++; }
+            }
+            for (int i = 0; i < node.getChildCount(); i++) {
+                collect(node.getChild(i), out, m, depth + 1, counter, st);
+            }
+        }
+
+        // ---- весь видимый текст, правила как в TalkBack (описание важнее текста, затем подсказка)
+
+        private static List<Block> collectAllText(AccessibilityNodeInfo root, ScreenMetrics m, Stats st) {
+            List<Block> raw = new ArrayList<Block>();
+            walkAll(root, raw, m, 0, new int[]{0}, st);
+            List<Block> res = new ArrayList<Block>();
+            String last = null;
+            for (Block b : raw) {                                  // подряд идущие повторы не нужны
+                if (!b.text.equals(last)) { res.add(b); last = b.text; }
+            }
+            return res;
+        }
+
+        private static void walkAll(AccessibilityNodeInfo node, List<Block> out, ScreenMetrics m,
+                                    int depth, int[] counter, Stats st) {
+            if (node == null || depth > MAX_DEPTH || ++counter[0] > MAX_NODES) return;
+            st.visited++;
+            if (!node.isVisibleToUser() || node.isPassword()) { st.invisible++; return; }
+
+            Rect rect = new Rect();
+            node.getBoundsInScreen(rect);
+            if (rect.bottom <= m.topBoundary || rect.top >= m.bottomBoundary
+                    || rect.right <= 0 || rect.left >= m.screenWidth) {
+                st.offscreen++;
+                return;
+            }
+            CharSequence cd = nonBlank(node.getContentDescription());
+            CharSequence spokenText = cd != null ? cd : nonBlank(node.getText());
+            if (spokenText == null && Build.VERSION.SDK_INT >= 26) spokenText = nonBlank(node.getHintText());
+            boolean collection = node.getCollectionInfo() != null;
+            if (collection) spokenText = null;                    // заголовки списков не читаем, читаем элементы
+
+            boolean descend = true;
+            if (spokenText != null && rect.width() >= MIN_VISIBLE_PIXELS && rect.height() >= MIN_VISIBLE_PIXELS) {
+                String s = spokenText.toString().trim();
+                if (hasLetterOrDigit(s)) {
+                    st.withText++;
+                    out.add(new Block(s, node));
+                    st.collected++;
+                    if (cd != null && !collection && !node.isScrollable()) descend = false;   // описание заменяет потомков
+                }
+            }
+            if (!descend) return;
+            for (int i = 0; i < node.getChildCount(); i++) {
+                walkAll(node.getChild(i), out, m, depth + 1, counter, st);
+            }
+        }
+
+        // ---- порядок «по положению на экране»: сверху вниз, на одной строке слева направо
+
+        private static List<Block> sortByRows(List<Block> in, ScreenMetrics m) {
+            List<Block> byTop = new ArrayList<Block>(in);
             Collections.sort(byTop, new Comparator<Block>() {
                 @Override public int compare(Block a, Block b) { return a.rect.top < b.rect.top ? -1 : (a.rect.top == b.rect.top ? 0 : 1); }
             });
@@ -916,10 +1296,21 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
             return result;
         }
 
+        // ---- вспомогательное
+
         private static String str(CharSequence cs) { return cs == null ? "" : cs.toString().trim(); }
+
+        private static CharSequence nonBlank(CharSequence cs) {
+            return (cs != null && cs.toString().trim().length() > 0) ? cs : null;
+        }
 
         private static boolean hasLetter(String s) {
             for (int i = 0; i < s.length(); i++) if (Character.isLetter(s.charAt(i))) return true;
+            return false;
+        }
+
+        private static boolean hasLetterOrDigit(String s) {
+            for (int i = 0; i < s.length(); i++) if (Character.isLetterOrDigit(s.charAt(i))) return true;
             return false;
         }
 
@@ -950,27 +1341,6 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
             if (n.isEditable()) return true;
             String c = classNameOf(n);
             return c.contains("edittext") || c.contains("autocompletetextview");
-        }
-
-        private static void collect(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> out,
-                                    ScreenMetrics m, int depth, int[] counter) {
-            if (node == null || depth > MAX_DEPTH || ++counter[0] > MAX_NODES) return;
-            if (!node.isVisibleToUser()) return;
-
-            Rect rect = new Rect();
-            node.getBoundsInScreen(rect);
-            if (rect.bottom <= m.topBoundary || rect.top >= m.bottomBoundary) return;
-            if (rect.right <= 0 || rect.left >= m.screenWidth) return;
-            if (rect.width() <= 0 || rect.height() <= 0) return;
-            if (isAuxiliaryPanel(node, rect, m)) return;
-
-            String value = str(node.getText());
-            if (!value.isEmpty() && !isAuxiliaryControl(node, rect, m)) {
-                if (!hasTextInChildren(node, 0)) out.add(node);
-            }
-            for (int i = 0; i < node.getChildCount(); i++) {
-                collect(node.getChild(i), out, m, depth + 1, counter);
-            }
         }
 
         private static boolean hasTextInChildren(AccessibilityNodeInfo node, int depth) {
