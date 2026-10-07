@@ -34,6 +34,7 @@ import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.provider.Settings;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
@@ -52,7 +53,7 @@ import java.util.Map;
 /**
  * Заставка ClockWallpaper как DEX-модуль (порт приложения github.com/vladyslavbokovnia/clock для электронной бумаги).
  *
- * Тех же возможности, что у ClockService/WakeActivity/ClockAccessibilityService/MusicAlarmReceiver:
+ * Те же возможности, что у ClockService/WakeActivity/ClockAccessibilityService/MusicAlarmReceiver:
  *  - точный будильник каждые 5 минут: экран включается, показывается заставка, через секунду экран гасится
  *    (DevicePolicyManager.lockNow — нужен администратор устройства хоста), картинка остаётся на e-ink;
  *  - переворот экраном вниз (пороги -8.6 / -7.0 м/с², удержание 500 мс, защита 8 с), виброотклик;
@@ -623,7 +624,7 @@ public class ClockWallpaperModule implements IPlugin, ISettingsProvider {
         View v = new View(svc);
         v.setClickable(true);
         v.setOnTouchListener(new View.OnTouchListener() {
-            @Override public boolean onTouch(View view, MotionEventHolder e) { return true; }
+            @Override public boolean onTouch(View view, MotionEvent e) { return true; }
         });
         blocker = v;
         WindowManager.LayoutParams lp = new WindowManager.LayoutParams(-1, -1,
@@ -706,7 +707,6 @@ public class ClockWallpaperModule implements IPlugin, ISettingsProvider {
             super.onAttachedToWindow();
             batteryReceiver = new BroadcastReceiver() {
                 @Override public void onReceive(Context c, Intent i) {
-                    int plug = i.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
                     hands.setBattery(i.getIntExtra("level", 100),
                             i.getIntExtra("status", 0) == BatteryManager.BATTERY_STATUS_CHARGING);
                 }
