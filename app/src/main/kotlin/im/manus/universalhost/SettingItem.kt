@@ -6,7 +6,8 @@ package im.manus.universalhost
  *
  * Значения лежат в SharedPreferences "module_<имя модуля>" под ключом [key]:
  * SWITCH — boolean, SLIDER и CHOICE — int, TEXT — String, IMAGE — путь к файлу (String),
- * APP_IMAGES — по одному пути на приложение под ключом "<key>:<пакет>".
+ * APP_IMAGES — по одному пути на приложение под ключом "<key>:<пакет>",
+ * APP_PICKER — String: пакеты выбранных приложений через запятую.
  */
 class SettingItem private constructor(
     val type: Int,
@@ -30,6 +31,7 @@ class SettingItem private constructor(
         const val APP_IMAGES = 6
         const val ACTION = 7
         const val MONITOR = 8
+        const val APP_PICKER = 9
 
         @JvmStatic
         fun section(title: String) =
@@ -62,6 +64,14 @@ class SettingItem private constructor(
         @JvmStatic
         fun action(key: String, title: String, summary: String) =
             SettingItem(ACTION, key, title, summary, 0, 0, 1, 0, "", emptyList())
+
+        /**
+         * Выбор приложений из списка установленных (с галочками). Значение — пакеты через запятую в String;
+         * [summary] показывается, пока ничего не выбрано, иначе вместо него названия выбранных приложений.
+         */
+        @JvmStatic
+        fun appPicker(key: String, title: String, summary: String, def: String) =
+            SettingItem(APP_PICKER, key, title, summary, 0, 0, 1, 0, def, emptyList())
 
         /**
          * Живой монитор: пока экран настроек открыт, хост дважды в секунду вызывает

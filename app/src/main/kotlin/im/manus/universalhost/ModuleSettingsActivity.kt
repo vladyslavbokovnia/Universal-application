@@ -257,12 +257,72 @@ class ModuleSettingsActivity : Activity() {
                         .putExtra(AppImagesActivity.EXTRA_KEY, item.key)
                 )
             })
+            SettingItem.APP_PICKER -> {
+                val cur = prefs.getString(item.key, item.defStr) ?: item.defStr
+                content.addView(clickRow(item.title, pickerSummary(cur, item.summary)) {
+                    pickApps(item, prefs)
+                })
+            }
             SettingItem.MONITOR -> content.addView(monitorRow(item))
             SettingItem.ACTION -> content.addView(clickRow(item.title, item.summary) {
                 notifyModule(item.key)
                 Toast.makeText(this, "Готово", Toast.LENGTH_SHORT).show()
             })
         }
+    }
+
+    // ------------------------------------------------------------ выбор приложений (APP_PICKER)
+
+    private fun pickerPackages(csv: String): List<String> =
+        csv.split(',', ';', ' ', '\n').map { it.trim() }.filter { it.isNotEmpty() }
+
+    /** Названия выбранных приложений; если пакет не установлен, показывается сам пакет. */
+    private fun pickerSummary(csv: String, fallback: String): String {
+        val pkgs = pickerPackages(csv)
+        if (pkgs.isEmpty()) return fallback
+        val pm = packageManager
+        return pkgs.joinToString(", ") { p ->
+            try {
+                pm.getApplicationInfo(p, 0).loadLabel(pm).toString()
+            } catch (e: Exception) {
+                p
+            }
+        }
+    }
+
+    /** Список установленных приложений с галочками; выбранные сверху. Результат — пакеты через запятую. */
+    private fun pickApps(item: SettingItem, prefs: SharedPreferences) {
+        val chosen = LinkedHashSet<String>(pickerPackages(prefs.getString(item.key, item.defStr) ?: item.defStr))
+        Thread {
+            val pm = packageManager
+            val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            val seen = HashSet<String>()
+            val apps = ArrayList<Pair<String, String>>()        // пакет, название
+            for (ri in pm.queryIntentActivities(launcher, 0)) {
+                val pkg = ri.activityInfo.packageName
+                if (seen.add(pkg)) apps.add(Pair(pkg, ri.loadLabel(pm).toString()))
+            }
+            apps.sortWith(compareBy<Pair<String, String>>({ !chosen.contains(it.first) }, { it.second.lowercase() }))
+            runOnUiThread {
+                if (isFinishing) return@runOnUiThread
+                val labels = apps.map { it.second }.toTypedArray()
+                val checked = BooleanArray(apps.size) { chosen.contains(apps[it].first) }
+                AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                    .setTitle(item.title)
+                    .setMultiChoiceItems(labels, checked) { _, which, on -> checked[which] = on }
+                    .setPositiveButton("Готово") { _, _ ->
+                        val result = ArrayList<String>()
+                        // пакеты, которых нет в списке запуска (например, введённые раньше), не теряем
+                        for (p in chosen) if (apps.none { it.first == p }) result.add(p)
+                        for (i in apps.indices) if (checked[i]) result.add(apps[i].first)
+                        prefs.edit().putString(item.key, result.joinToString(",")).apply()
+                        notifyModule(item.key)
+                        build()
+                    }
+                    .setNegativeButton("Отмена", null)
+                    .show()
+            }
+        }.start()
     }
 
     private fun sliderRow(item: SettingItem, prefs: SharedPreferences): View {

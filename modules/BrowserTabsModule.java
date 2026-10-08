@@ -39,6 +39,7 @@ import java.util.Set;
  * Панель вкладок при открытии браузера.
  *
  * Когда на экран выходит один из выбранных браузеров, модуль нажимает кнопку вкладок.
+ * Браузеры выбираются в настройках из списка установленных приложений.
  * Положение кнопки задаётся в настройках: либо нажатием пальцем («Указать кнопку вкладок»),
  * либо ползунками. Хранится долями экрана (в тысячных), у всех выбранных браузеров оно одинаковое.
  * Нажатие делает служба специальных возможностей (dispatchGesture), запасной путь: input tap через Shizuku.
@@ -50,7 +51,7 @@ import java.util.Set;
 public class BrowserTabsModule implements IPlugin, ISettingsProvider {
 
     private static final String PREFS = "module_BrowserTabs";
-    private static final String DEF_BROWSERS = "com.android.chrome,com.kiwibrowser.browser,mark.via";
+    private static final String DEF_BROWSERS = "";          // пока пользователь ничего не выбрал, модуль не срабатывает
     private static final long REFIRE_GUARD_MS = 2500;
     private static final long CALIBRATE_START_DELAY_MS = 5000;
     private static final long CALIBRATE_TIMEOUT_MS = 30000;
@@ -71,7 +72,7 @@ public class BrowserTabsModule implements IPlugin, ISettingsProvider {
     // ---------------------------------------------------------------- IPlugin
 
     @Override public String getName() { return "BrowserTabs"; }
-    @Override public int getVersion() { return 2; }
+    @Override public int getVersion() { return 3; }
     @Override public String getDescription() {
         return "Открывает панель вкладок при запуске выбранных браузеров";
     }
@@ -338,8 +339,8 @@ public class BrowserTabsModule implements IPlugin, ISettingsProvider {
     public List<SettingItem> getSettingsSchema() {
         List<SettingItem> l = new ArrayList<SettingItem>();
         l.add(SettingItem.section("Браузеры"));
-        l.add(SettingItem.text("browsers", "Пакеты браузеров",
-                "Через запятую, например com.android.chrome, mark.via", DEF_BROWSERS));
+        l.add(SettingItem.appPicker("browsers", "Браузеры",
+                "Не выбрано: нажмите и отметьте приложения из списка", DEF_BROWSERS));
         l.add(SettingItem.toggle("cold_only", "Только при холодном старте",
                 "Нужен Shizuku: срабатывает, если браузера не было в памяти. Без Shizuku срабатывает при каждом выходе браузера на экран",
                 true));
