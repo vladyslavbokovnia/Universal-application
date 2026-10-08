@@ -21,6 +21,7 @@ import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Toast;
 import im.manus.universalhost.IPlugin;
 import im.manus.universalhost.ISettingsProvider;
@@ -38,13 +39,14 @@ import java.util.Map;
  *
  *  - короткое нажатие — последняя выбранная функция; картинка кнопки показывает, какая это функция;
  *  - долгое нажатие — круговое меню значков без подписей вокруг кнопки: голосовой ввод, клавиатура,
- *    буфер обмена, переводчик (выбор — касанием значка, касание в стороне закрывает меню);
+ *    буфер обмена, переводчик, выбор клавиатуры (выбор — касанием значка, касание в стороне закрывает меню);
  *  - перетаскивание кнопки — положение запоминается.
  *
  * Как это работает: «клавиатура» скрывает/показывает любую экранную клавиатуру через
- * AccessibilityService.getSoftKeyboardController(); остальные функции нажимают соответствующий значок
- * в окне клавиатуры (по подписи значка для доступности — «Голосовой ввод», «Буфер обмена», «Перевод» и т.п.).
- * Подписи зависят от языка и версии Gboard, поэтому в настройках есть «Какие значки видит модуль».
+ * AccessibilityService.getSoftKeyboardController(); «выбор клавиатуры» открывает системное окно выбора
+ * способа ввода; остальные функции нажимают соответствующий значок в окне клавиатуры (по подписи значка
+ * для доступности — «Голосовой ввод», «Буфер обмена», «Перевод» и т.п.). Подписи зависят от языка и версии
+ * Gboard, поэтому в настройках есть «Какие значки видит модуль».
  *
  * При остановке модуля режим показа клавиатуры возвращается в «авто», чтобы клавиатура не осталась скрытой.
  */
@@ -57,14 +59,15 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
     private static final int F_KEYBOARD = 1;
     private static final int F_CLIPBOARD = 2;
     private static final int F_TRANSLATE = 3;
-    private static final int FUNCTIONS = 4;
+    private static final int F_PICKER = 4;
+    private static final int FUNCTIONS = 5;
 
     private static final long LONG_PRESS_MS = 450L;
     private static final long VISIBILITY_DEBOUNCE_MS = 200L;
     private static final int MAX_ATTEMPTS = 8;
 
     // подписи значков (в нижнем регистре, часть слова); Gboard на разных языках и в разных версиях называет их по-разному
-    private static final String[] VOICE_KEYS = {"голосов", "голос", "voice", "микрофон", "microphone", "диктов", "dictat", "голосов"};
+    private static final String[] VOICE_KEYS = {"голосов", "голос", "voice", "микрофон", "microphone", "диктов", "dictat"};
     private static final String[] CLIPBOARD_KEYS = {"буфер", "clipboard"};
     private static final String[] TRANSLATE_KEYS = {"перевод", "перевест", "перекла", "translat"};
 
@@ -90,9 +93,9 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
     // ---------------------------------------------------------------- IPlugin
 
     @Override public String getName() { return "KeyboardButton"; }
-    @Override public int getVersion() { return 1; }
+    @Override public int getVersion() { return 2; }
     @Override public String getDescription() {
-        return "Кнопка для Gboard: клавиатура, голосовой ввод, буфер обмена, переводчик";
+        return "Кнопка для Gboard: клавиатура, голосовой ввод, буфер обмена, переводчик, выбор клавиатуры";
     }
     @Override public String getIconName() { return "ic_launcher"; }
 
@@ -391,6 +394,15 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
         }
     }
 
+    /** Системное окно выбора клавиатуры (способа ввода). */
+    private void showPicker() {
+        try {
+            ((InputMethodManager) svc.getSystemService(Context.INPUT_METHOD_SERVICE)).showInputMethodPicker();
+        } catch (Throwable t) {
+            toast("KeyboardButton: не удалось открыть выбор клавиатуры: " + t);
+        }
+    }
+
     private void imeAction(final String[] keys, final String what) {
         if (imeVisible() && clickImeNode(keys)) return;
         ensureKeyboardShown();
@@ -421,6 +433,7 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
             case F_VOICE: imeAction(VOICE_KEYS, "голосовой ввод"); break;
             case F_CLIPBOARD: imeAction(CLIPBOARD_KEYS, "буфер обмена"); break;
             case F_TRANSLATE: imeAction(TRANSLATE_KEYS, "переводчик"); break;
+            case F_PICKER: showPicker(); break;
             default: toggleKeyboard(); break;
         }
     }
@@ -465,17 +478,19 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
         FloatButton(Context c) {
             super(c);
             slop = ViewConfiguration.get(c).getScaledTouchSlop();
-            line.setStyle(Paint.Style.STROKE);
-            line.setColor(Color.WHITE);
-            line.setStrokeWidth(Math.max(1.5f, sizePx * 0.025f));
             setAlpha(alphaPercent / 100f);        // вся кнопка вместе со значком полупрозрачная
         }
 
         @Override protected void onDraw(Canvas canvas) {
-            float cx = getWidth() / 2f, cy = getHeight() / 2f, r = Math.min(cx, cy) - line.getStrokeWidth();
+            float cx = getWidth() / 2f, cy = getHeight() / 2f;
+            float border = Math.max(1.5f, sizePx * 0.025f);
+            float r = Math.min(cx, cy) - border;
             bg.setStyle(Paint.Style.FILL);
             bg.setColor(Color.argb(200, 0, 0, 0));
             canvas.drawCircle(cx, cy, r, bg);
+            line.setStyle(Paint.Style.STROKE);
+            line.setColor(Color.WHITE);
+            line.setStrokeWidth(border);
             canvas.drawCircle(cx, cy, r, line);
             Icons.draw(canvas, last, cx, cy, r * 1.25f, Color.WHITE, line);
         }
@@ -588,6 +603,7 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
                 fill.setStyle(Paint.Style.FILL);
                 fill.setColor(on ? Color.WHITE : Color.argb(215, 0, 0, 0));
                 canvas.drawCircle(px[i], py[i], btn, fill);
+                line.setStyle(Paint.Style.STROKE);
                 line.setColor(on ? Color.BLACK : Color.WHITE);
                 line.setStrokeWidth(i == last ? dp(3) : dp(1));        // последняя выбранная функция обведена жирнее
                 canvas.drawCircle(px[i], py[i], btn - dp(1), line);
@@ -643,6 +659,7 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
                 case F_VOICE: voice(c, cx, cy, s, p); break;
                 case F_CLIPBOARD: clipboard(c, cx, cy, s, p); break;
                 case F_TRANSLATE: translate(c, cx, cy, s, p); break;
+                case F_PICKER: picker(c, cx, cy, s, p); break;
                 default: keyboard(c, cx, cy, s, p); break;
             }
         }
@@ -692,6 +709,15 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
             c.drawText("\u6587", (b.left + b.right) / 2f, (b.top + b.bottom) / 2f - (fm.ascent + fm.descent) / 2f, p);
             p.setStyle(Paint.Style.STROKE);
             p.setTypeface(Typeface.DEFAULT);
+        }
+
+        /** Выбор клавиатуры: глобус (способ ввода) и стрелка переключения. */
+        private static void picker(Canvas c, float cx, float cy, float s, Paint p) {
+            c.drawCircle(cx, cy, s * 0.34f, p);
+            c.drawOval(new RectF(cx - s * 0.15f, cy - s * 0.34f, cx + s * 0.15f, cy + s * 0.34f), p);
+            c.drawLine(cx - s * 0.34f, cy, cx + s * 0.34f, cy, p);
+            c.drawLine(cx + s * 0.40f, cy + s * 0.20f, cx + s * 0.52f, cy + s * 0.32f, p);
+            c.drawLine(cx + s * 0.52f, cy + s * 0.32f, cx + s * 0.40f, cy + s * 0.44f, p);
         }
     }
 }
