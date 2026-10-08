@@ -29,6 +29,7 @@ class SettingItem private constructor(
         const val IMAGE = 5
         const val APP_IMAGES = 6
         const val ACTION = 7
+        const val MONITOR = 8
 
         @JvmStatic
         fun section(title: String) =
@@ -61,5 +62,14 @@ class SettingItem private constructor(
         @JvmStatic
         fun action(key: String, title: String, summary: String) =
             SettingItem(ACTION, key, title, summary, 0, 0, 1, 0, "", emptyList())
+
+        /**
+         * Живой монитор: пока экран настроек открыт, хост дважды в секунду вызывает
+         * plugin.execute({"command": "monitor:<key>"}) и ждёт Map с ключами:
+         * "values" (int[] — выборки для графика), "value" (String — крупная подпись), "status" (String).
+         */
+        @JvmStatic
+        fun monitor(key: String, title: String, summary: String) =
+            SettingItem(MONITOR, key, title, summary, 0, 0, 1, 0, "", emptyList())
     }
 }
