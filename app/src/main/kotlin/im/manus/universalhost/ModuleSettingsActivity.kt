@@ -8,6 +8,8 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.widget.EditText
@@ -35,6 +37,18 @@ class ModuleSettingsActivity : Activity() {
     private var folderId: String? = null
     private var pendingKey: String? = null
     private lateinit var content: LinearLayout
+
+    // живые мониторы (SettingItem.MONITOR)
+    private class MonitorRow(val key: String, val value: TextView, val status: TextView, val graph: MonitorView)
+    private val monitors = ArrayList<MonitorRow>()
+    private var monitorPlugin: IPlugin? = null
+    private val ui = Handler(Looper.getMainLooper())
+    private val tick = object : Runnable {
+        override fun run() {
+            refreshMonitors()
+            if (monitors.isNotEmpty()) ui.postDelayed(this, 500)
+        }
+    }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density + 0.5f).toInt()
 
@@ -67,13 +81,60 @@ class ModuleSettingsActivity : Activity() {
     // ------------------------------------------------------------ сборка экрана
 
     private fun build() {
+        ui.removeCallbacks(tick)
+        monitors.clear()
         content.removeAllViews()
         val fid = folderId
         if (fid != null) buildFolder(fid) else buildModule()
+        if (monitors.isNotEmpty()) ui.post(tick)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        ui.removeCallbacks(tick)
+        if (monitors.isNotEmpty()) ui.post(tick)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        ui.removeCallbacks(tick)
+    }
+
+    override fun onDestroy() {
+        ui.removeCallbacks(tick)
+        super.onDestroy()
+    }
+
+    private fun refreshMonitors() {
+        val p = monitorPlugin ?: return
+        for (m in monitors) {
+            val raw = try { p.execute(mapOf("command" to "monitor:" + m.key)) } catch (t: Throwable) { null }
+            val r = raw as? Map<*, *> ?: continue
+            (r["values"] as? IntArray)?.let { m.graph.setSamples(it) }
+            (r["value"] as? String)?.let { m.value.text = it }
+            (r["status"] as? String)?.let { m.status.text = it }
+        }
+    }
+
+    private fun monitorRow(item: SettingItem): View {
+        val c = card()
+        c.addView(labels(item.title, item.summary))
+        val value = text("— dBm", 32f, Color.WHITE, true)
+        value.gravity = Gravity.CENTER
+        value.setPadding(0, dp(8), 0, 0)
+        c.addView(value, LinearLayout.LayoutParams(-1, -2))
+        val status = text("", 13f, Color.LTGRAY, false)
+        status.gravity = Gravity.CENTER
+        c.addView(status, LinearLayout.LayoutParams(-1, -2))
+        val graph = MonitorView(this)
+        c.addView(graph, LinearLayout.LayoutParams(-1, dp(180)).apply { topMargin = dp(8) })
+        monitors.add(MonitorRow(item.key, value, status, graph))
+        return c
     }
 
     private fun buildModule() {
         val plugin = PluginRegistry.find(this, target)
+        monitorPlugin = plugin
         val prefs = ModuleStorage.prefs(this, target)
         header(IconFactory.forModule(this, plugin, target, 192), target,
             plugin?.let { "v" + it.version + "  " + it.description } ?: "Модуль не найден")
@@ -196,6 +257,7 @@ class ModuleSettingsActivity : Activity() {
                         .putExtra(AppImagesActivity.EXTRA_KEY, item.key)
                 )
             })
+            SettingItem.MONITOR -> content.addView(monitorRow(item))
             SettingItem.ACTION -> content.addView(clickRow(item.title, item.summary) {
                 notifyModule(item.key)
                 Toast.makeText(this, "Готово", Toast.LENGTH_SHORT).show()
