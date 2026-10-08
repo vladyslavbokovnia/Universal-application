@@ -24,8 +24,9 @@ import android.view.inputmethod.EditorInfo
  * Если модуль выключен, не найден или вернул ошибку, показывается пустое поле, ввод не ломается.
  *
  * Режим «поверх содержимого»: настройка модуля Keyboard с ключом overlay_mode (SharedPreferences
- * "module_Keyboard", boolean). Тогда приложение под клавиатурой не сдвигается и не сжимается, а клавиатура
- * (например, свёрнутая в маленькую прозрачную кнопку) лежит поверх него.
+ * "module_Keyboard", boolean, по умолчанию включён, как в схеме настроек модуля). Тогда приложение под
+ * клавиатурой не сдвигается и не сжимается, а клавиатура (например, свёрнутая в маленькую прозрачную
+ * кнопку) лежит поверх него.
  */
 class CoreInputMethodService : InputMethodService() {
 
@@ -55,7 +56,7 @@ class CoreInputMethodService : InputMethodService() {
     }
 
     private fun overlayMode(): Boolean =
-        getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_OVERLAY, false)
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_OVERLAY, true)
 
     /** Без этого в альбомной ориентации система показывает клавиатуру на весь экран. */
     override fun onEvaluateFullscreenMode(): Boolean = false
@@ -83,9 +84,10 @@ class CoreInputMethodService : InputMethodService() {
     }
 
     override fun onCreateInputView(): View {
-        // Окно клавиатуры прозрачное: вид модуля сам решает, что и как рисовать.
+        // Окно клавиатуры и панель навигации прозрачные: вид модуля сам решает, что и как рисовать.
         try {
             window?.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            window?.window?.navigationBarColor = Color.TRANSPARENT
         } catch (t: Throwable) {
             t.printStackTrace()
         }
