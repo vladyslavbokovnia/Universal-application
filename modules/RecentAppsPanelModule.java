@@ -97,6 +97,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
     private boolean pullEnabled = true;
     private boolean edgeEnabled = true;
     private boolean batteryEnabled = true;
+    private boolean stretchCustomImages = true;
     private LruCache<String, Bitmap> customCache;
 
     private Context ctx;
@@ -238,6 +239,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         pullEnabled = cfg.getBoolean("pull_enabled", true);
         edgeEnabled = cfg.getBoolean("edge_handle", true);
         batteryEnabled = cfg.getBoolean("battery_bar", true);
+        stretchCustomImages = cfg.getBoolean("stretch_custom_images", true);
     }
 
     @Override
@@ -256,6 +258,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         l.add(SettingItem.choice("sort_mode", "Сортировка", "", Arrays.asList("По использованию", "По времени установки"), 0));
         l.add(SettingItem.section("Картинки"));
         l.add(SettingItem.appImages("app_icons", "Замена иконок приложений", "Выберите приложение и картинку"));
+        l.add(SettingItem.toggle("stretch_custom_images", "Растягивать картинки на ширину ячейки", "Для заменённых значков в узкой панели", true));
         l.add(SettingItem.section("Скрытые приложения"));
         l.add(SettingItem.action("unhide_all", "Вернуть все скрытые приложения", ""));
         return l;
@@ -462,7 +465,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         pendingSnap = false;
         hItems.removeAllViews();
         int w = dp(iconDp);
-        for (Entry e : entries) hItems.addView(createAppView(e, fadeAlpha), new LinearLayout.LayoutParams(w, stripH));
+        for (Entry e : entries) hItems.addView(createAppView(e, fadeAlpha, true), new LinearLayout.LayoutParams(w, stripH));
         setPanelWindow(stripH, false);
         if (snapStart) hScroll.scrollTo(0, 0);   // самое последнее приложение слева, мгновенно
     }
@@ -484,7 +487,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
             int fade = (r == rows - 1) ? fadeAlpha : 0;   // градиент только у нижнего ряда
             for (int c = 0; c < columns; c++) {
                 int idx = r * columns + c;
-                if (idx < n) row.addView(createAppView(ordered.get(idx), fade), new LinearLayout.LayoutParams(0, rowH, 1f));
+                if (idx < n) row.addView(createAppView(ordered.get(idx), fade, false), new LinearLayout.LayoutParams(0, rowH, 1f));
                 else row.addView(new View(ctx), new LinearLayout.LayoutParams(0, rowH, 1f));
             }
             vItems.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, rowH));
@@ -542,7 +545,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         toggleExpand(true);
     }
 
-    private View createAppView(final Entry entry, int fade) {
+    private View createAppView(final Entry entry, int fade, boolean narrowStrip) {
         Bitmap cb = customBitmap(entry.pkg);
         Drawable.ConstantState cs = cb == null ? iconCache.get(entry.pkg) : null;
         Drawable icon = null;
@@ -557,7 +560,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
                 icon = d;
             } catch (Throwable ignored) { }
         }
-        final AlphaIconView v = new AlphaIconView(ctx, icon, fade, iconAlpha, cb != null);
+        final AlphaIconView v = new AlphaIconView(ctx, icon, fade, iconAlpha, cb != null, narrowStrip && stretchCustomImages);
         v.setContentDescription(entry.label);
         v.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { launch(entry); }
@@ -1226,17 +1229,19 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         private final int fade;          // прозрачность нижнего края
         private final int opacity;       // непрозрачность иконки целиком: 255 - «прозрачность всех иконок»
         private final boolean custom;
+        private final boolean stretchToCell;
         private final Paint mask = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path path = new Path();
         private final RectF rect = new RectF();
         private final float radius;
 
-        AlphaIconView(Context c, Drawable icon, int fade, int iconAlpha, boolean custom) {
+        AlphaIconView(Context c, Drawable icon, int fade, int iconAlpha, boolean custom, boolean stretchToCell) {
             super(c);
             this.icon = icon;
             this.fade = fade;
             this.opacity = 255 - Math.max(0, Math.min(255, iconAlpha));
             this.custom = custom;
+            this.stretchToCell = stretchToCell;
             this.radius = 12f * c.getResources().getDisplayMetrics().density;
             mask.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_IN));
         }
@@ -1257,7 +1262,8 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
                 float ih = icon.getIntrinsicHeight() > 0 ? icon.getIntrinsicHeight() : boxH;
                 float scale = custom ? Math.min(boxW / iw, boxH / ih)      // своя картинка целиком, без обрезки
                         : Math.max(boxW / iw, boxH / ih);   // системную иконку слегка обрезаем по краям
-                float dw = iw * scale, dh = ih * scale;
+                float dw = stretchToCell ? boxW : iw * scale;
+                float dh = stretchToCell ? boxH : ih * scale;
                 float left = (w - dw) / 2f, top = (h - dh) / 2f;
                 icon.setBounds((int) left, (int) top, (int) (left + dw), (int) (top + dh));
                 icon.setAlpha(255);      // общая прозрачность применяется слоем в onDraw
