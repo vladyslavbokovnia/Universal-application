@@ -91,6 +91,8 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
     private SharedPreferences cfg;
     private int iconDp = 128;
     private int columns = 3;
+    private int expandedRows = 3;
+    private String expandedAnchorPackage;
     private int fadeAlpha = 128;     // прозрачность нижнего края иконки (0 — нет, 255 — полная)
     private int iconAlpha = 0;       // прозрачность всех иконок (0 — непрозрачные, 255 — невидимые)
     private long menuTimeoutMs = 6000L;
@@ -235,6 +237,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
     private void loadConfig() {
         iconDp = clamp(cfg.getInt("icon_dp", 128), 64, 192);
         columns = clamp(cfg.getInt("columns", 3), 2, 5);
+        expandedRows = clamp(cfg.getInt("expanded_rows", 3), 1, 5);
         fadeAlpha = clamp(cfg.getInt("fade_alpha", 128), 0, 255);
         iconAlpha = clamp(cfg.getInt("icon_alpha", 0), 0, 255);
         menuTimeoutMs = clamp(cfg.getInt("menu_timeout", 6), 2, 15) * 1000L;
@@ -252,6 +255,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         l.add(SettingItem.section("Вид панели"));
         l.add(SettingItem.slider("icon_dp", "Ширина иконки", "dp", 64, 192, 8, 128));
         l.add(SettingItem.slider("columns", "Колонок в раскрытой панели", "", 2, 5, 1, 3));
+        l.add(SettingItem.slider("expanded_rows", "Строк в раскрытой панели", "по умолчанию 3", 1, 5, 1, 3));
         l.add(SettingItem.slider("fade_alpha", "Прозрачность нижнего края иконок", "", 0, 255, 5, 128));
         l.add(SettingItem.slider("icon_alpha", "Прозрачность всех иконок", "", 0, 255, 5, 0));
         l.add(SettingItem.section("Поведение"));
@@ -485,6 +489,19 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         Collections.reverse(ordered);            // последние приложения — внизу
         int n = ordered.size();
         int rows = Math.max(1, (n + columns - 1) / columns);
+        int maxRows = Math.max(1, ctx.getResources().getDisplayMetrics().heightPixels / Math.max(1, rowH));
+        int shownRows = Math.min(Math.min(rows, expandedRows), maxRows);
+        // Помещаем приложение, на котором остановилась узкая лента, в нижний ряд сетки.
+        if (expandedAnchorPackage != null && n > 0) {
+            int anchor = -1;
+            for (int i = 0; i < n; i++) if (expandedAnchorPackage.equals(ordered.get(i).pkg)) { anchor = i; break; }
+            if (anchor >= 0) {
+                int target = Math.min(n - 1, Math.max(0, (shownRows - 1) * columns));
+                Entry tmp = ordered.get(target);
+                ordered.set(target, ordered.get(anchor));
+                ordered.set(anchor, tmp);
+            }
+        }
         for (int r = 0; r < rows; r++) {
             LinearLayout row = new LinearLayout(ctx);
             row.setOrientation(LinearLayout.HORIZONTAL);
@@ -498,8 +515,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
             }
             vItems.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, rowH));
         }
-        int maxRows = Math.max(1, (ctx.getResources().getDisplayMetrics().heightPixels / 2) / rowH);
-        snapTarget = Math.min(rows, maxRows) * rowH;
+        snapTarget = shownRows * rowH;
         pendingSnap = true;
         setPanelWindow(snapTarget, true);
         handler.removeCallbacks(forceSnap);
@@ -523,9 +539,18 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
     private void toggleExpand(boolean expand) {
         if (!active || expanded == expand) return;
         dismissOverlay();
+        if (expand) {
+            expandedAnchorPackage = null;
+            if (hScroll != null && !entries.isEmpty()) {
+                int cellW = Math.max(1, dp(iconDp));
+                int index = Math.max(0, Math.min(entries.size() - 1, hScroll.getScrollX() / cellW));
+                expandedAnchorPackage = entries.get(index).pkg;
+            }
+        }
         expanded = expand;
         renderedKey = "";
-        applyList(entries, true);
+        applyList(entries, false);
+        if (!expand) expandedAnchorPackage = null;
         if (!expand && restoreHidden) {
             // узкой полосы до раскрытия не было — возвращаем скрытый режим
             restoreHidden = false;
