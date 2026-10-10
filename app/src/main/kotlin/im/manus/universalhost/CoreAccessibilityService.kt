@@ -1,7 +1,10 @@
 package im.manus.universalhost
 
 import android.accessibilityservice.AccessibilityService
+import android.os.Build
+import android.view.InputDevice
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.accessibility.AccessibilityEvent
 
 class CoreAccessibilityService : AccessibilityService() {
@@ -75,6 +78,39 @@ class CoreAccessibilityService : AccessibilityService() {
             }
         }
         return false
+    }
+
+    /**
+     * Включает или выключает получение движений джойстиков (стики, курки, крестовина) службой.
+     * Работает только на Android 14+ (AccessibilityServiceInfo.setMotionEventSources); на более старых
+     * версиях ничего не делает. Метод вызывается по имени, потому что compileSdk хоста ниже 34.
+     * Пока перехват включён, эти события не доходят до остальных приложений.
+     */
+    fun setMotionCapture(on: Boolean) {
+        if (Build.VERSION.SDK_INT < 34) return
+        try {
+            val info = serviceInfo ?: return
+            val setter = info.javaClass.getMethod("setMotionEventSources", Int::class.javaPrimitiveType)
+            setter.invoke(info, if (on) InputDevice.SOURCE_JOYSTICK else 0)
+            serviceInfo = info
+        } catch (e: Throwable) {
+            e.printStackTrace()
+        }
+    }
+
+    /**
+     * Android 14+: AccessibilityService.onMotionEvent. compileSdk 33 этого метода не знает, но на устройстве
+     * с API 34 он переопределяется по имени и сигнатуре. Движения отдаём модулям с IMotionHandler.
+     */
+    fun onMotionEvent(event: MotionEvent) {
+        for (p in activePlugins) {
+            val handler = p as? IMotionHandler ?: continue
+            try {
+                handler.onMotionEvent(event)
+            } catch (e: Throwable) {
+                e.printStackTrace()
+            }
+        }
     }
 
     /**

@@ -126,6 +126,29 @@ object ShizukuBridge {
         }
     }
 
+    /**
+     * Запускает долгоживущий процесс оболочки от имени Shizuku (например, чтение сырых событий ввода через getevent)
+     * и возвращает его, не дожидаясь завершения. null, если Shizuku не готов. Вызывать из фонового потока;
+     * вызывающий читает process.inputStream и сам вызывает process.destroy().
+     */
+    @JvmStatic
+    fun startProcess(command: String): Process? {
+        if (Looper.myLooper() == Looper.getMainLooper() || !hasPermission()) return null
+        return try {
+            val method = Shizuku::class.java.getDeclaredMethod(
+                "newProcess",
+                Array<String>::class.java,
+                Array<String>::class.java,
+                String::class.java
+            )
+            method.isAccessible = true
+            method.invoke(null, arrayOf("sh", "-c", command), null, null) as Process
+        } catch (e: Throwable) {
+            e.printStackTrace()
+            null
+        }
+    }
+
     @JvmStatic
     fun grantSecureSettings(ctx: Context): ShizukuResult {
         if (hasSecureSettings(ctx)) return ShizukuResult(0, "уже выдано", "")
