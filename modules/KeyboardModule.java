@@ -412,7 +412,7 @@ public class KeyboardModule implements IPlugin, ISettingsProvider {
             rows.clear();
             String code = langs.get(lang % langs.size());
             if (page == 0) {
-                String[] l = layout(code);
+                String[] l = KeyboardModule.layout(code);
                 if (numberRow) rows.add(charRow("1234567890", null));
                 rows.add(charRow(l[0], code));
                 rows.add(charRow(l[1], code));
