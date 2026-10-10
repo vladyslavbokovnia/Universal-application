@@ -96,6 +96,16 @@
         </service>
 
         <service
+            android:name=".CoreNotificationListener"
+            android:label="@string/accessibility_service_label"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <service
             android:name=".CoreInputMethodService"
             android:label="@string/keyboard_label"
             android:permission="android.permission.BIND_INPUT_METHOD"

@@ -264,6 +264,13 @@ class ModuleSettingsActivity : Activity() {
                 })
             }
             SettingItem.MONITOR -> content.addView(monitorRow(item))
+            SettingItem.CUSTOM -> (monitorPlugin as? ISettingsViewProvider)?.let { provider ->
+                try {
+                    content.addView(provider.createSettingsView(this, item.key))
+                } catch (t: Throwable) {
+                    content.addView(hint("Не удалось построить вид: " + t.message))
+                }
+            }
             SettingItem.ACTION -> content.addView(clickRow(item.title, item.summary) {
                 notifyModule(item.key)
                 Toast.makeText(this, "Готово", Toast.LENGTH_SHORT).show()
