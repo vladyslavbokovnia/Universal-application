@@ -848,8 +848,8 @@ public class ClockWallpaperModule implements IPlugin, ISettingsProvider {
             int gold = Color.rgb(255, 218, 86), light = Color.rgb(255, 240, 150);
             float hour = ((now.get(Calendar.HOUR_OF_DAY) % 12) + now.get(Calendar.MINUTE) / 60f) / 12f * 360f;
             float minute = (now.get(Calendar.MINUTE) + now.get(Calendar.SECOND) / 60f) / 60f * 360f;
-            hand(c, cx, cy, Math.min(w, h) * .405f, hour, Math.max(15, w * .027f), gold);
-            hand(c, cx, cy, Math.min(w, h) * .45f, minute, Math.max(11, w * .018f), light);
+            hand(c, cx, cy, w * .48f, hour, Math.max(15, w * .027f), gold);
+            hand(c, cx, cy, w * .65f, minute, Math.max(11, w * .018f), light);
 
             // день недели
             float wx = w * .271f, wy = h * .464f;
