@@ -493,10 +493,13 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         int shownRows = Math.min(Math.min(rows, expandedRows), maxRows);
         // Помещаем приложение, на котором остановилась узкая лента, в нижний ряд сетки.
         if (expandedAnchorPackage != null && n > 0) {
-            int anchor = -1;
+            int anchor = -1, anchorColumn = 0;
             for (int i = 0; i < n; i++) if (expandedAnchorPackage.equals(ordered.get(i).pkg)) { anchor = i; break; }
+            for (int i = 0; i < entries.size(); i++) {
+                if (expandedAnchorPackage.equals(entries.get(i).pkg)) { anchorColumn = i % columns; break; }
+            }
             if (anchor >= 0) {
-                int target = Math.min(n - 1, Math.max(0, (shownRows - 1) * columns));
+                int target = Math.min(n - 1, Math.max(0, (shownRows - 1) * columns + anchorColumn));
                 Entry tmp = ordered.get(target);
                 ordered.set(target, ordered.get(anchor));
                 ordered.set(anchor, tmp);
