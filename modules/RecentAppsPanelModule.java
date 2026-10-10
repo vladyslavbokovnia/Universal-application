@@ -98,6 +98,8 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
     private boolean edgeEnabled = true;
     private boolean batteryEnabled = true;
     private boolean stretchCustomImages = true;
+    private int customCropTop = 5;
+    private int customCropBottom = 5;
     private LruCache<String, Bitmap> customCache;
 
     private Context ctx;
@@ -240,6 +242,8 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         edgeEnabled = cfg.getBoolean("edge_handle", true);
         batteryEnabled = cfg.getBoolean("battery_bar", true);
         stretchCustomImages = cfg.getBoolean("stretch_custom_images", true);
+        customCropTop = clamp(cfg.getInt("custom_crop_top", 5), 0, 20);
+        customCropBottom = clamp(cfg.getInt("custom_crop_bottom", 5), 0, 20 - customCropTop);
     }
 
     @Override
@@ -258,7 +262,9 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         l.add(SettingItem.choice("sort_mode", "Сортировка", "", Arrays.asList("По использованию", "По времени установки"), 0));
         l.add(SettingItem.section("Картинки"));
         l.add(SettingItem.appImages("app_icons", "Замена иконок приложений", "Выберите приложение и картинку"));
-        l.add(SettingItem.toggle("stretch_custom_images", "Растягивать картинки на ширину ячейки", "Для заменённых значков в узкой панели", true));
+        l.add(SettingItem.toggle("stretch_custom_images", "Растягивать картинки на ширину ячейки", "Только заменённые значки в узкой панели; обычные значки сохраняют прежнюю маску", true));
+        l.add(SettingItem.slider("custom_crop_top", "Обрезка заменённой картинки сверху", "%", 0, 20, 1, 5));
+        l.add(SettingItem.slider("custom_crop_bottom", "Обрезка заменённой картинки снизу", "%", 0, 20, 1, 5));
         l.add(SettingItem.section("Скрытые приложения"));
         l.add(SettingItem.action("unhide_all", "Вернуть все скрытые приложения", ""));
         return l;
@@ -560,7 +566,10 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
                 icon = d;
             } catch (Throwable ignored) { }
         }
-        final AlphaIconView v = new AlphaIconView(ctx, icon, fade, iconAlpha, cb != null, narrowStrip && stretchCustomImages);
+        final AlphaIconView v = new AlphaIconView(ctx, icon, fade, iconAlpha, cb != null,
+                narrowStrip && cb != null && stretchCustomImages,
+                narrowStrip && cb != null ? customCropTop : 0,
+                narrowStrip && cb != null ? customCropBottom : 0);
         v.setContentDescription(entry.label);
         v.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { launch(entry); }
@@ -1230,18 +1239,23 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         private final int opacity;       // непрозрачность иконки целиком: 255 - «прозрачность всех иконок»
         private final boolean custom;
         private final boolean stretchToCell;
+        private final int cropTopPercent;
+        private final int cropBottomPercent;
         private final Paint mask = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path path = new Path();
         private final RectF rect = new RectF();
         private final float radius;
 
-        AlphaIconView(Context c, Drawable icon, int fade, int iconAlpha, boolean custom, boolean stretchToCell) {
+        AlphaIconView(Context c, Drawable icon, int fade, int iconAlpha, boolean custom, boolean stretchToCell,
+                      int cropTopPercent, int cropBottomPercent) {
             super(c);
             this.icon = icon;
             this.fade = fade;
             this.opacity = 255 - Math.max(0, Math.min(255, iconAlpha));
             this.custom = custom;
             this.stretchToCell = stretchToCell;
+            this.cropTopPercent = Math.max(0, cropTopPercent);
+            this.cropBottomPercent = Math.max(0, cropBottomPercent);
             this.radius = 12f * c.getResources().getDisplayMetrics().density;
             mask.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_IN));
         }
@@ -1265,6 +1279,13 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
                 float dw = stretchToCell ? boxW : iw * scale;
                 float dh = stretchToCell ? boxH : ih * scale;
                 float left = (w - dw) / 2f, top = (h - dh) / 2f;
+                if (custom && stretchToCell) {
+                    int totalCrop = Math.min(80, cropTopPercent + cropBottomPercent);
+                    if (totalCrop > 0) {
+                        dh = boxH * 100f / (100f - totalCrop);
+                        top = -boxH * cropTopPercent / (100f - totalCrop);
+                    }
+                }
                 icon.setBounds((int) left, (int) top, (int) (left + dw), (int) (top + dh));
                 icon.setAlpha(255);      // общая прозрачность применяется слоем в onDraw
             }
