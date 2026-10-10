@@ -1,6 +1,7 @@
 package im.manus.universalhost
 
 import android.accessibilityservice.AccessibilityService
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 
 class CoreAccessibilityService : AccessibilityService() {
@@ -61,6 +62,19 @@ class CoreAccessibilityService : AccessibilityService() {
                 e.printStackTrace()
             }
         }
+    }
+
+    /** Кнопки (в том числе геймпада) отдаём модулям с IKeyHandler; true от любого из них поглощает событие. */
+    override fun onKeyEvent(event: KeyEvent): Boolean {
+        for (p in activePlugins) {
+            val handler = p as? IKeyHandler ?: continue
+            try {
+                if (handler.onKeyEvent(event)) return true
+            } catch (e: Throwable) {
+                e.printStackTrace()
+            }
+        }
+        return false
     }
 
     /**

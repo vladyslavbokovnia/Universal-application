@@ -32,6 +32,7 @@ class SettingItem private constructor(
         const val ACTION = 7
         const val MONITOR = 8
         const val APP_PICKER = 9
+        const val CUSTOM = 10
 
         @JvmStatic
         fun section(title: String) =
@@ -81,5 +82,13 @@ class SettingItem private constructor(
         @JvmStatic
         fun monitor(key: String, title: String, summary: String) =
             SettingItem(MONITOR, key, title, summary, 0, 0, 1, 0, "", emptyList())
+
+        /**
+         * Собственный вид модуля: хост вызывает ISettingsViewProvider.createSettingsView(context, key)
+         * и вставляет результат в экран настроек. Хранением значений занимается сам модуль.
+         */
+        @JvmStatic
+        fun custom(key: String, title: String, summary: String) =
+            SettingItem(CUSTOM, key, title, summary, 0, 0, 1, 0, "", emptyList())
     }
 }
