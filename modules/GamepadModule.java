@@ -30,6 +30,7 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.util.SparseArray;
+import android.util.SparseBooleanArray;
 import android.view.Gravity;
 import android.view.InputDevice;
 import android.view.KeyEvent;
@@ -40,39 +41,64 @@ import android.view.accessibility.AccessibilityEvent;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import im.manus.universalhost.CoreAccessibilityService;
 import im.manus.universalhost.IKeyHandler;
+import im.manus.universalhost.IMotionHandler;
 import im.manus.universalhost.IPlugin;
 import im.manus.universalhost.ISettingsProvider;
 import im.manus.universalhost.ISettingsViewProvider;
 import im.manus.universalhost.SettingItem;
+import im.manus.universalhost.ShizukuBridge;
+import im.manus.universalhost.ShizukuResult;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
- * Геймпад: кнопки (в том числе нажатия стиков) превращаются в медиа-команды, системные действия
+ * Геймпад: кнопки, стики, курки и крестовина превращаются в медиа-команды, системные действия
  * и запуск приложений.
  *
- * - Кнопки приходят через AccessibilityService.onKeyEvent (хост передаёт их модулям, реализующим
- *   IKeyHandler), поэтому работают и при выключенном экране. Только события от геймпада, обычная
- *   клавиатура не затрагивается. Кнопка без назначенного действия пропускается системе как раньше.
- * - У каждой кнопки три действия: нажатие, двойное нажатие, долгое нажатие.
- * - Два профиля: основной и «для выбранных приложений». Профиль выбирается по приложению на переднем
- *   плане; то, что не назначено во втором профиле, берётся из основного.
- * - В настройках модуля (ISettingsViewProvider) рисуется картинка геймпада со значками назначенных
- *   действий, без текста. Коснись кнопки на картинке или нажми её на самом геймпаде, пока экран
- *   настроек открыт, и откроется выбор действий.
- * - Наклон стиков и аналоговые курки приходят как оси, а не как кнопки, и службе специальных
- *   возможностей не видны: в настройках они показываются в строке состояния, назначить их нельзя.
- *   Нажатия на стики (THUMBL/THUMBR) назначаются как обычные кнопки.
+ * Кнопки и оси читаются сразу по нескольким каналам, события одной и той же кнопки склеиваются:
+ *  1. служба специальных возможностей, onKeyEvent: кнопки, работает при выключенном экране;
+ *  2. служба специальных возможностей, onMotionEvent: стики, курки, крестовина (только Android 14+);
+ *  3. сырые события ядра через Shizuku (getevent): всё, при любом экране и любой версии Android;
+ *  4. окно настроек: пока оно открыто, ловит кнопки и оси напрямую (запасной путь для назначения).
+ *
+ * Стики дают по четыре направления (левый и правый), курки L2/R2 и крестовина тоже работают как кнопки.
+ * Кнопки, которых нет на картинке, добавляются внизу, когда их нажмёшь при открытых настройках.
+ * У каждой кнопки три действия: нажатие, двойное нажатие, долгое нажатие. Два профиля: основной и
+ * «для выбранных приложений» (выбирается по приложению на переднем плане, незаданное берётся из основного).
  */
-public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewProvider, IKeyHandler {
+public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewProvider, IKeyHandler, IMotionHandler {
 
     private static final String PREFS = "module_Gamepad";
     private static final String[] GK = {"t", "d", "l"};
     private static final String[] GNAME = {"Нажатие", "Двойное нажатие", "Долгое нажатие"};
+
+    // каналы ввода (номер бита) и их названия
+    static final int CH_SERVICE = 0;
+    static final int CH_WINDOW = 1;
+    static final int CH_MOTION = 2;
+    static final int CH_EVDEV = 3;
+    private static final String[] CHN = {"служба", "окно", "служба-оси", "evdev"};
+
+    // виртуальные «кнопки» для направлений стиков; всё от EXTRA_BASE: неизвестный код evdev
+    static final int V_LS_UP = 1001;
+    static final int V_LS_DOWN = 1002;
+    static final int V_LS_LEFT = 1003;
+    static final int V_LS_RIGHT = 1004;
+    static final int V_RS_UP = 1005;
+    static final int V_RS_DOWN = 1006;
+    static final int V_RS_LEFT = 1007;
+    static final int V_RS_RIGHT = 1008;
+    static final int EXTRA_BASE = 2000;
 
     /** id, подпись. Порядок = порядок в списке выбора. */
     private static final String[][] ACTIONS = {
@@ -100,25 +126,33 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         {"swipe_down", "Прокрутка вверх (свайп вниз)"},
     };
 
-    /** keyCode, x, y, радиус, цвет (0 белый, 1 зелёный, 2 красный, 3 синий, 4 жёлтый); поле 1000x620. */
+    /** keyCode, x, y, радиус, цвет (0 белый, 1 зелёный, 2 красный, 3 синий, 4 жёлтый), направление (1 вверх, 2 вниз, 3 влево, 4 вправо); поле 1000x700. */
     private static final int[][] SLOTS = {
-        {KeyEvent.KEYCODE_BUTTON_L2, 170, 45, 38, 0},
-        {KeyEvent.KEYCODE_BUTTON_R2, 830, 45, 38, 0},
-        {KeyEvent.KEYCODE_BUTTON_L1, 170, 125, 38, 0},
-        {KeyEvent.KEYCODE_BUTTON_R1, 830, 125, 38, 0},
-        {KeyEvent.KEYCODE_BUTTON_MODE, 500, 200, 44, 0},
-        {KeyEvent.KEYCODE_BUTTON_SELECT, 400, 265, 30, 0},
-        {KeyEvent.KEYCODE_BUTTON_START, 600, 265, 30, 0},
-        {KeyEvent.KEYCODE_BUTTON_THUMBL, 230, 300, 62, 0},
-        {KeyEvent.KEYCODE_DPAD_UP, 370, 420, 30, 0},
-        {KeyEvent.KEYCODE_DPAD_LEFT, 310, 480, 30, 0},
-        {KeyEvent.KEYCODE_DPAD_RIGHT, 430, 480, 30, 0},
-        {KeyEvent.KEYCODE_DPAD_DOWN, 370, 540, 30, 0},
-        {KeyEvent.KEYCODE_BUTTON_THUMBR, 620, 480, 62, 0},
-        {KeyEvent.KEYCODE_BUTTON_Y, 790, 240, 33, 4},
-        {KeyEvent.KEYCODE_BUTTON_X, 720, 310, 33, 3},
-        {KeyEvent.KEYCODE_BUTTON_B, 860, 310, 33, 2},
-        {KeyEvent.KEYCODE_BUTTON_A, 790, 380, 33, 1},
+        {KeyEvent.KEYCODE_BUTTON_L2, 170, 45, 38, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_R2, 830, 45, 38, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_L1, 170, 125, 38, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_R1, 830, 125, 38, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_MODE, 500, 200, 44, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_SELECT, 400, 265, 30, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_START, 600, 265, 30, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_THUMBL, 230, 300, 40, 0, 0},
+        {V_LS_UP, 230, 205, 26, 0, 1},
+        {V_LS_DOWN, 230, 395, 26, 0, 2},
+        {V_LS_LEFT, 135, 300, 26, 0, 3},
+        {V_LS_RIGHT, 325, 300, 26, 0, 4},
+        {KeyEvent.KEYCODE_DPAD_UP, 370, 420, 30, 0, 1},
+        {KeyEvent.KEYCODE_DPAD_LEFT, 310, 480, 30, 0, 3},
+        {KeyEvent.KEYCODE_DPAD_RIGHT, 430, 480, 30, 0, 4},
+        {KeyEvent.KEYCODE_DPAD_DOWN, 370, 540, 30, 0, 2},
+        {KeyEvent.KEYCODE_BUTTON_THUMBR, 620, 480, 40, 0, 0},
+        {V_RS_UP, 620, 385, 26, 0, 1},
+        {V_RS_DOWN, 620, 575, 26, 0, 2},
+        {V_RS_LEFT, 525, 480, 26, 0, 3},
+        {V_RS_RIGHT, 715, 480, 26, 0, 4},
+        {KeyEvent.KEYCODE_BUTTON_Y, 790, 240, 33, 4, 0},
+        {KeyEvent.KEYCODE_BUTTON_X, 720, 310, 33, 3, 0},
+        {KeyEvent.KEYCODE_BUTTON_B, 860, 310, 33, 2, 0},
+        {KeyEvent.KEYCODE_BUTTON_A, 790, 380, 33, 1, 0},
     };
 
     private static final Map<String, String> DEF = new HashMap<String, String>();
@@ -144,6 +178,14 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         def(KeyEvent.KEYCODE_BUTTON_MODE, "l", "lock");
         def(KeyEvent.KEYCODE_BUTTON_THUMBL, "t", "flashlight");
         def(KeyEvent.KEYCODE_BUTTON_THUMBR, "t", "screenshot");
+        def(V_LS_UP, "t", "vol_up");
+        def(V_LS_DOWN, "t", "vol_down");
+        def(V_LS_LEFT, "t", "prev");
+        def(V_LS_RIGHT, "t", "next");
+        def(V_RS_LEFT, "t", "seek_back");
+        def(V_RS_RIGHT, "t", "seek_fwd");
+        def(V_RS_UP, "t", "swipe_down");
+        def(V_RS_DOWN, "t", "swipe_up");
     }
 
     static String key(int profile, int code, String g) {
@@ -185,12 +227,19 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
     private volatile String fgPackage;
     private final Handler h = new Handler(Looper.getMainLooper());
     private final SparseArray<KeyState> states = new SparseArray<KeyState>();
+    private final SparseBooleanArray vstate = new SparseBooleanArray();
+    private final int[] cnt = new int[4];
+    private volatile String evStatus = "выключено";
+    private Evdev evdev;
     private boolean torchOn;
     private String torchId;
     private long seekTarget;
     private long seekAt;
+    private long axesNoteAt;
 
     private static final class KeyState {
+        int mask;
+        long maskAt;
         boolean down;
         boolean longFired;
         boolean repeating;
@@ -202,9 +251,9 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
     // ---------------------------------------------------------------- IPlugin
 
     @Override public String getName() { return "Gamepad"; }
-    @Override public int getVersion() { return 1; }
+    @Override public int getVersion() { return 2; }
     @Override public String getDescription() {
-        return "Кнопки геймпада: медиа, система, приложения; профили по приложениям";
+        return "Кнопки, стики и курки геймпада: медиа, система, приложения; профили по приложениям";
     }
     @Override public String getIconName() { return "ic_launcher"; }
 
@@ -212,12 +261,17 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
     public void init(Context context) {
         appCtx = context;
         svc = (context instanceof AccessibilityService) ? (AccessibilityService) context : null;
+        applyChannels();
     }
 
     @Override
     public void stop() {
+        AccessibilityService s = svc;
+        if (s instanceof CoreAccessibilityService) ((CoreAccessibilityService) s).setMotionCapture(false);
+        stopEvdev();
         h.removeCallbacksAndMessages(null);
         states.clear();
+        vstate.clear();
         svc = null;
     }
 
@@ -265,7 +319,18 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         return 0;
     }
 
-    // ---------------------------------------------------------------- IKeyHandler
+    /** Включает или выключает дополнительные каналы по настройкам. */
+    private void applyChannels() {
+        SharedPreferences p = prefs();
+        AccessibilityService s = svc;
+        boolean axes = p == null || p.getBoolean("axes_service", true);
+        if (s instanceof CoreAccessibilityService) ((CoreAccessibilityService) s).setMotionCapture(axes);
+        boolean ev = p == null || p.getBoolean("evdev", true);
+        if (ev) startEvdev();
+        else stopEvdev();
+    }
+
+    // ---------------------------------------------------------------- каналы: служба
 
     @Override
     public boolean onKeyEvent(KeyEvent e) {
@@ -279,14 +344,147 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
     private boolean handleKey(KeyEvent e) {
         if (!isPadEvent(e)) return false;
         int code = e.getKeyCode();
+        boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
+        if (down && e.getRepeatCount() > 0) return consumes(code);
+        cnt[CH_SERVICE]++;
+        return route(code, down, CH_SERVICE);
+    }
 
-        // экран настроек открыт: кнопка выбирает слот для назначения, действия не выполняются
+    /** Android 14+: стики, курки и крестовина через службу. */
+    @Override
+    public void onMotionEvent(MotionEvent e) {
+        try {
+            feedMotion(e, CH_MOTION);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    // ---------------------------------------------------------------- движения: оси -> виртуальные кнопки
+
+    private static boolean hasAxis(InputDevice d, int axis) {
+        return d != null && d.getMotionRange(axis) != null;
+    }
+
+    /** Разбирает MotionEvent джойстика (служба или окно) и передаёт оси дальше. */
+    void feedMotion(MotionEvent e, int ch) {
+        if ((e.getSource() & InputDevice.SOURCE_JOYSTICK) != InputDevice.SOURCE_JOYSTICK) return;
+        if (e.getActionMasked() != MotionEvent.ACTION_MOVE) return;
+        cnt[ch]++;
+        InputDevice dev = e.getDevice();
+        float lx = e.getAxisValue(MotionEvent.AXIS_X);
+        float ly = e.getAxisValue(MotionEvent.AXIS_Y);
+        float rx;
+        float ry;
+        float lt;
+        float rt;
+        boolean trig = hasAxis(dev, MotionEvent.AXIS_LTRIGGER) || hasAxis(dev, MotionEvent.AXIS_BRAKE);
+        boolean rxy = hasAxis(dev, MotionEvent.AXIS_RX) && hasAxis(dev, MotionEvent.AXIS_RY);
+        if (trig) {
+            lt = Math.max(e.getAxisValue(MotionEvent.AXIS_LTRIGGER), e.getAxisValue(MotionEvent.AXIS_BRAKE));
+            rt = Math.max(e.getAxisValue(MotionEvent.AXIS_RTRIGGER), e.getAxisValue(MotionEvent.AXIS_GAS));
+            if (rxy && !hasAxis(dev, MotionEvent.AXIS_Z)) {
+                rx = e.getAxisValue(MotionEvent.AXIS_RX);
+                ry = e.getAxisValue(MotionEvent.AXIS_RY);
+            } else {
+                rx = e.getAxisValue(MotionEvent.AXIS_Z);
+                ry = e.getAxisValue(MotionEvent.AXIS_RZ);
+            }
+        } else if (rxy) {
+            rx = e.getAxisValue(MotionEvent.AXIS_RX);
+            ry = e.getAxisValue(MotionEvent.AXIS_RY);
+            lt = Math.max(0f, e.getAxisValue(MotionEvent.AXIS_Z));
+            rt = Math.max(0f, e.getAxisValue(MotionEvent.AXIS_RZ));
+        } else {
+            rx = e.getAxisValue(MotionEvent.AXIS_Z);
+            ry = e.getAxisValue(MotionEvent.AXIS_RZ);
+            lt = 0f;
+            rt = 0f;
+        }
+        float hx = e.getAxisValue(MotionEvent.AXIS_HAT_X);
+        float hy = e.getAxisValue(MotionEvent.AXIS_HAT_Y);
+        feedAxes(ch, lx, ly, rx, ry, lt, rt, hx, hy);
+    }
+
+    private boolean vget(int ch, int code) {
+        return vstate.get(ch * 100000 + code);
+    }
+
+    private void vset(int ch, int code, boolean on) {
+        int k = ch * 100000 + code;
+        if (vstate.get(k) == on) return;
+        vstate.put(k, on);
+        route(code, on, ch);
+    }
+
+    /** Порог с гистерезисом: включается выше 0.55, выключается ниже 0.35. */
+    private void hyst(int ch, int code, float v) {
+        boolean cur = vget(ch, code);
+        vset(ch, code, cur ? v > 0.35f : v > 0.55f);
+    }
+
+    /** Стик как четыре кнопки; при диагонали побеждает ось с большим отклонением. */
+    private void stick(int ch, int up, int down, int left, int right, float x, float y) {
+        float ax = Math.abs(x);
+        float ay = Math.abs(y);
+        float xv = ax >= ay ? x : 0f;
+        float yv = ay > ax ? y : 0f;
+        hyst(ch, left, -xv);
+        hyst(ch, right, xv);
+        hyst(ch, up, -yv);
+        hyst(ch, down, yv);
+    }
+
+    /** Все оси в нормированном виде: стики -1..1, курки 0..1, крестовина -1..1. Только главный поток. */
+    void feedAxes(int ch, float lx, float ly, float rx, float ry, float lt, float rt, float hx, float hy) {
+        stick(ch, V_LS_UP, V_LS_DOWN, V_LS_LEFT, V_LS_RIGHT, lx, ly);
+        stick(ch, V_RS_UP, V_RS_DOWN, V_RS_LEFT, V_RS_RIGHT, rx, ry);
+        hyst(ch, KeyEvent.KEYCODE_BUTTON_L2, lt);
+        hyst(ch, KeyEvent.KEYCODE_BUTTON_R2, rt);
+        hyst(ch, KeyEvent.KEYCODE_DPAD_LEFT, -hx);
+        hyst(ch, KeyEvent.KEYCODE_DPAD_RIGHT, hx);
+        hyst(ch, KeyEvent.KEYCODE_DPAD_UP, -hy);
+        hyst(ch, KeyEvent.KEYCODE_DPAD_DOWN, hy);
+
+        PadView v = sPad;
+        long now = SystemClock.uptimeMillis();
+        if (v != null && v.isLearning() && now - axesNoteAt > 150) {
+            axesNoteAt = now;
+            float big = Math.max(Math.max(Math.abs(lx), Math.abs(ly)), Math.max(Math.abs(rx), Math.abs(ry)));
+            if (big > 0.3f || lt > 0.3f || rt > 0.3f || Math.abs(hx) > 0.3f || Math.abs(hy) > 0.3f) {
+                v.noteAxes(CHN[ch] + " | левый стик " + fmt(lx) + " " + fmt(ly) + " | правый " + fmt(rx) + " "
+                        + fmt(ry) + " | L2 " + fmt(lt) + " R2 " + fmt(rt) + " | крестовина " + fmt(hx) + " " + fmt(hy));
+            }
+        }
+    }
+
+    private static String fmt(float f) {
+        return String.valueOf(Math.round(f * 100f) / 100f);
+    }
+
+    // ---------------------------------------------------------------- маршрутизация кнопок
+
+    /** Есть ли у кнопки хоть одно действие в текущем профиле. */
+    private boolean consumes(int code) {
+        PadView v = sPad;
+        if (v != null && v.isLearning()) return true;
+        SharedPreferences p = prefs();
+        if (p == null || !p.getBoolean("enabled", true)) return false;
+        int profile = currentProfile(p);
+        return !(isNone(action(p, profile, code, "t")) && isNone(action(p, profile, code, "d"))
+                && isNone(action(p, profile, code, "l")));
+    }
+
+    /**
+     * Единая точка входа для кнопок из любого канала. Нажатия одной кнопки из разных каналов склеиваются:
+     * действие стартует с первого канала, а заканчивается, когда отпустил последний.
+     * Возвращает true, если событие службы нужно поглотить.
+     */
+    boolean route(int code, boolean down, int ch) {
         PadView v = sPad;
         if (v != null && v.isLearning()) {
-            if (e.getAction() == KeyEvent.ACTION_DOWN && e.getRepeatCount() == 0) v.onPhysicalKey(code);
+            if (down) v.onPhysicalKey(code, ch);
             return true;
         }
-
         SharedPreferences p = prefs();
         if (p == null || !p.getBoolean("enabled", true)) return false;
         int profile = currentProfile(p);
@@ -295,78 +493,385 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         final String l = action(p, profile, code, "l");
         if (isNone(t) && isNone(d) && isNone(l)) return false;
 
-        KeyState st = states.get(code);
-        if (st == null) {
-            st = new KeyState();
-            states.put(code, st);
+        KeyState s = states.get(code);
+        if (s == null) {
+            s = new KeyState();
+            states.put(code, s);
         }
-        final KeyState s = st;
-
-        if (e.getAction() == KeyEvent.ACTION_DOWN) {
-            if (e.getRepeatCount() > 0) return true;
-            s.down = true;
-            s.longFired = false;
-            s.repeating = false;
-            boolean fast = isRepeatable(t) && isNone(d) && isNone(l);
-            if (fast) {
-                // удержание повторяет действие (громкость, перемотка, прокрутка)
-                perform(t);
-                s.repeating = true;
-                s.repeatR = new Runnable() {
-                    @Override public void run() {
-                        if (!s.down) return;
-                        perform(t);
-                        h.postDelayed(this, 140);
-                    }
-                };
-                h.postDelayed(s.repeatR, 450);
-            } else if (!isNone(l)) {
-                s.longR = new Runnable() {
-                    @Override public void run() {
-                        if (!s.down) return;
-                        s.longFired = true;
-                        perform(l);
-                    }
-                };
-                h.postDelayed(s.longR, p.getInt("long_ms", 500));
-            }
-            return true;
-        }
-
-        if (e.getAction() == KeyEvent.ACTION_UP) {
-            s.down = false;
-            if (s.longR != null) h.removeCallbacks(s.longR);
-            if (s.repeatR != null) h.removeCallbacks(s.repeatR);
-            if (s.repeating) {
-                s.repeating = false;
-                return true;
-            }
-            if (s.longFired) {
-                s.longFired = false;
-                return true;
-            }
-            int windowMs = p.getInt("double_ms", 300);
-            if (!isNone(d)) {
-                if (s.tapR != null) {
-                    // второе нажатие в окне: двойное
-                    h.removeCallbacks(s.tapR);
-                    s.tapR = null;
-                    perform(d);
-                } else {
-                    s.tapR = new Runnable() {
-                        @Override public void run() {
-                            s.tapR = null;
-                            if (!isNone(t)) perform(t);
-                        }
-                    };
-                    h.postDelayed(s.tapR, windowMs);
-                }
-            } else if (!isNone(t)) {
-                perform(t);
-            }
-            return true;
+        long now = SystemClock.uptimeMillis();
+        if (down) {
+            if (s.mask != 0 && now - s.maskAt > 4000) s.mask = 0; // залипшая кнопка
+            boolean first = s.mask == 0;
+            s.mask |= 1 << ch;
+            s.maskAt = now;
+            if (first) pressDown(s, t, d, l, p);
+        } else {
+            if ((s.mask & (1 << ch)) == 0) return true; // это отпускание уже учтено
+            s.mask &= ~(1 << ch);
+            if (s.mask == 0) pressUp(s, t, d, l, p);
         }
         return true;
+    }
+
+    private void pressDown(final KeyState s, final String t, final String d, final String l, SharedPreferences p) {
+        s.down = true;
+        s.longFired = false;
+        s.repeating = false;
+        boolean fast = isRepeatable(t) && isNone(d) && isNone(l);
+        if (fast) {
+            // удержание повторяет действие (громкость, перемотка, прокрутка)
+            perform(t);
+            s.repeating = true;
+            s.repeatR = new Runnable() {
+                @Override public void run() {
+                    if (!s.down) return;
+                    perform(t);
+                    h.postDelayed(this, 140);
+                }
+            };
+            h.postDelayed(s.repeatR, 450);
+        } else if (!isNone(l)) {
+            s.longR = new Runnable() {
+                @Override public void run() {
+                    if (!s.down) return;
+                    s.longFired = true;
+                    perform(l);
+                }
+            };
+            h.postDelayed(s.longR, p.getInt("long_ms", 500));
+        }
+    }
+
+    private void pressUp(final KeyState s, final String t, final String d, final String l, SharedPreferences p) {
+        s.down = false;
+        if (s.longR != null) h.removeCallbacks(s.longR);
+        if (s.repeatR != null) h.removeCallbacks(s.repeatR);
+        if (s.repeating) {
+            s.repeating = false;
+            return;
+        }
+        if (s.longFired) {
+            s.longFired = false;
+            return;
+        }
+        int windowMs = p.getInt("double_ms", 300);
+        if (!isNone(d)) {
+            if (s.tapR != null) {
+                // второе нажатие в окне: двойное
+                h.removeCallbacks(s.tapR);
+                s.tapR = null;
+                perform(d);
+            } else {
+                s.tapR = new Runnable() {
+                    @Override public void run() {
+                        s.tapR = null;
+                        if (!isNone(t)) perform(t);
+                    }
+                };
+                h.postDelayed(s.tapR, windowMs);
+            }
+        } else if (!isNone(t)) {
+            perform(t);
+        }
+    }
+
+    // ---------------------------------------------------------------- канал: сырые события ядра через Shizuku
+
+    private void startEvdev() {
+        if (evdev != null) return;
+        evdev = new Evdev();
+        evdev.start();
+    }
+
+    private void stopEvdev() {
+        Evdev e = evdev;
+        evdev = null;
+        if (e != null) e.shutdown();
+        evStatus = "выключено";
+    }
+
+    /** Устройство ввода, найденное через getevent -pl. */
+    private static final class EvDev {
+        String path = "";
+        String name = "";
+        boolean pad;
+        final boolean[] has = new boolean[0x20];
+        final int[] amin = new int[0x20];
+        final int[] amax = new int[0x20];
+        final int[] abs = new int[0x20];
+    }
+
+    private static final String[] ABS_NAMES = new String[0x12];
+
+    static {
+        ABS_NAMES[0] = "ABS_X";
+        ABS_NAMES[1] = "ABS_Y";
+        ABS_NAMES[2] = "ABS_Z";
+        ABS_NAMES[3] = "ABS_RX";
+        ABS_NAMES[4] = "ABS_RY";
+        ABS_NAMES[5] = "ABS_RZ";
+        ABS_NAMES[6] = "ABS_THROTTLE";
+        ABS_NAMES[7] = "ABS_RUDDER";
+        ABS_NAMES[8] = "ABS_WHEEL";
+        ABS_NAMES[9] = "ABS_GAS";
+        ABS_NAMES[10] = "ABS_BRAKE";
+        ABS_NAMES[16] = "ABS_HAT0X";
+        ABS_NAMES[17] = "ABS_HAT0Y";
+    }
+
+    private static final Pattern ABS_RE = Pattern.compile(
+            "(ABS_[A-Z0-9_]+)\\s*:\\s*value\\s+(-?\\d+),\\s*min\\s+(-?\\d+),\\s*max\\s+(-?\\d+)");
+    private static final Pattern PAD_RE = Pattern.compile("\\bBTN_(SOUTH|A|GAMEPAD|TL|MODE|START)\\b");
+
+    private static int absIndex(String name) {
+        for (int i = 0; i < ABS_NAMES.length; i++) {
+            if (name.equals(ABS_NAMES[i])) return i;
+        }
+        return -1;
+    }
+
+    /** Код кнопки ядра (EV_KEY) в код Android; неизвестные уходят в «дополнительные кнопки». */
+    private static int evToAndroid(int c) {
+        switch (c) {
+            case 0x130: return KeyEvent.KEYCODE_BUTTON_A;
+            case 0x131: return KeyEvent.KEYCODE_BUTTON_B;
+            case 0x133: return KeyEvent.KEYCODE_BUTTON_X;
+            case 0x134: return KeyEvent.KEYCODE_BUTTON_Y;
+            case 0x136: return KeyEvent.KEYCODE_BUTTON_L1;
+            case 0x137: return KeyEvent.KEYCODE_BUTTON_R1;
+            case 0x138: return KeyEvent.KEYCODE_BUTTON_L2;
+            case 0x139: return KeyEvent.KEYCODE_BUTTON_R2;
+            case 0x13a: return KeyEvent.KEYCODE_BUTTON_SELECT;
+            case 0x13b: return KeyEvent.KEYCODE_BUTTON_START;
+            case 0x13c: return KeyEvent.KEYCODE_BUTTON_MODE;
+            case 0x13d: return KeyEvent.KEYCODE_BUTTON_THUMBL;
+            case 0x13e: return KeyEvent.KEYCODE_BUTTON_THUMBR;
+            case 0x220: return KeyEvent.KEYCODE_DPAD_UP;
+            case 0x221: return KeyEvent.KEYCODE_DPAD_DOWN;
+            case 0x222: return KeyEvent.KEYCODE_DPAD_LEFT;
+            case 0x223: return KeyEvent.KEYCODE_DPAD_RIGHT;
+            default: return EXTRA_BASE + c;
+        }
+    }
+
+    private final class Evdev extends Thread {
+        private volatile boolean stopFlag;
+        private final List<Process> procs = new ArrayList<Process>();
+        private final AtomicInteger alive = new AtomicInteger();
+
+        Evdev() {
+            setName("gamepad-evdev");
+            setDaemon(true);
+        }
+
+        @Override
+        public void run() {
+            while (!stopFlag) {
+                try {
+                    if (!ShizukuBridge.hasPermission()) {
+                        evStatus = "Shizuku не готов: запусти приложение Shizuku и выдай хосту доступ";
+                    } else if (alive.get() == 0) {
+                        connect();
+                    }
+                } catch (Throwable t) {
+                    evStatus = "ошибка: " + t;
+                }
+                try {
+                    Thread.sleep(5000);
+                } catch (InterruptedException ie) {
+                    break;
+                }
+            }
+            killAll();
+        }
+
+        void shutdown() {
+            stopFlag = true;
+            interrupt();
+            killAll();
+        }
+
+        private void killAll() {
+            synchronized (procs) {
+                for (Process p : procs) {
+                    try {
+                        p.destroy();
+                    } catch (Throwable ignored) {
+                    }
+                }
+                procs.clear();
+            }
+        }
+
+        /** Находит геймпады среди устройств ввода и запускает чтение сырых событий каждого. */
+        private void connect() {
+            ShizukuResult r = ShizukuBridge.exec("getevent -pl");
+            if (!r.getOk() || r.getOut().length() == 0) {
+                String err = r.getErr();
+                evStatus = "getevent не сработал: " + (err.length() > 0 ? err : "код " + r.getCode());
+                return;
+            }
+            List<EvDev> devs = parseDevices(r.getOut());
+            if (devs.isEmpty()) {
+                evStatus = "геймпад среди устройств ввода не найден (включи его и жди до 5 секунд)";
+                return;
+            }
+            for (final EvDev d : devs) {
+                Thread th = new Thread(new Runnable() {
+                    @Override public void run() {
+                        readDevice(d);
+                    }
+                }, "evdev-" + d.path);
+                th.setDaemon(true);
+                alive.incrementAndGet();
+                th.start();
+            }
+        }
+
+        private List<EvDev> parseDevices(String out) {
+            List<EvDev> res = new ArrayList<EvDev>();
+            EvDev cur = null;
+            for (String line : out.split("\n")) {
+                if (line.startsWith("add device")) {
+                    if (cur != null && cur.pad) res.add(cur);
+                    cur = new EvDev();
+                    int i = line.indexOf("/dev/");
+                    cur.path = i >= 0 ? line.substring(i).trim() : "";
+                } else if (cur != null) {
+                    String t = line.trim();
+                    if (t.startsWith("name:")) cur.name = t.substring(5).trim().replace("\"", "");
+                    Matcher m = ABS_RE.matcher(t);
+                    if (m.find()) {
+                        int idx = absIndex(m.group(1));
+                        if (idx >= 0) {
+                            cur.has[idx] = true;
+                            cur.abs[idx] = Integer.parseInt(m.group(2));
+                            cur.amin[idx] = Integer.parseInt(m.group(3));
+                            cur.amax[idx] = Integer.parseInt(m.group(4));
+                        }
+                    }
+                    if (PAD_RE.matcher(t).find()) cur.pad = true;
+                }
+            }
+            if (cur != null && cur.pad) res.add(cur);
+            List<EvDev> ok = new ArrayList<EvDev>();
+            for (EvDev d : res) {
+                if (d.path.length() > 0) ok.add(d);
+            }
+            return ok;
+        }
+
+        private void readDevice(EvDev d) {
+            Process p = null;
+            try {
+                p = ShizukuBridge.startProcess("getevent " + d.path);
+                if (p == null) {
+                    evStatus = "не удалось запустить getevent через Shizuku";
+                    return;
+                }
+                synchronized (procs) {
+                    procs.add(p);
+                }
+                evStatus = "работает: " + d.name + " (" + d.path + ")";
+                BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()));
+                String line;
+                while (!stopFlag && (line = br.readLine()) != null) handleLine(d, line);
+            } catch (Throwable ignored) {
+            } finally {
+                alive.decrementAndGet();
+                if (p != null) {
+                    try {
+                        p.destroy();
+                    } catch (Throwable ignored) {
+                    }
+                }
+                if (!stopFlag) evStatus = "поток остановлен, переподключение…";
+            }
+        }
+
+        private void handleLine(final EvDev d, String line) {
+            String[] tk = line.trim().split("\\s+");
+            int n = tk.length;
+            if (n < 3) return;
+            int type;
+            int code;
+            int value;
+            try {
+                type = Integer.parseInt(tk[n - 3], 16);
+                code = Integer.parseInt(tk[n - 2], 16);
+                value = (int) Long.parseLong(tk[n - 1], 16);
+            } catch (NumberFormatException nfe) {
+                return;
+            }
+            cnt[CH_EVDEV]++;
+            if (type == 1) {
+                if (value == 2) return;
+                final int kc = evToAndroid(code);
+                final boolean down = value == 1;
+                h.post(new Runnable() {
+                    @Override public void run() {
+                        route(kc, down, CH_EVDEV);
+                    }
+                });
+            } else if (type == 3) {
+                if (code < d.abs.length) d.abs[code] = value;
+            } else if (type == 0 && code == 0) {
+                syn(d);
+            }
+        }
+
+        private float norm(EvDev d, int c) {
+            if (!d.has[c]) return 0f;
+            float mid = (d.amin[c] + d.amax[c]) / 2f;
+            float half = (d.amax[c] - d.amin[c]) / 2f;
+            return half == 0f ? 0f : (d.abs[c] - mid) / half;
+        }
+
+        private float norm01(EvDev d, int c) {
+            if (!d.has[c]) return 0f;
+            float span = d.amax[c] - d.amin[c];
+            if (span == 0f) return 0f;
+            return Math.max(0f, Math.min(1f, (d.abs[c] - d.amin[c]) / span));
+        }
+
+        /** Конец пакета событий: пересчитываем оси и отправляем в главный поток. */
+        private void syn(EvDev d) {
+            float lx = norm(d, 0);
+            float ly = norm(d, 1);
+            float rx;
+            float ry;
+            float lt;
+            float rt;
+            if (d.has[9] || d.has[10]) {
+                lt = norm01(d, 10);
+                rt = norm01(d, 9);
+                if (d.has[3] && d.has[4]) {
+                    rx = norm(d, 3);
+                    ry = norm(d, 4);
+                } else {
+                    rx = norm(d, 2);
+                    ry = norm(d, 5);
+                }
+            } else if (d.has[3] && d.has[4]) {
+                rx = norm(d, 3);
+                ry = norm(d, 4);
+                lt = norm01(d, 2);
+                rt = norm01(d, 5);
+            } else {
+                rx = norm(d, 2);
+                ry = norm(d, 5);
+                lt = 0f;
+                rt = 0f;
+            }
+            final float hx = norm(d, 16);
+            final float hy = norm(d, 17);
+            final float[] a = {lx, ly, rx, ry, lt, rt};
+            h.post(new Runnable() {
+                @Override public void run() {
+                    feedAxes(CH_EVDEV, a[0], a[1], a[2], a[3], a[4], a[5], hx, hy);
+                }
+            });
+        }
     }
 
     // ---------------------------------------------------------------- действия
@@ -535,7 +1040,14 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         l.add(SettingItem.toggle("enabled", "Перехват кнопок геймпада",
                 "Выключи, если кнопки нужны другому приложению", true));
         l.add(SettingItem.custom("pad", "Геймпад",
-                "Коснись кнопки на картинке или нажми её на геймпаде"));
+                "Коснись кнопки на картинке или нажми её на геймпаде, стик подвигай"));
+        l.add(SettingItem.section("Источники ввода"));
+        l.add(SettingItem.toggle("evdev", "Читать геймпад напрямую (Shizuku)",
+                "Стики, курки, крестовина и все кнопки при любом экране и любой версии Android. Нужен запущенный Shizuku",
+                true));
+        l.add(SettingItem.toggle("axes_service", "Стики и курки через службу (Android 14+)",
+                "Пока включено, другие приложения не получают движения стиков", true));
+        l.add(SettingItem.section("Плеер"));
         l.add(SettingItem.toggle("direct_control", "Управлять плеером напрямую",
                 "Команды идут активной медиасессии (нужен доступ к уведомлениям), иначе медиаклавишами", true));
         l.add(SettingItem.action("grant_notifications", "Доступ к уведомлениям",
@@ -548,7 +1060,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         l.add(SettingItem.slider("long_ms", "Долгое нажатие, мс", "", 300, 1000, 50, 500));
         l.add(SettingItem.slider("double_ms", "Окно двойного нажатия, мс", "", 150, 600, 50, 300));
         l.add(SettingItem.section("Сброс"));
-        l.add(SettingItem.action("reset", "Вернуть раскладку по умолчанию", "Сбросит оба профиля"));
+        l.add(SettingItem.action("reset", "Вернуть раскладку по умолчанию", "Сбросит оба профиля и дополнительные кнопки"));
         return l;
     }
 
@@ -563,6 +1075,10 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
             }
             return;
         }
+        if ("evdev".equals(key) || "axes_service".equals(key)) {
+            applyChannels();
+            return;
+        }
         if ("reset".equals(key)) {
             SharedPreferences p = prefs();
             if (p != null) {
@@ -570,6 +1086,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                 for (String k : new ArrayList<String>(p.getAll().keySet())) {
                     if (k.startsWith("m0_") || k.startsWith("m1_")) ed.remove(k);
                 }
+                ed.remove("extra_codes");
                 ed.apply();
             }
             PadView v = sPad;
@@ -609,8 +1126,8 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         final TextView status = new TextView(context);
         status.setTextColor(Color.LTGRAY);
         status.setTextSize(13f);
-        status.setText("Нажми кнопку на геймпаде");
-        final PadView pad = new PadView(context, prefs, status);
+        final PadView pad = new PadView(context, this, prefs, status);
+        pad.note("Нажми кнопку на геймпаде или подвигай стик");
 
         final TextView[] tabs = new TextView[2];
         String[] names = {"Основной", "Для выбранных приложений"};
@@ -662,9 +1179,28 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         return Math.round(v * c.getResources().getDisplayMetrics().density);
     }
 
+    /** Сводка по каналам для строки состояния в настройках. */
+    String diagText() {
+        String axes34 = Build.VERSION.SDK_INT >= 34 ? "доступны" : "нужен Android 14+ (сейчас API " + Build.VERSION.SDK_INT + ")";
+        return "Событий: служба-кнопки " + cnt[CH_SERVICE] + ", окно " + cnt[CH_WINDOW] + ", служба-оси " + cnt[CH_MOTION]
+                + ", evdev " + cnt[CH_EVDEV] + "\nevdev: " + evStatus + "\nОси через службу: " + axes34;
+    }
+
     // ---------------------------------------------------------------- названия и значки действий
 
     static String slotName(int code) {
+        switch (code) {
+            case V_LS_UP: return "Левый стик вверх";
+            case V_LS_DOWN: return "Левый стик вниз";
+            case V_LS_LEFT: return "Левый стик влево";
+            case V_LS_RIGHT: return "Левый стик вправо";
+            case V_RS_UP: return "Правый стик вверх";
+            case V_RS_DOWN: return "Правый стик вниз";
+            case V_RS_LEFT: return "Правый стик влево";
+            case V_RS_RIGHT: return "Правый стик вправо";
+            default: break;
+        }
+        if (code >= EXTRA_BASE) return "Кнопка 0x" + Integer.toHexString(code - EXTRA_BASE) + " (evdev)";
         String n = KeyEvent.keyCodeToString(code);
         return n.startsWith("KEYCODE_") ? n.substring(8) : n;
     }
@@ -836,6 +1372,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
     // ---------------------------------------------------------------- картинка геймпада
 
     static final class PadView extends View {
+        private final GamepadModule owner;
         private final SharedPreferences prefs;
         private final TextView status;
         private final Paint body = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -846,10 +1383,14 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         private int hiCode = -1;
         private long hiUntil;
         private AlertDialog editor;
-        private int lastAxis = -1;
+        private String lastNote = "";
+        private String lastAxes = "";
+        private int lastCode = -1;
+        private long lastCodeAt;
 
-        PadView(Context context, SharedPreferences prefs, TextView status) {
+        PadView(Context context, GamepadModule owner, SharedPreferences prefs, TextView status) {
             super(context);
+            this.owner = owner;
             this.prefs = prefs;
             this.status = status;
             setFocusable(true);
@@ -880,10 +1421,121 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
             super.onDetachedFromWindow();
         }
 
+        private void refreshStatus() {
+            status.setText(lastNote + (lastAxes.length() > 0 ? "\n" + lastAxes : "") + "\n" + owner.diagText());
+        }
+
+        void note(final String s) {
+            post(new Runnable() {
+                @Override public void run() {
+                    lastNote = s;
+                    refreshStatus();
+                }
+            });
+        }
+
+        void noteAxes(final String s) {
+            post(new Runnable() {
+                @Override public void run() {
+                    lastAxes = s;
+                    refreshStatus();
+                }
+            });
+        }
+
+        /** Кнопки и направления из любого канала при открытом экране настроек. */
+        void onPhysicalKey(final int code, final int ch) {
+            post(new Runnable() {
+                @Override public void run() {
+                    long now = SystemClock.uptimeMillis();
+                    if (code == lastCode && now - lastCodeAt < 500) return; // тот же нажим пришёл по другому каналу
+                    lastCode = code;
+                    lastCodeAt = now;
+                    lastNote = "Нажато: " + slotName(code) + " (" + code + "), канал: " + CHN[ch];
+                    refreshStatus();
+                    if (editor != null && editor.isShowing()) return;
+                    if (slotFor(code) == null) addExtra(code);
+                    hiCode = code;
+                    hiUntil = SystemClock.uptimeMillis() + 1200;
+                    invalidate();
+                    openEditor(code);
+                }
+            });
+        }
+
+        // дополнительные кнопки: коды, которых нет на картинке, запоминаются и рисуются внизу
+        private List<Integer> extras() {
+            List<Integer> res = new ArrayList<Integer>();
+            String csv = prefs.getString("extra_codes", "");
+            if (csv == null) return res;
+            for (String s : csv.split(",")) {
+                if (s.length() == 0) continue;
+                try {
+                    res.add(Integer.valueOf(s));
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            return res;
+        }
+
+        private void addExtra(int code) {
+            List<Integer> ex = extras();
+            if (ex.contains(Integer.valueOf(code)) || ex.size() >= 10) return;
+            StringBuilder sb = new StringBuilder();
+            for (Integer i : ex) sb.append(i).append(',');
+            sb.append(code);
+            prefs.edit().putString("extra_codes", sb.toString()).apply();
+        }
+
+        private List<int[]> slots() {
+            List<int[]> all = new ArrayList<int[]>();
+            for (int[] sl : SLOTS) all.add(sl);
+            List<Integer> ex = extras();
+            for (int i = 0; i < ex.size(); i++) {
+                all.add(new int[]{ex.get(i).intValue(), 70 + i * 90, 665, 32, 0, 0});
+            }
+            return all;
+        }
+
+        private int[] slotFor(int code) {
+            for (int[] sl : slots()) {
+                if (sl[0] == code) return sl;
+            }
+            return null;
+        }
+
+        @Override
+        public boolean onKeyDown(int keyCode, KeyEvent event) {
+            if (isPadEvent(event) && event.getRepeatCount() == 0) {
+                owner.cnt[CH_WINDOW]++;
+                owner.route(keyCode, true, CH_WINDOW);
+                return true;
+            }
+            return super.onKeyDown(keyCode, event);
+        }
+
+        @Override
+        public boolean onKeyUp(int keyCode, KeyEvent event) {
+            if (isPadEvent(event)) {
+                owner.route(keyCode, false, CH_WINDOW);
+                return true;
+            }
+            return super.onKeyUp(keyCode, event);
+        }
+
+        @Override
+        public boolean onGenericMotionEvent(MotionEvent e) {
+            if ((e.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) {
+                owner.feedMotion(e, CH_WINDOW);
+                return true;
+            }
+            return super.onGenericMotionEvent(e);
+        }
+
         @Override
         protected void onMeasure(int wSpec, int hSpec) {
             int w = MeasureSpec.getSize(wSpec);
-            setMeasuredDimension(w, Math.round(w * 0.62f));
+            setMeasuredDimension(w, Math.round(w * 0.70f));
         }
 
         @Override
@@ -894,14 +1546,14 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
 
             body.setStyle(Paint.Style.FILL);
             body.setColor(Color.rgb(18, 18, 18));
-            c.drawRoundRect(new RectF(70, 150, 930, 590), 210, 210, body);
+            c.drawRoundRect(new RectF(70, 150, 930, 615), 210, 210, body);
             body.setStyle(Paint.Style.STROKE);
             body.setStrokeWidth(4);
             body.setColor(Color.rgb(110, 110, 110));
-            c.drawRoundRect(new RectF(70, 150, 930, 590), 210, 210, body);
+            c.drawRoundRect(new RectF(70, 150, 930, 615), 210, 210, body);
 
             boolean hi = SystemClock.uptimeMillis() < hiUntil;
-            for (int[] sl : SLOTS) {
+            for (int[] sl : slots()) {
                 int code = sl[0];
                 float x = sl[1];
                 float y = sl[2];
@@ -925,14 +1577,45 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                 String d = action(prefs, profile, code, "d");
                 String l = action(prefs, profile, code, "l");
                 boolean inherited = profile == 1 && !prefs.contains(key(1, code, "t"));
-                drawIcon(c, t, x, y, r * 0.62f, inherited ? 90 : 255, iconFor(t));
+                if (isNone(t) && sl[5] != 0) {
+                    drawDirection(c, x, y, r, sl[5]);
+                } else {
+                    drawIcon(c, t, x, y, r * 0.62f, inherited ? 90 : 255, iconFor(t));
+                }
 
                 fill.setColor(Color.WHITE);
-                if (!isNone(d)) c.drawCircle(x - r * 0.45f, y + r * 0.82f, 5, fill);
-                if (!isNone(l)) c.drawCircle(x + r * 0.45f, y + r * 0.82f, 5, fill);
+                if (!isNone(d)) c.drawCircle(x - r * 0.45f, y + r * 0.82f, 4, fill);
+                if (!isNone(l)) c.drawCircle(x + r * 0.45f, y + r * 0.82f, 4, fill);
             }
             c.restore();
             if (hi) postInvalidateDelayed(Math.max(50, hiUntil - SystemClock.uptimeMillis() + 20));
+        }
+
+        /** Бледная стрелка на слоте направления без действия. */
+        private void drawDirection(Canvas c, float x, float y, float r, int dir) {
+            fill.setStyle(Paint.Style.FILL);
+            fill.setColor(Color.argb(90, 255, 255, 255));
+            float s = r * 0.5f;
+            Path p = new Path();
+            if (dir == 1) {
+                p.moveTo(x, y - s);
+                p.lineTo(x - s, y + s * 0.6f);
+                p.lineTo(x + s, y + s * 0.6f);
+            } else if (dir == 2) {
+                p.moveTo(x, y + s);
+                p.lineTo(x - s, y - s * 0.6f);
+                p.lineTo(x + s, y - s * 0.6f);
+            } else if (dir == 3) {
+                p.moveTo(x - s, y);
+                p.lineTo(x + s * 0.6f, y - s);
+                p.lineTo(x + s * 0.6f, y + s);
+            } else {
+                p.moveTo(x + s, y);
+                p.lineTo(x - s * 0.6f, y - s);
+                p.lineTo(x - s * 0.6f, y + s);
+            }
+            p.close();
+            c.drawPath(p, fill);
         }
 
         private Drawable iconFor(String a) {
@@ -961,7 +1644,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
             float y = py / sc;
             int[] best = null;
             float bestD = Float.MAX_VALUE;
-            for (int[] sl : SLOTS) {
+            for (int[] sl : slots()) {
                 float dx = x - sl[1];
                 float dy = y - sl[2];
                 float dist = (float) Math.sqrt(dx * dx + dy * dy);
@@ -990,49 +1673,6 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         @Override
         public boolean performClick() {
             return super.performClick();
-        }
-
-        /** Нажатие настоящей кнопки геймпада при открытом экране настроек. */
-        void onPhysicalKey(final int code) {
-            post(new Runnable() {
-                @Override public void run() {
-                    status.setText("Нажато: " + slotName(code) + " (" + code + ")");
-                    if (editor != null && editor.isShowing()) return;
-                    boolean known = false;
-                    for (int[] sl : SLOTS) if (sl[0] == code) known = true;
-                    if (!known) {
-                        status.setText("Кнопки " + slotName(code) + " (" + code + ") нет на картинке, назначить её нельзя");
-                        return;
-                    }
-                    hiCode = code;
-                    hiUntil = SystemClock.uptimeMillis() + 1200;
-                    invalidate();
-                    openEditor(code);
-                }
-            });
-        }
-
-        /** Стики и курки приходят как оси; показываем, что именно прилетает. */
-        @Override
-        public boolean onGenericMotionEvent(MotionEvent e) {
-            if ((e.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
-                    && e.getAction() == MotionEvent.ACTION_MOVE) {
-                int[] axes = {MotionEvent.AXIS_X, MotionEvent.AXIS_Y, MotionEvent.AXIS_Z, MotionEvent.AXIS_RZ,
-                        MotionEvent.AXIS_LTRIGGER, MotionEvent.AXIS_RTRIGGER, MotionEvent.AXIS_BRAKE,
-                        MotionEvent.AXIS_GAS, MotionEvent.AXIS_HAT_X, MotionEvent.AXIS_HAT_Y};
-                for (int ax : axes) {
-                    float v = e.getAxisValue(ax);
-                    if (Math.abs(v) > 0.6f && ax != lastAxis) {
-                        lastAxis = ax;
-                        status.setText("Ось " + MotionEvent.axisToString(ax) + " " + Math.round(v * 100) / 100f
-                                + ": это ось, а не кнопка, назначить её нельзя");
-                        return true;
-                    }
-                    if (ax == lastAxis && Math.abs(v) < 0.3f) lastAxis = -1;
-                }
-                return true;
-            }
-            return super.onGenericMotionEvent(e);
         }
 
         // ------------------------------------------------------------ выбор действий
