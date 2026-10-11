@@ -16,6 +16,14 @@ jobs:
         java-version: "17"
         distribution: "temurin"
         cache: gradle
+    # Keep the Android debug signing key between ephemeral GitHub runners.
+    # Without this cache, every fresh runner may generate a different key,
+    # forcing users to uninstall the host before installing an update.
+    - name: Restore persistent debug signing key
+      uses: actions/cache@v4
+      with:
+        path: ~/.android/debug.keystore
+        key: universal-host-debug-signing-key-v1
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
     - name: Build APK
