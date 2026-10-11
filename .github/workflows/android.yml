@@ -16,14 +16,16 @@ jobs:
         java-version: "17"
         distribution: "temurin"
         cache: gradle
-    # Keep the Android debug signing key between ephemeral GitHub runners.
-    # Without this cache, every fresh runner may generate a different key,
-    # forcing users to uninstall the host before installing an update.
-    - name: Restore persistent debug signing key
-      uses: actions/cache@v4
-      with:
-        path: ~/.android/debug.keystore
-        key: universal-host-debug-signing-key-v1
+    # Debug signing key lives in the repo (ci/debug.keystore.b64), so every build is signed
+    # with the same key regardless of runner or cache state, and APK updates install over
+    # the previous version without uninstalling it.
+    - name: Install persistent debug signing key
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.android
+        base64 -d ci/debug.keystore.b64 > ~/.android/debug.keystore
+        keytool -list -keystore ~/.android/debug.keystore -storepass android | grep -i 'androiddebugkey'
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
     - name: Build APK
