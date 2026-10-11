@@ -55,9 +55,9 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -230,6 +230,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
     private final SparseBooleanArray vstate = new SparseBooleanArray();
     private final int[] cnt = new int[4];
     private volatile String evStatus = "выключено";
+    private volatile long evLastAt;
     private Evdev evdev;
     private boolean torchOn;
     private String torchId;
@@ -621,6 +622,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
 
     private static final Pattern ABS_RE = Pattern.compile(
             "(ABS_[A-Z0-9_]+)\\s*:\\s*value\\s+(-?\\d+),\\s*min\\s+(-?\\d+),\\s*max\\s+(-?\\d+)");
+    private static final Pattern LS_RE = Pattern.compile("^(\\d+)\\s+.*\\b(event\\d+)$");
     private static final Pattern PAD_RE = Pattern.compile("\\bBTN_(SOUTH|A|GAMEPAD|TL|MODE|START)\\b");
 
     private static int absIndex(String name) {
@@ -654,10 +656,53 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         }
     }
 
+    /** Отпускает все кнопки, которые держал канал (например, когда геймпад отключился посреди нажатия). Главный поток. */
+    private void releaseChannel(int ch) {
+        List<Integer> codes = new ArrayList<Integer>();
+        for (int i = 0; i < states.size(); i++) {
+            if ((states.valueAt(i).mask & (1 << ch)) != 0) codes.add(Integer.valueOf(states.keyAt(i)));
+        }
+        for (Integer c : codes) route(c.intValue(), false, ch);
+        List<Integer> vk = new ArrayList<Integer>();
+        for (int i = 0; i < vstate.size(); i++) {
+            int k = vstate.keyAt(i);
+            if (k / 100000 == ch && vstate.valueAt(i)) vk.add(Integer.valueOf(k % 100000));
+        }
+        for (Integer c : vk) vset(ch, c.intValue(), false);
+    }
+
     private final class Evdev extends Thread {
         private volatile boolean stopFlag;
-        private final List<Process> procs = new ArrayList<Process>();
-        private final AtomicInteger alive = new AtomicInteger();
+        private final Map<String, Stream> streams = new HashMap<String, Stream>();
+        private String lastSnap = "";
+
+        /** Чтение одного устройства. Узел считается прежним, пока совпадают путь и inode: после сна геймпада узел пересоздаётся. */
+        private final class Stream {
+            final String path;
+            final String inode;
+            volatile boolean dead;
+            volatile Process proc;
+
+            Stream(String path, String inode) {
+                this.path = path;
+                this.inode = inode;
+            }
+
+            void kill() {
+                dead = true;
+                Process p = proc;
+                if (p != null) {
+                    try {
+                        p.destroy();
+                    } catch (Throwable ignored) {
+                    }
+                    try {
+                        p.getInputStream().close();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        }
 
         Evdev() {
             setName("gamepad-evdev");
@@ -670,41 +715,94 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                 try {
                     if (!ShizukuBridge.hasPermission()) {
                         evStatus = "Shizuku не готов: запусти приложение Shizuku и выдай хосту доступ";
-                    } else if (alive.get() == 0) {
-                        connect();
+                        dropAll();
+                        lastSnap = "";
+                    } else {
+                        tick();
                     }
                 } catch (Throwable t) {
                     evStatus = "ошибка: " + t;
                 }
                 try {
-                    Thread.sleep(5000);
+                    Thread.sleep(3000);
                 } catch (InterruptedException ie) {
                     break;
                 }
             }
-            killAll();
+            dropAll();
         }
 
         void shutdown() {
             stopFlag = true;
             interrupt();
-            killAll();
+            dropAll();
         }
 
-        private void killAll() {
-            synchronized (procs) {
-                for (Process p : procs) {
-                    try {
-                        p.destroy();
-                    } catch (Throwable ignored) {
+        private void dropAll() {
+            boolean any;
+            synchronized (streams) {
+                any = !streams.isEmpty();
+                for (Stream s : streams.values()) s.kill();
+                streams.clear();
+            }
+            if (any) releaseLater();
+        }
+
+        private void releaseLater() {
+            h.post(new Runnable() {
+                @Override public void run() {
+                    releaseChannel(CH_EVDEV);
+                }
+            });
+        }
+
+        /** inode узлов /dev/input: по ним видно, что геймпад отключился или переподключился под тем же именем. */
+        private Map<String, String> parseLs(String out) {
+            Map<String, String> m = new HashMap<String, String>();
+            for (String line : out.split("\n")) {
+                Matcher mt = LS_RE.matcher(line.trim());
+                if (mt.find()) m.put("/dev/input/" + mt.group(2), mt.group(1));
+            }
+            return m;
+        }
+
+        /** Раз в три секунды: убираем потоки пропавших или пересозданных устройств, ищем новые. */
+        private void tick() {
+            ShizukuResult ls = ShizukuBridge.exec("ls -li /dev/input");
+            if (!ls.getOk() || ls.getOut().length() == 0) {
+                String err = ls.getErr();
+                evStatus = "ls /dev/input не сработал: " + (err.length() > 0 ? err : "код " + ls.getCode());
+                return;
+            }
+            Map<String, String> nodes = parseLs(ls.getOut());
+            boolean dropped = false;
+            boolean empty;
+            synchronized (streams) {
+                Iterator<Map.Entry<String, Stream>> it = streams.entrySet().iterator();
+                while (it.hasNext()) {
+                    Stream s = it.next().getValue();
+                    String ino = nodes.get(s.path);
+                    if (s.dead || ino == null || !ino.equals(s.inode)) {
+                        s.kill();
+                        it.remove();
+                        dropped = true;
                     }
                 }
-                procs.clear();
+                empty = streams.isEmpty();
+            }
+            if (dropped) {
+                releaseLater();
+                evStatus = "геймпад отключился, жду подключения…";
+            }
+            String snap = ls.getOut();
+            if (empty || !snap.equals(lastSnap)) {
+                lastSnap = snap;
+                discover(nodes);
             }
         }
 
         /** Находит геймпады среди устройств ввода и запускает чтение сырых событий каждого. */
-        private void connect() {
+        private void discover(Map<String, String> nodes) {
             ShizukuResult r = ShizukuBridge.exec("getevent -pl");
             if (!r.getOk() || r.getOut().length() == 0) {
                 String err = r.getErr();
@@ -712,19 +810,26 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                 return;
             }
             List<EvDev> devs = parseDevices(r.getOut());
-            if (devs.isEmpty()) {
-                evStatus = "геймпад среди устройств ввода не найден (включи его и жди до 5 секунд)";
-                return;
-            }
             for (final EvDev d : devs) {
+                String ino = nodes.get(d.path);
+                if (ino == null) continue;
+                final Stream s;
+                synchronized (streams) {
+                    Stream old = streams.get(d.path);
+                    if (old != null && !old.dead && ino.equals(old.inode)) continue;
+                    s = new Stream(d.path, ino);
+                    streams.put(d.path, s);
+                }
                 Thread th = new Thread(new Runnable() {
                     @Override public void run() {
-                        readDevice(d);
+                        readDevice(d, s);
                     }
                 }, "evdev-" + d.path);
                 th.setDaemon(true);
-                alive.incrementAndGet();
                 th.start();
+            }
+            synchronized (streams) {
+                if (streams.isEmpty()) evStatus = "геймпад среди устройств ввода не найден (разбуди его кнопкой Xbox)";
             }
         }
 
@@ -761,7 +866,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
             return ok;
         }
 
-        private void readDevice(EvDev d) {
+        private void readDevice(EvDev d, Stream s) {
             Process p = null;
             try {
                 p = ShizukuBridge.startProcess("getevent " + d.path);
@@ -769,23 +874,21 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                     evStatus = "не удалось запустить getevent через Shizuku";
                     return;
                 }
-                synchronized (procs) {
-                    procs.add(p);
-                }
+                s.proc = p;
+                if (s.dead) return;
                 evStatus = "работает: " + d.name + " (" + d.path + ")";
                 BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()));
                 String line;
-                while (!stopFlag && (line = br.readLine()) != null) handleLine(d, line);
+                while (!stopFlag && !s.dead && (line = br.readLine()) != null) handleLine(d, line);
             } catch (Throwable ignored) {
             } finally {
-                alive.decrementAndGet();
+                s.dead = true;
                 if (p != null) {
                     try {
                         p.destroy();
                     } catch (Throwable ignored) {
                     }
                 }
-                if (!stopFlag) evStatus = "поток остановлен, переподключение…";
             }
         }
 
@@ -804,6 +907,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                 return;
             }
             cnt[CH_EVDEV]++;
+            evLastAt = SystemClock.uptimeMillis();
             if (type == 1) {
                 if (value == 2) return;
                 final int kc = evToAndroid(code);
@@ -1179,11 +1283,17 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         return Math.round(v * c.getResources().getDisplayMetrics().density);
     }
 
+    private String evAge() {
+        long t = evLastAt;
+        if (t == 0) return "";
+        return ", последнее событие " + (SystemClock.uptimeMillis() - t) / 1000 + " с назад";
+    }
+
     /** Сводка по каналам для строки состояния в настройках. */
     String diagText() {
         String axes34 = Build.VERSION.SDK_INT >= 34 ? "доступны" : "нужен Android 14+ (сейчас API " + Build.VERSION.SDK_INT + ")";
         return "Событий: служба-кнопки " + cnt[CH_SERVICE] + ", окно " + cnt[CH_WINDOW] + ", служба-оси " + cnt[CH_MOTION]
-                + ", evdev " + cnt[CH_EVDEV] + "\nevdev: " + evStatus + "\nОси через службу: " + axes34;
+                + ", evdev " + cnt[CH_EVDEV] + "\nevdev: " + evStatus + evAge() + "\nОси через службу: " + axes34;
     }
 
     // ---------------------------------------------------------------- названия и значки действий
