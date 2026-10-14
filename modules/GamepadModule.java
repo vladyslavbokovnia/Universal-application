@@ -2,10 +2,8 @@ package im.manus.plugins;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
-import android.app.AlertDialog;
 import android.content.ComponentName;
 import android.content.Context;
-import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -15,6 +13,7 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
@@ -29,6 +28,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.text.TextUtils;
 import android.util.SparseArray;
 import android.util.SparseBooleanArray;
 import android.view.Gravity;
@@ -38,6 +38,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.accessibility.AccessibilityEvent;
+import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -210,12 +211,27 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
     /** Действие кнопки в профиле; во втором профиле незаданное берётся из основного. */
     static String action(SharedPreferences p, int profile, int code, String g) {
         String k = key(profile, code, g);
-        if (profile == 1) {
+        if (profile >= 1) {
             if (p.contains(k)) return p.getString(k, "none");
             k = key(0, code, g);
         }
         String d = DEF.get(k);
         return p.getString(k, d == null ? "none" : d);
+    }
+
+    // ---------------------------------------------------------------- профили
+
+    static final int PROFILES = 4; // 0 основной, 1..3 для выбранных приложений
+
+    static String profileName(SharedPreferences p, int n) {
+        return n == 0 ? "Основной" : p.getString("pname_" + n, "Профиль " + n);
+    }
+
+    /** Пакеты приложений профиля через запятую (у первого профиля читается и прежний ключ profile_apps). */
+    static String profileApps(SharedPreferences p, int n) {
+        String s = p.getString("profile_apps_" + n, null);
+        if (s == null && n == 1) s = p.getString("profile_apps", "");
+        return s == null ? "" : s;
     }
 
     // ---------------------------------------------------------------- состояние
@@ -310,12 +326,16 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         return c == null ? null : c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
     }
 
+    /** Профиль первого из 1..3, в чьём списке есть приложение на переднем плане; иначе основной. */
     private int currentProfile(SharedPreferences p) {
         String pkg = fgPackage;
-        String csv = p.getString("profile_apps", "");
-        if (pkg == null || csv == null || csv.length() == 0) return 0;
-        for (String s : csv.split("[,; \\n]+")) {
-            if (s.equals(pkg)) return 1;
+        if (pkg == null) return 0;
+        for (int n = 1; n < PROFILES; n++) {
+            String csv = profileApps(p, n);
+            if (csv.length() == 0) continue;
+            for (String x : csv.split("[,; \\n]+")) {
+                if (x.equals(pkg)) return n;
+            }
         }
         return 0;
     }
@@ -1144,7 +1164,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         l.add(SettingItem.toggle("enabled", "Перехват кнопок геймпада",
                 "Выключи, если кнопки нужны другому приложению", true));
         l.add(SettingItem.custom("pad", "Геймпад",
-                "Коснись кнопки на картинке или нажми её на геймпаде, стик подвигай"));
+                "Выбери профиль, коснись кнопки на картинке или нажми её на геймпаде, стик подвигай. Приложения профилей выбираются тут же"));
         l.add(SettingItem.section("Источники ввода"));
         l.add(SettingItem.toggle("evdev", "Читать геймпад напрямую (Shizuku)",
                 "Стики, курки, крестовина и все кнопки при любом экране и любой версии Android. Нужен запущенный Shizuku",
@@ -1157,14 +1177,11 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         l.add(SettingItem.action("grant_notifications", "Доступ к уведомлениям",
                 "Откроет системные настройки: включи Universal Host"));
         l.add(SettingItem.slider("seek_s", "Шаг перемотки, с", "", 5, 60, 5, 10));
-        l.add(SettingItem.section("Второй профиль"));
-        l.add(SettingItem.appPicker("profile_apps", "Приложения второго профиля",
-                "Не выбрано: работает только основной профиль", ""));
         l.add(SettingItem.section("Тайминги"));
         l.add(SettingItem.slider("long_ms", "Долгое нажатие, мс", "", 300, 1000, 50, 500));
         l.add(SettingItem.slider("double_ms", "Окно двойного нажатия, мс", "", 150, 600, 50, 300));
         l.add(SettingItem.section("Сброс"));
-        l.add(SettingItem.action("reset", "Вернуть раскладку по умолчанию", "Сбросит оба профиля и дополнительные кнопки"));
+        l.add(SettingItem.action("reset", "Вернуть раскладку по умолчанию", "Сбросит кнопки всех профилей и дополнительные кнопки; названия и приложения профилей останутся"));
         return l;
     }
 
@@ -1188,7 +1205,9 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
             if (p != null) {
                 SharedPreferences.Editor ed = p.edit();
                 for (String k : new ArrayList<String>(p.getAll().keySet())) {
-                    if (k.startsWith("m0_") || k.startsWith("m1_")) ed.remove(k);
+                    for (int n = 0; n < PROFILES; n++) {
+                        if (k.startsWith("m" + n + "_")) ed.remove(k);
+                    }
                 }
                 ed.remove("extra_codes");
                 ed.apply();
@@ -1221,6 +1240,13 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
 
     // ---------------------------------------------------------------- ISettingsViewProvider
 
+    private static LinearLayout box(Context c) {
+        LinearLayout b = new LinearLayout(c);
+        b.setOrientation(LinearLayout.VERTICAL);
+        b.setBackgroundColor(Color.rgb(26, 26, 26));
+        return b;
+    }
+
     @Override
     public View createSettingsView(Context context, String key) {
         final SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
@@ -1233,33 +1259,47 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         final PadView pad = new PadView(context, this, prefs, status);
         pad.note("Нажми кнопку на геймпаде или подвигай стик");
 
-        final TextView[] tabs = new TextView[2];
-        String[] names = {"Основной", "Для выбранных приложений"};
+        final TextView[] tabs = new TextView[PROFILES];
         LinearLayout row = new LinearLayout(context);
         row.setOrientation(LinearLayout.HORIZONTAL);
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < PROFILES; i++) {
             final int idx = i;
             TextView tv = new TextView(context);
-            tv.setText(names[i]);
-            tv.setTextSize(14f);
+            tv.setTextSize(13f);
             tv.setGravity(Gravity.CENTER);
+            tv.setSingleLine(true);
+            tv.setEllipsize(TextUtils.TruncateAt.END);
             int pad8 = dp(context, 8);
             tv.setPadding(pad8, pad8, pad8, pad8);
             tv.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) {
                     pad.setProfile(idx);
-                    styleTabs(tabs, idx);
                 }
             });
             tabs[i] = tv;
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-            lp.rightMargin = dp(context, 6);
+            lp.rightMargin = dp(context, 4);
             row.addView(tv, lp);
         }
-        styleTabs(tabs, 0);
+        LinearLayout profileBox = box(context);
+        LinearLayout panel = box(context);
+        panel.setVisibility(View.GONE);
+        LinearLayout list = new LinearLayout(context);
+        list.setOrientation(LinearLayout.VERTICAL);
+        pad.bind(panel, list, profileBox, tabs);
+
         root.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams boxLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        boxLp.topMargin = dp(context, 8);
+        root.addView(profileBox, boxLp);
         root.addView(pad, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams panelLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        panelLp.topMargin = dp(context, 8);
+        root.addView(panel, panelLp);
         root.addView(status, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams listLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        listLp.topMargin = dp(context, 8);
+        root.addView(list, listLp);
         return root;
     }
 
@@ -1492,11 +1532,15 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         private int profile;
         private int hiCode = -1;
         private long hiUntil;
-        private AlertDialog editor;
         private String lastNote = "";
         private String lastAxes = "";
         private int lastCode = -1;
         private long lastCodeAt;
+        private LinearLayout panel;
+        private LinearLayout list;
+        private LinearLayout profileBox;
+        private TextView[] tabs;
+        private boolean renaming;
 
         PadView(Context context, GamepadModule owner, SharedPreferences prefs, TextView status) {
             super(context);
@@ -1505,11 +1549,22 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
             this.status = status;
             setFocusable(true);
             setFocusableInTouchMode(true);
+            setContentDescription("Картинка геймпада. Все кнопки со списком назначений идут ниже текстом");
+        }
+
+        /** Подключает блоки интерфейса вокруг картинки: панель выбора, список кнопок, карточку профиля и вкладки. */
+        void bind(LinearLayout panel, LinearLayout list, LinearLayout profileBox, TextView[] tabs) {
+            this.panel = panel;
+            this.list = list;
+            this.profileBox = profileBox;
+            this.tabs = tabs;
+            refreshAll();
         }
 
         void setProfile(int p) {
             profile = p;
-            invalidate();
+            hidePanel();
+            refreshAll();
         }
 
         /** Экран настроек на виду: кнопки геймпада выбирают слот, а не выполняют действия. */
@@ -1527,7 +1582,6 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         @Override
         protected void onDetachedFromWindow() {
             if (sPad == this) sPad = null;
-            if (editor != null && editor.isShowing()) editor.dismiss();
             super.onDetachedFromWindow();
         }
 
@@ -1563,12 +1617,12 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                     lastCodeAt = now;
                     lastNote = "Нажато: " + slotName(code) + " (" + code + "), канал: " + CHN[ch];
                     refreshStatus();
-                    if (editor != null && editor.isShowing()) return;
+                    if (renaming) return;
                     if (slotFor(code) == null) addExtra(code);
                     hiCode = code;
                     hiUntil = SystemClock.uptimeMillis() + 1200;
-                    invalidate();
-                    openEditor(code);
+                    refreshAll();
+                    showEditor(code);
                 }
             });
         }
@@ -1686,7 +1740,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                 String t = action(prefs, profile, code, "t");
                 String d = action(prefs, profile, code, "d");
                 String l = action(prefs, profile, code, "l");
-                boolean inherited = profile == 1 && !prefs.contains(key(1, code, "t"));
+                boolean inherited = profile >= 1 && !prefs.contains(key(profile, code, "t"));
                 if (isNone(t) && sl[5] != 0) {
                     drawDirection(c, x, y, r, sl[5]);
                 } else {
@@ -1773,7 +1827,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                 int[] sl = slotAt(e.getX(), e.getY());
                 if (sl != null) {
                     performClick();
-                    openEditor(sl[0]);
+                    showEditor(sl[0]);
                 }
                 return true;
             }
@@ -1785,124 +1839,380 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
             return super.performClick();
         }
 
-        // ------------------------------------------------------------ выбор действий
+        // ------------------------------------------------------------ блоки интерфейса вместо всплывающих окон
 
-        private void openEditor(final int code) {
-            final Context ctx = getContext();
+        private TextView text(String s, float sp, int color, boolean bold) {
+            TextView t = new TextView(getContext());
+            t.setText(s);
+            t.setTextSize(sp);
+            t.setTextColor(color);
+            if (bold) t.setTypeface(t.getTypeface(), android.graphics.Typeface.BOLD);
+            return t;
+        }
+
+        private void addSeparator(LinearLayout parent) {
+            View sep = new View(getContext());
+            sep.setBackgroundColor(Color.rgb(70, 70, 70));
+            parent.addView(sep, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1));
+        }
+
+        /** Строка списка: значок слева, заголовок и необязательная подпись. Белый текст на тёмном фоне, читается и скринридером. */
+        private void addRow(LinearLayout parent, Bitmap bmp, Drawable dr, String title, String sub, int titleColor,
+                            View.OnClickListener click) {
+            Context ctx = getContext();
+            LinearLayout r = new LinearLayout(ctx);
+            r.setOrientation(LinearLayout.HORIZONTAL);
+            r.setGravity(Gravity.CENTER_VERTICAL);
+            int pd = dp(ctx, 12);
+            r.setPadding(pd, pd, pd, pd);
+            r.setMinimumHeight(dp(ctx, 56));
+            if (bmp != null || dr != null) {
+                ImageView iv = new ImageView(ctx);
+                if (bmp != null) iv.setImageBitmap(bmp);
+                else iv.setImageDrawable(dr);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(ctx, 36), dp(ctx, 36));
+                lp.rightMargin = dp(ctx, 12);
+                r.addView(iv, lp);
+            }
             LinearLayout col = new LinearLayout(ctx);
             col.setOrientation(LinearLayout.VERTICAL);
-            int pad = dp(ctx, 16);
-            col.setPadding(pad, dp(ctx, 8), pad, 0);
+            col.addView(text(title, 18f, titleColor, false));
+            if (sub != null && sub.length() > 0) col.addView(text(sub, 14f, Color.LTGRAY, false));
+            r.addView(col, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            if (click != null) {
+                r.setClickable(true);
+                r.setFocusable(true);
+                r.setOnClickListener(click);
+            }
+            parent.addView(r, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            addSeparator(parent);
+        }
+
+        private TextView addCheckRow(LinearLayout parent, String label, boolean on, View.OnClickListener click) {
+            Context ctx = getContext();
+            TextView t = text((on ? "✓ " : "☐ ") + label, 18f, Color.WHITE, false);
+            int pd = dp(ctx, 12);
+            t.setPadding(pd, pd, pd, pd);
+            t.setMinHeight(dp(ctx, 52));
+            t.setGravity(Gravity.CENTER_VERTICAL);
+            t.setClickable(true);
+            t.setFocusable(true);
+            t.setOnClickListener(click);
+            parent.addView(t, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            addSeparator(parent);
+            return t;
+        }
+
+        private void panelStart(String title) {
+            Context ctx = getContext();
+            panel.removeAllViews();
+            panel.setVisibility(View.VISIBLE);
+            TextView t = text(title, 20f, Color.WHITE, true);
+            t.setPadding(dp(ctx, 12), dp(ctx, 10), dp(ctx, 12), dp(ctx, 10));
+            panel.addView(t);
+            addSeparator(panel);
+        }
+
+        private void panelEnd() {
+            panel.post(new Runnable() {
+                @Override public void run() {
+                    panel.requestRectangleOnScreen(new Rect(0, 0, panel.getWidth(),
+                            Math.min(panel.getHeight(), dp(getContext(), 300))), false);
+                }
+            });
+        }
+
+        void hidePanel() {
+            renaming = false;
+            if (panel != null) {
+                panel.removeAllViews();
+                panel.setVisibility(View.GONE);
+            }
+        }
+
+        /** Вкладки, карточка профиля, список всех кнопок и сама картинка. */
+        void refreshAll() {
+            invalidate();
+            if (tabs != null) {
+                for (int i = 0; i < tabs.length; i++) tabs[i].setText(profileName(prefs, i));
+                styleTabs(tabs, profile);
+            }
+            if (profileBox != null) rebuildProfileBox();
+            if (list != null) rebuildList();
+        }
+
+        private String appsSummary(int n) {
+            String csv = profileApps(prefs, n);
+            if (csv.length() == 0) return "не выбраны";
+            PackageManager pm = getContext().getPackageManager();
+            StringBuilder sb = new StringBuilder();
+            for (String pkg : csv.split("[,; \\n]+")) {
+                if (pkg.length() == 0) continue;
+                if (sb.length() > 0) sb.append(", ");
+                try {
+                    sb.append(pm.getApplicationInfo(pkg, 0).loadLabel(pm).toString());
+                } catch (Throwable t) {
+                    sb.append(pkg);
+                }
+            }
+            return sb.length() == 0 ? "не выбраны" : sb.toString();
+        }
+
+        private void rebuildProfileBox() {
+            profileBox.removeAllViews();
+            Context ctx = getContext();
+            if (profile == 0) {
+                TextView t = text("Основной профиль действует везде, где для приложения на переднем плане не выбран свой профиль.",
+                        14f, Color.LTGRAY, false);
+                t.setPadding(dp(ctx, 12), dp(ctx, 10), dp(ctx, 12), dp(ctx, 10));
+                profileBox.addView(t);
+                return;
+            }
+            final int n = profile;
+            addRow(profileBox, null, null, "Название: " + profileName(prefs, n), null, Color.WHITE, new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    showRename(n);
+                }
+            });
+            addRow(profileBox, null, null, "Приложения: " + appsSummary(n),
+                    "Профиль включается, когда одно из них на переднем плане. Кнопки без своего действия работают как в основном профиле.",
+                    Color.WHITE, new View.OnClickListener() {
+                        @Override public void onClick(View v) {
+                            showProfileApps(n);
+                        }
+                    });
+        }
+
+        /** Все кнопки текстом: для скринридера и чтобы видеть назначения без разглядывания картинки. */
+        private void rebuildList() {
+            list.removeAllViews();
+            final Context ctx = getContext();
+            TextView h = text("Все кнопки списком", 16f, Color.LTGRAY, true);
+            h.setPadding(dp(ctx, 12), dp(ctx, 8), dp(ctx, 12), dp(ctx, 8));
+            list.addView(h);
+            for (int[] sl : slots()) {
+                final int code = sl[0];
+                String t = action(prefs, profile, code, "t");
+                String d = action(prefs, profile, code, "d");
+                String l = action(prefs, profile, code, "l");
+                StringBuilder sb = new StringBuilder(actionLabel(ctx, t));
+                if (!isNone(d)) sb.append("; двойное: ").append(actionLabel(ctx, d));
+                if (!isNone(l)) sb.append("; долгое: ").append(actionLabel(ctx, l));
+                addRow(list, null, null, slotName(code), sb.toString(), Color.WHITE, new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        showEditor(code);
+                    }
+                });
+            }
+        }
+
+        private void showEditor(final int code) {
+            if (panel == null) return;
+            renaming = false;
+            final Context ctx = getContext();
+            panelStart(slotName(code) + (profile >= 1 ? "  ·  " + profileName(prefs, profile) : ""));
             for (int g = 0; g < 3; g++) {
                 final int gi = g;
                 String a = action(prefs, profile, code, GK[g]);
-                LinearLayout row = new LinearLayout(ctx);
-                row.setOrientation(LinearLayout.HORIZONTAL);
-                row.setGravity(Gravity.CENTER_VERTICAL);
-                row.setPadding(0, dp(ctx, 8), 0, dp(ctx, 8));
-                ImageView iv = new ImageView(ctx);
-                iv.setImageBitmap(iconBitmap(ctx, a, dp(ctx, 40)));
-                row.addView(iv, new LinearLayout.LayoutParams(dp(ctx, 40), dp(ctx, 40)));
-                LinearLayout txt = new LinearLayout(ctx);
-                txt.setOrientation(LinearLayout.VERTICAL);
-                txt.setPadding(dp(ctx, 12), 0, 0, 0);
-                TextView title = new TextView(ctx);
-                title.setText(GNAME[g]);
-                title.setTextSize(13f);
-                title.setTextColor(Color.LTGRAY);
-                TextView value = new TextView(ctx);
-                value.setText(actionLabel(ctx, a));
-                value.setTextSize(17f);
-                value.setTextColor(Color.WHITE);
-                txt.addView(title);
-                txt.addView(value);
-                row.addView(txt, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-                row.setOnClickListener(new View.OnClickListener() {
-                    @Override public void onClick(View v) {
-                        chooseAction(code, gi);
-                    }
-                });
-                col.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                addRow(panel, iconBitmap(ctx, a, dp(ctx, 36)), null, GNAME[g] + ": " + actionLabel(ctx, a), null, Color.WHITE,
+                        new View.OnClickListener() {
+                            @Override public void onClick(View v) {
+                                showChooser(code, gi);
+                            }
+                        });
             }
-            if (editor != null && editor.isShowing()) editor.dismiss();
-            editor = new AlertDialog.Builder(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                    .setTitle(slotName(code) + (profile == 1 ? "  ·  для приложений" : ""))
-                    .setView(col)
-                    .setPositiveButton("Готово", null)
-                    .create();
-            editor.show();
+            addRow(panel, null, null, "Закрыть", null, Color.LTGRAY, new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    hidePanel();
+                }
+            });
+            panelEnd();
         }
 
-        private void chooseAction(final int code, final int g) {
+        private void showChooser(final int code, final int g) {
             final Context ctx = getContext();
-            final List<String> ids = new ArrayList<String>();
-            List<String> labels = new ArrayList<String>();
-            if (profile == 1) {
-                ids.add("@inherit");
-                labels.add("Как в основном профиле");
+            panelStart(slotName(code) + ": " + GNAME[g]);
+            String cur = action(prefs, profile, code, GK[g]);
+            if (profile >= 1) {
+                boolean inherit = !prefs.contains(key(profile, code, GK[g]));
+                addRow(panel, null, null, (inherit ? "✓ " : "") + "Как в основном профиле", null, Color.WHITE,
+                        new View.OnClickListener() {
+                            @Override public void onClick(View v) {
+                                apply(code, g, "@inherit");
+                            }
+                        });
             }
-            ids.add("none");
-            labels.add("Не назначено");
-            for (String[] a : ACTIONS) {
-                ids.add(a[0]);
-                labels.add(a[1]);
+            addRow(panel, null, null, (isNone(cur) ? "✓ " : "") + "Не назначено", null, Color.WHITE, new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    apply(code, g, "none");
+                }
+            });
+            for (final String[] a : ACTIONS) {
+                addRow(panel, iconBitmap(ctx, a[0], dp(ctx, 36)), null, (a[0].equals(cur) ? "✓ " : "") + a[1], null, Color.WHITE,
+                        new View.OnClickListener() {
+                            @Override public void onClick(View v) {
+                                apply(code, g, a[0]);
+                            }
+                        });
             }
-            ids.add("@app");
-            labels.add("Приложение…");
-            new AlertDialog.Builder(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                    .setTitle(GNAME[g])
-                    .setItems(labels.toArray(new String[0]), new DialogInterface.OnClickListener() {
-                        @Override public void onClick(DialogInterface d, int which) {
-                            String id = ids.get(which);
-                            if (id.equals("@app")) chooseApp(code, g);
-                            else apply(code, g, id);
+            addRow(panel, null, null, (cur != null && cur.startsWith("app:") ? "✓ " : "") + "Приложение…", null, Color.WHITE,
+                    new View.OnClickListener() {
+                        @Override public void onClick(View v) {
+                            showApps(code, g);
                         }
-                    })
-                    .show();
+                    });
+            addRow(panel, null, null, "← Назад", null, Color.LTGRAY, new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    showEditor(code);
+                }
+            });
+            panelEnd();
         }
 
-        private void chooseApp(final int code, final int g) {
+        private interface AppsCb {
+            void done(List<Object[]> apps);
+        }
+
+        /** Установленные приложения с запуском: пакет, название, значок. Грузится в фоне. */
+        private void loadApps(final AppsCb cb) {
             final Context ctx = getContext();
             new Thread(new Runnable() {
                 @Override public void run() {
                     PackageManager pm = ctx.getPackageManager();
                     Intent launcher = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
-                    final List<String[]> apps = new ArrayList<String[]>();
+                    final List<Object[]> apps = new ArrayList<Object[]>();
                     java.util.HashSet<String> seen = new java.util.HashSet<String>();
                     for (ResolveInfo ri : pm.queryIntentActivities(launcher, 0)) {
                         String pkg = ri.activityInfo.packageName;
-                        if (seen.add(pkg)) apps.add(new String[]{pkg, ri.loadLabel(pm).toString()});
+                        if (!seen.add(pkg)) continue;
+                        apps.add(new Object[]{pkg, ri.loadLabel(pm).toString(), ri.loadIcon(pm)});
                     }
-                    java.util.Collections.sort(apps, new java.util.Comparator<String[]>() {
-                        @Override public int compare(String[] x, String[] y) {
-                            return x[1].compareToIgnoreCase(y[1]);
+                    java.util.Collections.sort(apps, new java.util.Comparator<Object[]>() {
+                        @Override public int compare(Object[] x, Object[] y) {
+                            return ((String) x[1]).compareToIgnoreCase((String) y[1]);
                         }
                     });
                     post(new Runnable() {
                         @Override public void run() {
-                            if (!isAttachedToWindow()) return;
-                            String[] labels = new String[apps.size()];
-                            for (int i = 0; i < labels.length; i++) labels[i] = apps.get(i)[1];
-                            new AlertDialog.Builder(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                                    .setTitle("Приложение")
-                                    .setItems(labels, new DialogInterface.OnClickListener() {
-                                        @Override public void onClick(DialogInterface d, int which) {
-                                            apply(code, g, "app:" + apps.get(which)[0]);
-                                        }
-                                    })
-                                    .show();
+                            if (isAttachedToWindow()) cb.done(apps);
                         }
                     });
                 }
             }).start();
         }
 
+        private void showApps(final int code, final int g) {
+            panelStart("Загрузка приложений…");
+            loadApps(new AppsCb() {
+                @Override public void done(List<Object[]> apps) {
+                    panelStart(slotName(code) + ": приложение");
+                    for (final Object[] a : apps) {
+                        addRow(panel, null, (Drawable) a[2], (String) a[1], null, Color.WHITE, new View.OnClickListener() {
+                            @Override public void onClick(View v) {
+                                apply(code, g, "app:" + a[0]);
+                            }
+                        });
+                    }
+                    addRow(panel, null, null, "← Назад", null, Color.LTGRAY, new View.OnClickListener() {
+                        @Override public void onClick(View v) {
+                            showChooser(code, g);
+                        }
+                    });
+                    panelEnd();
+                }
+            });
+        }
+
+        /** Выбор приложений профиля: отметки меняются сразу, окно не закрывается. */
+        private void showProfileApps(final int n) {
+            panelStart("Загрузка приложений…");
+            loadApps(new AppsCb() {
+                @Override public void done(List<Object[]> apps) {
+                    final java.util.LinkedHashSet<String> chosen = new java.util.LinkedHashSet<String>();
+                    for (String s : profileApps(prefs, n).split("[,; \\n]+")) {
+                        if (s.length() > 0) chosen.add(s);
+                    }
+                    java.util.Collections.sort(apps, new java.util.Comparator<Object[]>() {
+                        @Override public int compare(Object[] x, Object[] y) {
+                            boolean cx = chosen.contains((String) x[0]);
+                            boolean cy = chosen.contains((String) y[0]);
+                            if (cx != cy) return cx ? -1 : 1;
+                            return ((String) x[1]).compareToIgnoreCase((String) y[1]);
+                        }
+                    });
+                    panelStart(profileName(prefs, n) + ": приложения");
+                    TextView hint = text("Отмечай приложения, для которых включается этот профиль. Если приложение отмечено в нескольких профилях, действует профиль с меньшим номером.",
+                            14f, Color.LTGRAY, false);
+                    hint.setPadding(dp(getContext(), 12), dp(getContext(), 8), dp(getContext(), 12), dp(getContext(), 8));
+                    panel.addView(hint);
+                    for (final Object[] a : apps) {
+                        final String pkg = (String) a[0];
+                        final String label = (String) a[1];
+                        final TextView[] holder = new TextView[1];
+                        holder[0] = addCheckRow(panel, label, chosen.contains(pkg), new View.OnClickListener() {
+                            @Override public void onClick(View v) {
+                                boolean on = !chosen.contains(pkg);
+                                if (on) chosen.add(pkg);
+                                else chosen.remove(pkg);
+                                holder[0].setText((on ? "✓ " : "☐ ") + label);
+                                StringBuilder sb = new StringBuilder();
+                                for (String x : chosen) {
+                                    if (sb.length() > 0) sb.append(',');
+                                    sb.append(x);
+                                }
+                                prefs.edit().putString("profile_apps_" + n, sb.toString()).apply();
+                                rebuildProfileBox();
+                            }
+                        });
+                    }
+                    addRow(panel, null, null, "Готово", null, Color.WHITE, new View.OnClickListener() {
+                        @Override public void onClick(View v) {
+                            hidePanel();
+                            refreshAll();
+                        }
+                    });
+                    panelEnd();
+                }
+            });
+        }
+
+        private void showRename(final int n) {
+            final Context ctx = getContext();
+            panelStart("Название профиля");
+            renaming = true;
+            final EditText et = new EditText(ctx);
+            et.setText(profileName(prefs, n));
+            et.setSelection(et.getText().length());
+            et.setTextColor(Color.WHITE);
+            et.setBackgroundColor(Color.rgb(50, 50, 50));
+            et.setTextSize(18f);
+            et.setSingleLine(true);
+            int pd = dp(ctx, 12);
+            et.setPadding(pd, pd, pd, pd);
+            panel.addView(et, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            addRow(panel, null, null, "Сохранить", null, Color.WHITE, new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    String s = et.getText().toString().trim();
+                    if (s.length() == 0) prefs.edit().remove("pname_" + n).apply();
+                    else prefs.edit().putString("pname_" + n, s).apply();
+                    hidePanel();
+                    refreshAll();
+                }
+            });
+            addRow(panel, null, null, "Отмена", null, Color.LTGRAY, new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    hidePanel();
+                }
+            });
+            panelEnd();
+        }
+
         private void apply(int code, int g, String id) {
             String k = key(profile, code, GK[g]);
             if (id.equals("@inherit")) prefs.edit().remove(k).apply();
             else prefs.edit().putString(k, id).apply();
-            invalidate();
-            openEditor(code);
+            refreshAll();
+            showEditor(code);
         }
     }
 }
