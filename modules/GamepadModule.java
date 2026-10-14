@@ -1018,7 +1018,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
             }
             return;
         }
-        if (viaController(s, a)) return;
+        if (viaController(s, a) != 0) return;
         if (a.equals("play_pause")) media(s, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
         else if (a.equals("play")) media(s, KeyEvent.KEYCODE_MEDIA_PLAY);
         else if (a.equals("pause")) media(s, KeyEvent.KEYCODE_MEDIA_PAUSE);
@@ -1050,36 +1050,47 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                 || "prev".equals(a) || "stop".equals(a) || "seek_fwd".equals(a) || "seek_back".equals(a);
     }
 
-    /** Сессия, которая играет сейчас, иначе самая приоритетная. Нужен доступ к уведомлениям для хоста. */
-    private static MediaController activeController(Context c) {
+    /** Активные медиасессии системы. null: нет доступа к уведомлениям для хоста. */
+    private static List<MediaController> sessions(Context c) {
         try {
             MediaSessionManager msm = (MediaSessionManager) c.getSystemService(Context.MEDIA_SESSION_SERVICE);
             if (msm == null) return null;
-            List<MediaController> list = msm.getActiveSessions(
-                    new ComponentName(c, "im.manus.universalhost.CoreNotificationListener"));
-            MediaController first = null;
-            for (MediaController mc : list) {
-                PlaybackState ps = mc.getPlaybackState();
-                if (ps != null && ps.getState() == PlaybackState.STATE_PLAYING) return mc;
-                if (first == null) first = mc;
-            }
-            return first;
+            return msm.getActiveSessions(new ComponentName(c, "im.manus.universalhost.CoreNotificationListener"));
         } catch (Throwable t) {
             return null;
         }
     }
 
     /**
-     * Команда напрямую активной медиасессии: не зависит от того, какое приложение на переднем плане
-     * и кому система отдаёт медиаклавиши. false: нет доступа к уведомлениям, нет сессии или
-     * плеер не умеет перемотку; тогда работает обычная медиаклавиша.
+     * Сессия плеера: играющая, иначе самая приоритетная. Собственные сессии хоста пропускаются:
+     * модуль Radio Gestures держит всегда «играющую» сессию и принимает из неё play/pause как жест
+     * (отключает и возвращает Bluetooth-наушник), так что команды плееру туда попадать не должны.
      */
-    private boolean viaController(Context c, String a) {
-        if (!isMediaAction(a)) return false;
+    private static MediaController pickController(List<MediaController> list, String ownPkg) {
+        MediaController first = null;
+        for (MediaController mc : list) {
+            if (ownPkg.equals(mc.getPackageName())) continue;
+            PlaybackState ps = mc.getPlaybackState();
+            if (ps != null && ps.getState() == PlaybackState.STATE_PLAYING) return mc;
+            if (first == null) first = mc;
+        }
+        return first;
+    }
+
+    /**
+     * Команда напрямую сессии плеера: не зависит от того, какое приложение на переднем плане.
+     * 1: выполнено. 2: сессии плеера нет, ничего не делаем (медиаклавиша ушла бы в сессию самого хоста,
+     * то есть в Radio Gestures). 0: идти дальше обычной медиаклавишей (нет доступа к уведомлениям, прямое
+     * управление выключено или плеер не умеет перемотку).
+     */
+    private int viaController(Context c, String a) {
+        if (!isMediaAction(a)) return 0;
         SharedPreferences p = prefs();
-        if (p != null && !p.getBoolean("direct_control", true)) return false;
-        MediaController mc = activeController(c);
-        if (mc == null) return false;
+        if (p != null && !p.getBoolean("direct_control", true)) return 0;
+        List<MediaController> list = sessions(c);
+        if (list == null) return 0;
+        MediaController mc = pickController(list, c.getPackageName());
+        if (mc == null) return 2;
         MediaController.TransportControls tc = mc.getTransportControls();
         PlaybackState ps = mc.getPlaybackState();
         boolean playing = ps != null && ps.getState() == PlaybackState.STATE_PLAYING;
@@ -1092,7 +1103,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         else if (a.equals("prev")) tc.skipToPrevious();
         else if (a.equals("stop")) tc.stop();
         else {
-            if (ps == null || (ps.getActions() & PlaybackState.ACTION_SEEK_TO) == 0) return false;
+            if (ps == null || (ps.getActions() & PlaybackState.ACTION_SEEK_TO) == 0) return 0;
             long now = SystemClock.elapsedRealtime();
             long pos;
             if (now - seekAt < 600) {
@@ -1106,7 +1117,19 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
             seekAt = now;
             tc.seekTo(seekTarget);
         }
-        return true;
+        return 1;
+    }
+
+    /** Строка состояния плеера для настроек. */
+    private String playerStatus() {
+        Context c = appCtx;
+        if (c == null) return "";
+        List<MediaController> list = sessions(c);
+        if (list == null) {
+            return "\nПлеер: нет доступа к уведомлениям, команды идут медиаклавишами и могут попасть в Radio Gestures";
+        }
+        MediaController mc = pickController(list, c.getPackageName());
+        return "\nПлеер: " + (mc == null ? "активной сессии плеера нет" : mc.getPackageName());
     }
 
     private static void media(Context c, int code) {
@@ -1333,7 +1356,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
     String diagText() {
         String axes34 = Build.VERSION.SDK_INT >= 34 ? "доступны" : "нужен Android 14+ (сейчас API " + Build.VERSION.SDK_INT + ")";
         return "Событий: служба-кнопки " + cnt[CH_SERVICE] + ", окно " + cnt[CH_WINDOW] + ", служба-оси " + cnt[CH_MOTION]
-                + ", evdev " + cnt[CH_EVDEV] + "\nevdev: " + evStatus + evAge() + "\nОси через службу: " + axes34;
+                + ", evdev " + cnt[CH_EVDEV] + "\nevdev: " + evStatus + evAge() + "\nОси через службу: " + axes34 + playerStatus();
     }
 
     // ---------------------------------------------------------------- названия и значки действий
