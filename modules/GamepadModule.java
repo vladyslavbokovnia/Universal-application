@@ -38,6 +38,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -241,6 +242,8 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
     private volatile AccessibilityService svc;
     private volatile Context appCtx;
     private volatile String fgPackage;
+    private volatile String lastAct = "";
+    private long fgCheckedAt;
     private final Handler h = new Handler(Looper.getMainLooper());
     private final SparseArray<KeyState> states = new SparseArray<KeyState>();
     private final SparseBooleanArray vstate = new SparseBooleanArray();
@@ -326,9 +329,32 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         return c == null ? null : c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
     }
 
+    /**
+     * Приложение на переднем плане. События окон приходят не всегда (возврат в уже открытое приложение),
+     * поэтому раз в 0,4 с спрашиваем у службы активное окно; при выключенном экране окна нет,
+     * и остаётся последнее известное приложение.
+     */
+    private String foreground() {
+        AccessibilityService s = svc;
+        long now = SystemClock.uptimeMillis();
+        if (s != null && now - fgCheckedAt > 400) {
+            fgCheckedAt = now;
+            try {
+                AccessibilityNodeInfo root = s.getRootInActiveWindow();
+                if (root != null) {
+                    CharSequence pk = root.getPackageName();
+                    root.recycle();
+                    if (pk != null && !isIgnoredPackage(s, pk.toString())) fgPackage = pk.toString();
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return fgPackage;
+    }
+
     /** Профиль первого из 1..3, в чьём списке есть приложение на переднем плане; иначе основной. */
     private int currentProfile(SharedPreferences p) {
-        String pkg = fgPackage;
+        String pkg = foreground();
         if (pkg == null) return 0;
         for (int n = 1; n < PROFILES; n++) {
             String csv = profileApps(p, n);
@@ -1001,9 +1027,11 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
     // ---------------------------------------------------------------- действия
 
     private void perform(String a) {
+        lastAct = a;
         try {
             doPerform(a);
-        } catch (Throwable ignored) {
+        } catch (Throwable t) {
+            lastAct = a + ": ошибка " + t;
         }
     }
 
@@ -1118,6 +1146,15 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
             tc.seekTo(seekTarget);
         }
         return 1;
+    }
+
+    /** Какое приложение считается передним, какой профиль сейчас действует и что выполнялось последним. */
+    private String profileStatus() {
+        SharedPreferences p = prefs();
+        String prof = p == null ? "?" : profileName(p, currentProfile(p));
+        String fg = fgPackage;
+        return "\nПриложение: " + (fg == null ? "ещё не определено" : fg) + ", действует профиль: " + prof
+                + "\nПоследнее действие: " + (lastAct.length() == 0 ? "нет" : lastAct);
     }
 
     /** Строка состояния плеера для настроек. */
@@ -1356,7 +1393,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
     String diagText() {
         String axes34 = Build.VERSION.SDK_INT >= 34 ? "доступны" : "нужен Android 14+ (сейчас API " + Build.VERSION.SDK_INT + ")";
         return "Событий: служба-кнопки " + cnt[CH_SERVICE] + ", окно " + cnt[CH_WINDOW] + ", служба-оси " + cnt[CH_MOTION]
-                + ", evdev " + cnt[CH_EVDEV] + "\nevdev: " + evStatus + evAge() + "\nОси через службу: " + axes34 + playerStatus();
+                + ", evdev " + cnt[CH_EVDEV] + "\nevdev: " + evStatus + evAge() + "\nОси через службу: " + axes34 + playerStatus() + profileStatus();
     }
 
     // ---------------------------------------------------------------- названия и значки действий
