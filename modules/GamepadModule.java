@@ -1344,9 +1344,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         LinearLayout profileBox = box(context);
         LinearLayout panel = box(context);
         panel.setVisibility(View.GONE);
-        LinearLayout list = new LinearLayout(context);
-        list.setOrientation(LinearLayout.VERTICAL);
-        pad.bind(panel, list, profileBox, tabs);
+        pad.bind(panel, profileBox, tabs);
 
         root.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         LinearLayout.LayoutParams boxLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -1357,9 +1355,6 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         panelLp.topMargin = dp(context, 8);
         root.addView(panel, panelLp);
         root.addView(status, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        LinearLayout.LayoutParams listLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        listLp.topMargin = dp(context, 8);
-        root.addView(list, listLp);
         return root;
     }
 
@@ -1597,7 +1592,6 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         private int lastCode = -1;
         private long lastCodeAt;
         private LinearLayout panel;
-        private LinearLayout list;
         private LinearLayout profileBox;
         private TextView[] tabs;
         private boolean renaming;
@@ -1609,13 +1603,12 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
             this.status = status;
             setFocusable(true);
             setFocusableInTouchMode(true);
-            setContentDescription("Картинка геймпада. Все кнопки со списком назначений идут ниже текстом");
+            setContentDescription("Картинка геймпада: коснись кнопки, чтобы выбрать для неё действия");
         }
 
-        /** Подключает блоки интерфейса вокруг картинки: панель выбора, список кнопок, карточку профиля и вкладки. */
-        void bind(LinearLayout panel, LinearLayout list, LinearLayout profileBox, TextView[] tabs) {
+        /** Подключает блоки интерфейса вокруг картинки: панель выбора, карточку профиля и вкладки. */
+        void bind(LinearLayout panel, LinearLayout profileBox, TextView[] tabs) {
             this.panel = panel;
-            this.list = list;
             this.profileBox = profileBox;
             this.tabs = tabs;
             refreshAll();
@@ -1807,12 +1800,23 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                     drawIcon(c, t, x, y, r * 0.62f, inherited ? 90 : 255, iconFor(t));
                 }
 
-                fill.setColor(Color.WHITE);
-                if (!isNone(d)) c.drawCircle(x - r * 0.45f, y + r * 0.82f, 4, fill);
-                if (!isNone(l)) c.drawCircle(x + r * 0.45f, y + r * 0.82f, 4, fill);
+                // метки: двойное нажатие слева (круг), долгое справа (квадрат); тёмная окантовка, чтобы читались на любом фоне
+                if (!isNone(d)) drawMark(c, x - r * 0.6f, y + r * 0.95f, false);
+                if (!isNone(l)) drawMark(c, x + r * 0.6f, y + r * 0.95f, true);
             }
             c.restore();
             if (hi) postInvalidateDelayed(Math.max(50, hiUntil - SystemClock.uptimeMillis() + 20));
+        }
+
+        /** Крупная метка на краю кнопки: круг (двойное нажатие) или квадрат (долгое). */
+        private void drawMark(Canvas c, float x, float y, boolean square) {
+            fill.setStyle(Paint.Style.FILL);
+            fill.setColor(Color.BLACK);
+            if (square) c.drawRect(x - 15, y - 15, x + 15, y + 15, fill);
+            else c.drawCircle(x, y, 16, fill);
+            fill.setColor(Color.WHITE);
+            if (square) c.drawRect(x - 11, y - 11, x + 11, y + 11, fill);
+            else c.drawCircle(x, y, 12, fill);
         }
 
         /** Бледная стрелка на слоте направления без действия. */
@@ -1990,7 +1994,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
             }
         }
 
-        /** Вкладки, карточка профиля, список всех кнопок и сама картинка. */
+        /** Вкладки, карточка профиля и сама картинка. */
         void refreshAll() {
             invalidate();
             if (tabs != null) {
@@ -1998,7 +2002,6 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                 styleTabs(tabs, profile);
             }
             if (profileBox != null) rebuildProfileBox();
-            if (list != null) rebuildList();
         }
 
         private String appsSummary(int n) {
@@ -2041,29 +2044,6 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                             showProfileApps(n);
                         }
                     });
-        }
-
-        /** Все кнопки текстом: для скринридера и чтобы видеть назначения без разглядывания картинки. */
-        private void rebuildList() {
-            list.removeAllViews();
-            final Context ctx = getContext();
-            TextView h = text("Все кнопки списком", 16f, Color.LTGRAY, true);
-            h.setPadding(dp(ctx, 12), dp(ctx, 8), dp(ctx, 12), dp(ctx, 8));
-            list.addView(h);
-            for (int[] sl : slots()) {
-                final int code = sl[0];
-                String t = action(prefs, profile, code, "t");
-                String d = action(prefs, profile, code, "d");
-                String l = action(prefs, profile, code, "l");
-                StringBuilder sb = new StringBuilder(actionLabel(ctx, t));
-                if (!isNone(d)) sb.append("; двойное: ").append(actionLabel(ctx, d));
-                if (!isNone(l)) sb.append("; долгое: ").append(actionLabel(ctx, l));
-                addRow(list, null, null, slotName(code), sb.toString(), Color.WHITE, new View.OnClickListener() {
-                    @Override public void onClick(View v) {
-                        showEditor(code);
-                    }
-                });
-            }
         }
 
         private void showEditor(final int code) {
