@@ -20,6 +20,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraManager;
 import android.media.AudioManager;
+import android.media.ToneGenerator;
 import android.media.session.MediaController;
 import android.media.session.MediaSessionManager;
 import android.media.session.PlaybackState;
@@ -126,6 +127,11 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         {"flashlight", "Фонарик"},
         {"swipe_up", "Прокрутка вниз (свайп вверх)"},
         {"swipe_down", "Прокрутка вверх (свайп вниз)"},
+        {"profile_next", "Следующий профиль (1, 2, 3, авто)"},
+        {"profile_1", "Профиль 1"},
+        {"profile_2", "Профиль 2"},
+        {"profile_3", "Профиль 3"},
+        {"profile_auto", "Профиль выбирается автоматически"},
     };
 
     /** keyCode, x, y, радиус, цвет (0 белый, 1 зелёный, 2 красный, 3 синий, 4 жёлтый), направление (1 вверх, 2 вниз, 3 влево, 4 вправо); поле 1000x700. */
@@ -225,7 +231,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
     static final int PROFILES = 4; // 0 основной, 1..3 для выбранных приложений
 
     static String profileName(SharedPreferences p, int n) {
-        return n == 0 ? "Основной" : p.getString("pname_" + n, "Профиль " + n);
+        return n == 0 ? "Основной" : String.valueOf(n);
     }
 
     /** Пакеты приложений профиля через запятую (у первого профиля читается и прежний ключ profile_apps). */
@@ -244,6 +250,8 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
     private volatile String fgPackage;
     private volatile String lastAct = "";
     private long fgCheckedAt;
+    private volatile String mediaPkg;
+    private long mediaCheckedAt;
     private final Handler h = new Handler(Looper.getMainLooper());
     private final SparseArray<KeyState> states = new SparseArray<KeyState>();
     private final SparseBooleanArray vstate = new SparseBooleanArray();
@@ -352,16 +360,45 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         return fgPackage;
     }
 
-    /** Профиль первого из 1..3, в чьём списке есть приложение на переднем плане; иначе основной. */
-    private int currentProfile(SharedPreferences p) {
-        String pkg = foreground();
-        if (pkg == null) return 0;
+    /** Владелец сессии плеера (не самого хоста); раз в 0,4 с, нужен доступ к уведомлениям. */
+    private String mediaOwner() {
+        Context c = appCtx;
+        long now = SystemClock.uptimeMillis();
+        if (c != null && now - mediaCheckedAt > 400) {
+            mediaCheckedAt = now;
+            List<MediaController> list = sessions(c);
+            if (list != null) {
+                MediaController mc = pickController(list, c.getPackageName());
+                mediaPkg = mc == null ? null : mc.getPackageName();
+            }
+        }
+        return mediaPkg;
+    }
+
+    /** Первый из профилей 1..3, в чьём списке есть пакет; иначе 0. */
+    private static int profileFor(SharedPreferences p, String pkg) {
         for (int n = 1; n < PROFILES; n++) {
             String csv = profileApps(p, n);
             if (csv.length() == 0) continue;
             for (String x : csv.split("[,; \\n]+")) {
                 if (x.equals(pkg)) return n;
             }
+        }
+        return 0;
+    }
+
+    /**
+     * Действующий профиль. Сначала ручной выбор (кнопка с действием «профиль»), затем приложение, которому
+     * принадлежит активная медиасессия, затем приложение на переднем плане; иначе основной.
+     */
+    private int currentProfile(SharedPreferences p) {
+        int manual = p.getInt("manual_profile", 0);
+        if (manual >= 1 && manual < PROFILES) return manual;
+        String[] cands = {mediaOwner(), foreground()};
+        for (String pkg : cands) {
+            if (pkg == null) continue;
+            int n = profileFor(p, pkg);
+            if (n != 0) return n;
         }
         return 0;
     }
@@ -515,10 +552,11 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         PadView v = sPad;
         if (v != null && v.isLearning()) return true;
         SharedPreferences p = prefs();
-        if (p == null || !p.getBoolean("enabled", true)) return false;
+        if (p == null) return false;
         int profile = currentProfile(p);
-        return !(isNone(action(p, profile, code, "t")) && isNone(action(p, profile, code, "d"))
+        boolean mapped = !(isNone(action(p, profile, code, "t")) && isNone(action(p, profile, code, "d"))
                 && isNone(action(p, profile, code, "l")));
+        return mapped && p.getBoolean("intercept_" + profile, true);
     }
 
     /**
@@ -533,12 +571,14 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
             return true;
         }
         SharedPreferences p = prefs();
-        if (p == null || !p.getBoolean("enabled", true)) return false;
+        if (p == null) return false;
         int profile = currentProfile(p);
         final String t = action(p, profile, code, "t");
         final String d = action(p, profile, code, "d");
         final String l = action(p, profile, code, "l");
         if (isNone(t) && isNone(d) && isNone(l)) return false;
+        // перехват включён: нажатие забирает геймпад; выключен: действие всё равно срабатывает, а приложение тоже получает нажатие
+        boolean intercept = p.getBoolean("intercept_" + profile, true);
 
         KeyState s = states.get(code);
         if (s == null) {
@@ -553,11 +593,11 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
             s.maskAt = now;
             if (first) pressDown(s, t, d, l, p);
         } else {
-            if ((s.mask & (1 << ch)) == 0) return true; // это отпускание уже учтено
+            if ((s.mask & (1 << ch)) == 0) return intercept; // это отпускание уже учтено
             s.mask &= ~(1 << ch);
             if (s.mask == 0) pressUp(s, t, d, l, p);
         }
-        return true;
+        return intercept;
     }
 
     private void pressDown(final KeyState s, final String t, final String d, final String l, SharedPreferences p) {
@@ -1046,6 +1086,10 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
             }
             return;
         }
+        if (a.startsWith("profile_")) {
+            setManualProfile(a);
+            return;
+        }
         if (viaController(s, a) != 0) return;
         if (a.equals("play_pause")) media(s, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE);
         else if (a.equals("play")) media(s, KeyEvent.KEYCODE_MEDIA_PLAY);
@@ -1071,6 +1115,48 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         } else if (a.equals("flashlight")) torch(s);
         else if (a.equals("swipe_up")) swipe(s, true);
         else if (a.equals("swipe_down")) swipe(s, false);
+    }
+
+    /** Ручной выбор профиля: следующий по кругу, конкретный или автоматический. Отклик звуком. */
+    private void setManualProfile(String a) {
+        SharedPreferences p = prefs();
+        if (p == null) return;
+        int cur = p.getInt("manual_profile", 0);
+        int next;
+        if (a.equals("profile_next")) next = cur >= PROFILES - 1 ? 0 : cur + 1;
+        else if (a.equals("profile_auto")) next = 0;
+        else next = a.charAt(8) - '0';
+        if (next < 0 || next >= PROFILES) next = 0;
+        p.edit().putInt("manual_profile", next).apply();
+        lastAct = a + ": " + (next == 0 ? "профиль выбирается автоматически" : "профиль " + next);
+        beep(next);
+    }
+
+    /** Столько коротких сигналов, какой номер профиля; один длинный низкий сигнал: автоматический выбор. */
+    private void beep(final int n) {
+        try {
+            final ToneGenerator tg = new ToneGenerator(AudioManager.STREAM_MUSIC, 90);
+            long total;
+            if (n <= 0) {
+                tg.startTone(ToneGenerator.TONE_PROP_NACK, 400);
+                total = 700;
+            } else {
+                for (int i = 0; i < n; i++) {
+                    h.postDelayed(new Runnable() {
+                        @Override public void run() {
+                            tg.startTone(ToneGenerator.TONE_PROP_BEEP, 150);
+                        }
+                    }, i * 320L);
+                }
+                total = n * 320L + 500;
+            }
+            h.postDelayed(new Runnable() {
+                @Override public void run() {
+                    tg.release();
+                }
+            }, total);
+        } catch (Throwable ignored) {
+        }
     }
 
     private static boolean isMediaAction(String a) {
@@ -1152,8 +1238,12 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
     private String profileStatus() {
         SharedPreferences p = prefs();
         String prof = p == null ? "?" : profileName(p, currentProfile(p));
+        int manual = p == null ? 0 : p.getInt("manual_profile", 0);
         String fg = fgPackage;
-        return "\nПриложение: " + (fg == null ? "ещё не определено" : fg) + ", действует профиль: " + prof
+        String media = mediaPkg;
+        return "\nДействует профиль: " + prof + (manual != 0 ? " (выбран вручную)" : " (автоматически)")
+                + "\nПриложение в окне: " + (fg == null ? "не определено" : fg)
+                + "\nПриложение с медиасессией: " + (media == null ? "нет" : media)
                 + "\nПоследнее действие: " + (lastAct.length() == 0 ? "нет" : lastAct);
     }
 
@@ -1221,8 +1311,6 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
     public List<SettingItem> getSettingsSchema() {
         List<SettingItem> l = new ArrayList<SettingItem>();
         l.add(SettingItem.section("Раскладка геймпада"));
-        l.add(SettingItem.toggle("enabled", "Перехват кнопок геймпада",
-                "Выключи, если кнопки нужны другому приложению", true));
         l.add(SettingItem.custom("pad", "Геймпад",
                 "Выбери профиль, коснись кнопки на картинке или нажми её на геймпаде, стик подвигай. Приложения профилей выбираются тут же"));
         l.add(SettingItem.section("Источники ввода"));
@@ -1569,6 +1657,16 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         } else if (a.equals("swipe_down")) {
             poly(c, f, cx, cy, s, 0f, 0.85f, -0.7f, 0.05f, 0.7f, 0.05f);
             box(c, f, cx, cy, s, -0.2f, -0.85f, 0.2f, 0.05f);
+        } else if (a.equals("profile_1") || a.equals("profile_2") || a.equals("profile_3")) {
+            int n = a.charAt(8) - '0';
+            for (int i = 0; i < n; i++) c.drawCircle(cx + (i - (n - 1) / 2f) * 0.6f * s, cy, 0.24f * s, f);
+        } else if (a.equals("profile_auto")) {
+            c.drawArc(new RectF(cx - 0.6f * s, cy - 0.6f * s, cx + 0.6f * s, cy + 0.6f * s), -40f, 290f, false, k);
+            poly(c, f, cx, cy, s, 0.45f, -0.85f, 0.95f, -0.35f, 0.25f, -0.25f);
+        } else if (a.equals("profile_next")) {
+            c.drawCircle(cx - 0.8f * s, cy, 0.18f * s, f);
+            c.drawCircle(cx - 0.4f * s, cy, 0.18f * s, f);
+            poly(c, f, cx, cy, s, 0f, -0.6f, 0f, 0.6f, 0.9f, 0f);
         } else {
             c.drawCircle(cx, cy, s * 0.4f, k);
         }
@@ -1594,7 +1692,6 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         private LinearLayout panel;
         private LinearLayout profileBox;
         private TextView[] tabs;
-        private boolean renaming;
 
         PadView(Context context, GamepadModule owner, SharedPreferences prefs, TextView status) {
             super(context);
@@ -1670,7 +1767,6 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                     lastCodeAt = now;
                     lastNote = "Нажато: " + slotName(code) + " (" + code + "), канал: " + CHN[ch];
                     refreshStatus();
-                    if (renaming) return;
                     if (slotFor(code) == null) addExtra(code);
                     hiCode = code;
                     hiUntil = SystemClock.uptimeMillis() + 1200;
@@ -1952,17 +2048,28 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
             addSeparator(parent);
         }
 
-        private TextView addCheckRow(LinearLayout parent, String label, boolean on, View.OnClickListener click) {
+        /** Строка с отметкой и значком приложения. Возвращает надпись, чтобы менять отметку на месте. */
+        private TextView addCheckRow(LinearLayout parent, Drawable icon, String label, boolean on, View.OnClickListener click) {
             Context ctx = getContext();
-            TextView t = text((on ? "✓ " : "☐ ") + label, 18f, Color.WHITE, false);
+            LinearLayout r = new LinearLayout(ctx);
+            r.setOrientation(LinearLayout.HORIZONTAL);
+            r.setGravity(Gravity.CENTER_VERTICAL);
             int pd = dp(ctx, 12);
-            t.setPadding(pd, pd, pd, pd);
-            t.setMinHeight(dp(ctx, 52));
-            t.setGravity(Gravity.CENTER_VERTICAL);
-            t.setClickable(true);
-            t.setFocusable(true);
-            t.setOnClickListener(click);
-            parent.addView(t, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            r.setPadding(pd, pd, pd, pd);
+            r.setMinimumHeight(dp(ctx, 56));
+            if (icon != null) {
+                ImageView iv = new ImageView(ctx);
+                iv.setImageDrawable(icon);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(ctx, 36), dp(ctx, 36));
+                lp.rightMargin = dp(ctx, 12);
+                r.addView(iv, lp);
+            }
+            TextView t = text((on ? "\u2713 " : "\u2610 ") + label, 18f, Color.WHITE, false);
+            r.addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            r.setClickable(true);
+            r.setFocusable(true);
+            r.setOnClickListener(click);
+            parent.addView(r, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             addSeparator(parent);
             return t;
         }
@@ -1987,7 +2094,6 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         }
 
         void hidePanel() {
-            renaming = false;
             if (panel != null) {
                 panel.removeAllViews();
                 panel.setVisibility(View.GONE);
@@ -2023,22 +2129,26 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
 
         private void rebuildProfileBox() {
             profileBox.removeAllViews();
-            Context ctx = getContext();
-            if (profile == 0) {
-                TextView t = text("Основной профиль действует везде, где для приложения на переднем плане не выбран свой профиль.",
+            final int n = profile;
+            boolean on = prefs.getBoolean("intercept_" + n, true);
+            addRow(profileBox, null, null, "Перехват кнопок: " + (on ? "включён" : "выключен"),
+                    on ? "Назначенное действие срабатывает, а приложение это нажатие не получает."
+                            : "Назначенное действие срабатывает, и приложение тоже получает нажатие как обычно.",
+                    Color.WHITE, new View.OnClickListener() {
+                        @Override public void onClick(View v) {
+                            prefs.edit().putBoolean("intercept_" + n, !prefs.getBoolean("intercept_" + n, true)).apply();
+                            rebuildProfileBox();
+                        }
+                    });
+            if (n == 0) {
+                TextView t = text("Основной профиль действует везде, где для приложения не выбран профиль 1, 2 или 3.",
                         14f, Color.LTGRAY, false);
-                t.setPadding(dp(ctx, 12), dp(ctx, 10), dp(ctx, 12), dp(ctx, 10));
+                t.setPadding(dp(getContext(), 12), dp(getContext(), 10), dp(getContext(), 12), dp(getContext(), 10));
                 profileBox.addView(t);
                 return;
             }
-            final int n = profile;
-            addRow(profileBox, null, null, "Название: " + profileName(prefs, n), null, Color.WHITE, new View.OnClickListener() {
-                @Override public void onClick(View v) {
-                    showRename(n);
-                }
-            });
             addRow(profileBox, null, null, "Приложения: " + appsSummary(n),
-                    "Профиль включается, когда одно из них на переднем плане. Кнопки без своего действия работают как в основном профиле.",
+                    "Профиль включается, когда одно из них играет (медиасессия) или открыто в окне. Кнопки без своего действия работают как в основном профиле.",
                     Color.WHITE, new View.OnClickListener() {
                         @Override public void onClick(View v) {
                             showProfileApps(n);
@@ -2048,7 +2158,6 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
 
         private void showEditor(final int code) {
             if (panel == null) return;
-            renaming = false;
             final Context ctx = getContext();
             panelStart(slotName(code) + (profile >= 1 ? "  ·  " + profileName(prefs, profile) : ""));
             for (int g = 0; g < 3; g++) {
@@ -2189,7 +2298,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                         final String pkg = (String) a[0];
                         final String label = (String) a[1];
                         final TextView[] holder = new TextView[1];
-                        holder[0] = addCheckRow(panel, label, chosen.contains(pkg), new View.OnClickListener() {
+                        holder[0] = addCheckRow(panel, (Drawable) a[2], label, chosen.contains(pkg), new View.OnClickListener() {
                             @Override public void onClick(View v) {
                                 boolean on = !chosen.contains(pkg);
                                 if (on) chosen.add(pkg);
@@ -2214,37 +2323,6 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                     panelEnd();
                 }
             });
-        }
-
-        private void showRename(final int n) {
-            final Context ctx = getContext();
-            panelStart("Название профиля");
-            renaming = true;
-            final EditText et = new EditText(ctx);
-            et.setText(profileName(prefs, n));
-            et.setSelection(et.getText().length());
-            et.setTextColor(Color.WHITE);
-            et.setBackgroundColor(Color.rgb(50, 50, 50));
-            et.setTextSize(18f);
-            et.setSingleLine(true);
-            int pd = dp(ctx, 12);
-            et.setPadding(pd, pd, pd, pd);
-            panel.addView(et, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            addRow(panel, null, null, "Сохранить", null, Color.WHITE, new View.OnClickListener() {
-                @Override public void onClick(View v) {
-                    String s = et.getText().toString().trim();
-                    if (s.length() == 0) prefs.edit().remove("pname_" + n).apply();
-                    else prefs.edit().putString("pname_" + n, s).apply();
-                    hidePanel();
-                    refreshAll();
-                }
-            });
-            addRow(panel, null, null, "Отмена", null, Color.LTGRAY, new View.OnClickListener() {
-                @Override public void onClick(View v) {
-                    hidePanel();
-                }
-            });
-            panelEnd();
         }
 
         private void apply(int code, int g, String id) {
