@@ -53,6 +53,15 @@
             android:turnScreenOn="true"
             android:exported="false" />
 
+        <!-- Обычное окно для модулей-браузеров (BrowserModule): Недавние, поворот, без флагов блокировки -->
+        <activity android:name=".ModuleBrowserActivity"
+            android:theme="@android:style/Theme.Black.NoTitleBar"
+            android:taskAffinity="im.manus.universalhost.browser"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|uiMode|density|fontScale"
+            android:windowSoftInputMode="adjustResize"
+            android:exported="false" />
+
         <!-- Администратор устройства: только force-lock, для выключения экрана модулем -->
         <receiver android:name=".ModuleAdminReceiver"
             android:permission="android.permission.BIND_DEVICE_ADMIN"
