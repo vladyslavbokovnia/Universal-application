@@ -119,6 +119,10 @@ import java.util.regex.Pattern;
  * GM_openInTab, GM_setClipboard, GM_xmlhttpRequest (с проверкой @connect), GM_info, объект GM.* (промисы), unsafeWindow.
  * Не поддерживаются: @require, @resource, GM_download, GM_cookie, выполнение внутри iframe; document-start
  * внедряется как можно раньше средствами платформы (onPageStarted), а если не успело — при завершении загрузки.
+ *
+ * Озвучка. WebView сам не озвучивает speechSynthesis, поэтому при включённой настройке «Озвучка для скриптов»
+ * в страницы подставляются window.speechSynthesis и SpeechSynthesisUtterance поверх нативного Android TextToSpeech
+ * (события start/end/error приходят из движка). Воспроизведение звука страницей разрешено без касания.
  */
 public class BrowserModule implements IPlugin, ISettingsProvider {
 
@@ -250,6 +254,8 @@ public class BrowserModule implements IPlugin, ISettingsProvider {
         l.add(SettingItem.slider("max_live", "Вкладок в памяти",
                 "Остальные выгружаются и при выборе загружаются заново", 1, 8, 1, 3));
         l.add(SettingItem.toggle("keep_screen_on", "Не гасить экран", "Пока открыт браузер", false));
+        l.add(SettingItem.toggle("tts_bridge", "Озвучка для скриптов",
+                "Подставляет в страницы speechSynthesis поверх голоса Android, иначе скрипты в WebView молчат. Применяется при следующей загрузке страницы", true));
 
         l.add(SettingItem.section("Профили: отдельные сессии для входа в разные аккаунты"));
         for (int i = 0; i < PROFILES; i++) {
@@ -820,6 +826,38 @@ public class BrowserModule implements IPlugin, ISettingsProvider {
             "try{run.call(window,info,GM_getValue,GM_setValue,GM_deleteValue,GM_listValues,GM_addValueChangeListener,GM_removeValueChangeListener,GM_addStyle,GM_registerMenuCommand,GM_unregisterMenuCommand,GM_openInTab,GM_setClipboard,GM_xmlhttpRequest,GM_log,GM,window);}catch(e){console.error('[UserScript]',e);}\n" +
             "})();\n";
 
+    /**
+     * Подмена speechSynthesis поверх нативного TextToSpeech. Маркер @@TTS@@ заменяется именем моста вкладки.
+     * Повторная вставка в тот же документ безвредна (защита __ubTts).
+     */
+    private static final String TTS_POLYFILL =
+            "(function(){var B=window['@@TTS@@'];if(!B||window.__ubTts)return;\n" +
+            "function def(o,k,v){try{Object.defineProperty(o,k,{value:v,configurable:true,writable:true});}catch(e){}}\n" +
+            "def(window,'__ubTts',1);\n" +
+            "var live={},held=[],cnt=0,voices=null,paused=false;\n" +
+            "class U extends EventTarget{constructor(t){super();this.text=t===undefined?'':String(t);this.lang='';this.voice=null;this.volume=1;this.rate=1;this.pitch=1;\n" +
+            "this.onstart=this.onend=this.onerror=this.onpause=this.onresume=this.onboundary=this.onmark=null;}}\n" +
+            "function fire(u,type,err){var e=new Event(type);e.utterance=u;e.charIndex=0;e.elapsedTime=0;e.name='';if(err)e.error=err;\n" +
+            "try{if(typeof u['on'+type]==='function')u['on'+type].call(u,e);}catch(x){console.error(x);}try{u.dispatchEvent(e);}catch(x){}}\n" +
+            "function any(){for(var k in live)return true;return false;}\n" +
+            "var S=new EventTarget();S.onvoiceschanged=null;\n" +
+            "S.speak=function(u){var id='u'+(++cnt);live[id]=u;\n" +
+            "B.speak(id,u.text,(u.voice&&u.voice.lang)||u.lang||'',u.rate,u.pitch);};\n" +
+            "S.cancel=function(){var l=live;live={};held=[];paused=false;B.cancel();for(var k in l)fire(l[k],'error','canceled');};\n" +
+            "S.pause=function(){if(paused||!any())return;paused=true;held=[];for(var k in live)held.push(live[k]);live={};B.cancel();if(held[0])fire(held[0],'pause');};\n" +
+            "S.resume=function(){if(!paused)return;paused=false;var h=held;held=[];h.forEach(function(u){S.speak(u);});if(h[0])fire(h[0],'resume');};\n" +
+            "S.getVoices=function(){if(voices&&voices.length)return voices;var a=[];try{a=JSON.parse(B.voices());}catch(e){}\n" +
+            "voices=a.map(function(v){return{name:v.n,lang:v.l,localService:true,default:false,voiceURI:v.n};});return voices;};\n" +
+            "Object.defineProperty(S,'speaking',{get:function(){return any();}});\n" +
+            "Object.defineProperty(S,'pending',{get:function(){return false;}});\n" +
+            "Object.defineProperty(S,'paused',{get:function(){return paused;}});\n" +
+            "def(window,'__ubTtsEv',function(id,kind){\n" +
+            "if(kind==='voices'){voices=null;var e=new Event('voiceschanged');try{if(S.onvoiceschanged)S.onvoiceschanged(e);S.dispatchEvent(e);}catch(x){}return;}\n" +
+            "var u=live[id];if(!u)return;if(kind!=='start')delete live[id];\n" +
+            "fire(u,kind,kind==='error'?'synthesis-failed':null);});\n" +
+            "def(window,'SpeechSynthesisUtterance',U);def(window,'speechSynthesis',S);\n" +
+            "})();\n";
+
     // ---------------------------------------------------------------- вкладка и мелкие вью
 
     private static final class Tab {
@@ -839,6 +877,7 @@ public class BrowserModule implements IPlugin, ISettingsProvider {
         Tab opener;
         JsResult pendingJs;
         final String bridgeName = "ub" + randHex(6);
+        final String ttsName = "ut" + randHex(6);
         final Map<String, Injected> injected = new ConcurrentHashMap<String, Injected>();
         final Map<String, Injected> byScript = new ConcurrentHashMap<String, Injected>();
         final List<MenuCmd> menu = new CopyOnWriteArrayList<MenuCmd>();
@@ -1075,6 +1114,11 @@ public class BrowserModule implements IPlugin, ISettingsProvider {
             closeLayer(false);
             h.removeCallbacksAndMessages(null);
             for (Tab t : tabs) destroyWebView(t);
+            if (tts != null) {
+                try { tts.stop(); tts.shutdown(); } catch (Throwable ignored) { }
+                tts = null;
+                ttsReady = false;
+            }
             pool.shutdownNow();
             try { CookieManager.getInstance().flush(); } catch (Throwable ignored) { }
         }
@@ -1251,6 +1295,9 @@ public class BrowserModule implements IPlugin, ISettingsProvider {
             for (HttpURLConnection c : t.conns.values()) {
                 try { c.disconnect(); } catch (Throwable ignored) { }
             }
+            if (ttsOwner.values().removeAll(Collections.singleton(t)) && tts != null) {
+                try { tts.stop(); } catch (Throwable ignored) { }      // вкладка закрыта или выгружена: её речь больше никому не нужна
+            }
             t.resetScripts();
             if (w == null) return;
             t.wv = null;
@@ -1402,9 +1449,11 @@ public class BrowserModule implements IPlugin, ISettingsProvider {
             s.setBuiltInZoomControls(true);
             s.setDisplayZoomControls(false);
             s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+            s.setMediaPlaybackRequiresUserGesture(false);   // скрипты запускают звук (new Audio().play()) не из касания
             applyUserAgent(t);
             try { CookieManager.getInstance().setAcceptThirdPartyCookies(w, true); } catch (Throwable ignored) { }
             w.addJavascriptInterface(new Bridge(t), t.bridgeName);
+            if (sp.getBoolean("tts_bridge", true)) w.addJavascriptInterface(new TtsBridge(t), t.ttsName);
             w.setWebViewClient(new Client(t));
             w.setWebChromeClient(new Chrome(t));
             w.setDownloadListener(new DownloadListener() {
@@ -1701,6 +1750,11 @@ public class BrowserModule implements IPlugin, ISettingsProvider {
             String low = url.toLowerCase(Locale.ROOT);
             if (!(low.startsWith("http://") || low.startsWith("https://"))) return;
             if (early) t.resetScripts();                               // началась новая страница
+            if (sp.getBoolean("tts_bridge", true)) {                   // speechSynthesis вставляется раньше скриптов пользователя
+                try {
+                    t.wv.evaluateJavascript(TTS_POLYFILL.replace("@@TTS@@", t.ttsName), null);
+                } catch (Throwable ignored) { }
+            }
             for (UserScript s : ScriptStore.list()) {
                 if (!sp.getBoolean("script_on:" + s.fileName, true)) continue;
                 if (early && !"document-start".equals(s.runAt)) continue;
@@ -1964,6 +2018,122 @@ public class BrowserModule implements IPlugin, ISettingsProvider {
                 t.aborted.add(key);
                 HttpURLConnection c = t.conns.get(key);
                 if (c != null) c.disconnect();
+            }
+        }
+
+        // ------------------------------------------------------------ озвучка для скриптов (speechSynthesis поверх TextToSpeech)
+
+        private volatile android.speech.tts.TextToSpeech tts;
+        private volatile boolean ttsReady;
+        private final List<Runnable> ttsPending = new ArrayList<Runnable>();          // только главный поток
+        private final Map<String, Tab> ttsOwner = new ConcurrentHashMap<String, Tab>();
+
+        /** Движок создаётся при первой фразе (или первом запросе голосов); вызывать на главном потоке. */
+        private void ensureTts() {
+            if (tts != null || closed) return;
+            tts = new android.speech.tts.TextToSpeech(act.getApplicationContext(),
+                    new android.speech.tts.TextToSpeech.OnInitListener() {
+                @Override public void onInit(int status) {
+                    ttsReady = status == android.speech.tts.TextToSpeech.SUCCESS;
+                    if (ttsReady) {
+                        tts.setOnUtteranceProgressListener(new android.speech.tts.UtteranceProgressListener() {
+                            @Override public void onStart(String id) { ttsEvent(id, "start"); }
+                            @Override public void onDone(String id) { ttsEvent(id, "end"); }
+                            @Override public void onError(String id) { ttsEvent(id, "error"); }
+                        });
+                    }
+                    h.post(new Runnable() {
+                        @Override public void run() {
+                            List<Runnable> jobs = new ArrayList<Runnable>(ttsPending);
+                            ttsPending.clear();
+                            if (ttsReady) for (Runnable r : jobs) r.run();
+                            else if (!jobs.isEmpty()) toast("Не удалось запустить голосовой движок Android");
+                            for (Tab t : tabs) {
+                                if (t.wv != null) t.wv.evaluateJavascript("try{window.__ubTtsEv('','voices')}catch(e){}", null);
+                            }
+                        }
+                    });
+                }
+            });
+        }
+
+        /** Событие движка (поток биндера) уходит странице на главном потоке. */
+        private void ttsEvent(final String id, final String kind) {
+            final Tab t = ttsOwner.get(id);
+            if (t == null) return;
+            if (!kind.equals("start")) ttsOwner.remove(id);
+            h.post(new Runnable() {
+                @Override public void run() {
+                    if (!closed && t.wv != null) {
+                        t.wv.evaluateJavascript("try{window.__ubTtsEv(" + q(id) + "," + q(kind) + ")}catch(e){}", null);
+                    }
+                }
+            });
+        }
+
+        private final class TtsBridge {
+            private final Tab t;
+            TtsBridge(Tab t) { this.t = t; }
+
+            @JavascriptInterface public void speak(final String id, final String text, final String lang,
+                                                   final float rate, final float pitch) {
+                if (id == null || text == null || text.length() == 0) return;
+                h.post(new Runnable() {
+                    @Override public void run() {
+                        if (closed) return;
+                        ensureTts();
+                        Runnable job = new Runnable() {
+                            @Override public void run() {
+                                android.speech.tts.TextToSpeech e = tts;
+                                if (e == null) return;
+                                try {
+                                    if (lang != null && lang.length() > 0) e.setLanguage(Locale.forLanguageTag(lang));
+                                    e.setSpeechRate(rate > 0 ? rate : 1f);
+                                    e.setPitch(pitch > 0 ? pitch : 1f);
+                                    ttsOwner.put(id, t);
+                                    String part = text.length() > 3900 ? text.substring(0, 3900) : text;     // предел движка около 4000 знаков
+                                    e.speak(part, android.speech.tts.TextToSpeech.QUEUE_ADD, null, id);
+                                } catch (Throwable ignored) { }
+                            }
+                        };
+                        if (ttsReady) job.run(); else ttsPending.add(job);
+                    }
+                });
+            }
+
+            @JavascriptInterface public void cancel() {
+                h.post(new Runnable() {
+                    @Override public void run() {
+                        ttsPending.clear();
+                        ttsOwner.clear();
+                        android.speech.tts.TextToSpeech e = tts;
+                        if (e != null) { try { e.stop(); } catch (Throwable ignored) { } }
+                    }
+                });
+            }
+
+            /** JSON [{n: имя, l: язык}]; пока движок не готов, пусто, а страница получит voiceschanged. */
+            @JavascriptInterface public String voices() {
+                JSONArray a = new JSONArray();
+                android.speech.tts.TextToSpeech e = tts;
+                if (e == null) {
+                    h.post(new Runnable() { @Override public void run() { ensureTts(); } });
+                    return "[]";
+                }
+                try {
+                    if (ttsReady) {
+                        Set<android.speech.tts.Voice> vs = e.getVoices();
+                        if (vs != null) {
+                            for (android.speech.tts.Voice v : vs) {
+                                JSONObject o = new JSONObject();
+                                o.put("n", v.getName());
+                                o.put("l", v.getLocale().toLanguageTag());
+                                a.put(o);
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) { }
+                return forJs(a.toString());
             }
         }
 
