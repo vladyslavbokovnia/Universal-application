@@ -36,7 +36,13 @@ object PermissionGate {
         Step("all_files", { c ->
             Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
         }, { c ->
-            Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, pkgUri(c))
+            if (Build.VERSION.SDK_INT == Build.VERSION_CODES.R) {
+                // Некоторые прошивки Android 11 (в том числе e-ink устройства) зависают
+                // на странице разрешения конкретного приложения. Открываем общий список.
+                Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+            } else {
+                Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, pkgUri(c))
+            }
         }),
         Step("accessibility", { c ->
             val enabled = Settings.Secure.getString(c.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
