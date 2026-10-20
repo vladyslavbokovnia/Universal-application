@@ -14,6 +14,10 @@ import android.widget.FrameLayout
  */
 class ModuleBrowserActivity : Activity() {
 
+    private companion object {
+        const val BROWSER_MODULE = "Браузер"
+    }
+
     private var plugin: IPlugin? = null
 
     private fun call(cmd: String, extra: Map<String, Any> = emptyMap()): Any? {
@@ -28,7 +32,7 @@ class ModuleBrowserActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        plugin = intent.getStringExtra("module")?.let { PluginRegistry.find(this, it) }
+        plugin = moduleName()?.let { PluginRegistry.find(this, it) }
         window.statusBarColor = Color.BLACK
         window.navigationBarColor = Color.BLACK
         val v = call("createView") as? View
@@ -43,8 +47,24 @@ class ModuleBrowserActivity : Activity() {
         setContentView(root)
     }
 
+    /**
+     * Запуск через мини-приложение «Браузер» (значок, «Поделиться», «Открыть с помощью») приходит без extra "module":
+     * имя модуля тогда берётся из настройки хоста, а чужие extra не принимаются. Внутренние запуски задают модуль сами.
+     */
+    private fun moduleName(): String? {
+        val viaAlias = intent.component?.className?.endsWith(".BrowserApp") == true
+        if (!viaAlias) return intent.getStringExtra("module")
+        intent.removeExtra("profile")
+        intent.removeExtra("url")
+        return BROWSER_MODULE
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        if (intent.component?.className?.endsWith(".BrowserApp") == true) {
+            intent.removeExtra("profile")
+            intent.removeExtra("url")
+        }
         setIntent(intent)
         call("newIntent")
     }
