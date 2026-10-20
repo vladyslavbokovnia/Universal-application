@@ -360,7 +360,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         return fgPackage;
     }
 
-    /** Владелец сессии плеера (не самого хоста); раз в 0,4 с, нужен доступ к уведомлениям. */
+    /** Владелец сессии плеера (в том числе встроенного «Аудиоплеера» хоста); раз в 0,4 с, нужен доступ к уведомлениям. */
     private String mediaOwner() {
         Context c = appCtx;
         long now = SystemClock.uptimeMillis();
@@ -1176,14 +1176,14 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
     }
 
     /**
-     * Сессия плеера: играющая, иначе самая приоритетная. Собственные сессии хоста пропускаются:
-     * модуль Radio Gestures держит всегда «играющую» сессию и принимает из неё play/pause как жест
-     * (отключает и возвращает Bluetooth-наушник), так что команды плееру туда попадать не должны.
+     * Сессия плеера: играющая, иначе самая приоритетная. Сессии самого хоста (встроенный «Аудиоплеер»)
+     * тоже учитываются. Модуль Radio Gestures держит всегда «играющую» сессию и принимает из неё
+     * play/pause как жест (отключает и возвращает Bluetooth-наушник): чтобы команды шли плееру,
+     * этот модуль нужно выключить.
      */
     private static MediaController pickController(List<MediaController> list, String ownPkg) {
         MediaController first = null;
         for (MediaController mc : list) {
-            if (ownPkg.equals(mc.getPackageName())) continue;
             PlaybackState ps = mc.getPlaybackState();
             if (ps != null && ps.getState() == PlaybackState.STATE_PLAYING) return mc;
             if (first == null) first = mc;
@@ -1193,9 +1193,8 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
 
     /**
      * Команда напрямую сессии плеера: не зависит от того, какое приложение на переднем плане.
-     * 1: выполнено. 2: сессии плеера нет, ничего не делаем (медиаклавиша ушла бы в сессию самого хоста,
-     * то есть в Radio Gestures). 0: идти дальше обычной медиаклавишей (нет доступа к уведомлениям, прямое
-     * управление выключено или плеер не умеет перемотку).
+     * 1: выполнено. 2: активной сессии нет, ничего не делаем. 0: идти дальше обычной медиаклавишей
+     * (нет доступа к уведомлениям, прямое управление выключено или плеер не умеет перемотку).
      */
     private int viaController(Context c, String a) {
         if (!isMediaAction(a)) return 0;
