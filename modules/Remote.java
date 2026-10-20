@@ -76,7 +76,7 @@ public class Remote implements IPlugin, ISettingsProvider, ISettingsViewProvider
         appCtx = context.getApplicationContext();
         svc = (context instanceof AccessibilityService) ? (AccessibilityService) context : null;
     }
-    @Override public Object execute(Map<String, Object> data) { return null; }
+    @Override public Object execute(Map<String, ?> data) { return null; }
     @Override public void onAccessibilityEvent(AccessibilityEvent event, AccessibilityService service) { }
     @Override public Bitmap createIcon(int sizePx) { return null; }
 
@@ -173,6 +173,7 @@ public class Remote implements IPlugin, ISettingsProvider, ISettingsViewProvider
         List<SettingItem> r = new ArrayList<SettingItem>();
         r.add(SettingItem.section("Кнопки геймпада"));
         r.add(SettingItem.custom("pad", "Назначение кнопок", "Нажми «Назначить» и нажми кнопку геймпада"));
+        r.add(SettingItem.action("pin", "Ярлык на рабочий стол", "Значок модуля на рабочий стол — откроется отдельным окном"));
         r.add(SettingItem.action("reset", "Сбросить назначения", "Вернуть кнопки по умолчанию"));
         return r;
     }
@@ -181,6 +182,9 @@ public class Remote implements IPlugin, ISettingsProvider, ISettingsViewProvider
         if ("reset".equals(key)) {
             SharedPreferences p = prefs();
             if (p != null) p.edit().clear().apply();
+        } else if ("pin".equals(key)) {
+            try { im.manus.universalhost.ModuleShortcuts.pin(appCtx, this); }
+            catch (Throwable t) { }
         }
     }
 

@@ -44,6 +44,14 @@
         </activity>
 
         <activity android:name=".ModuleSettingsActivity" android:exported="false" />
+        <!-- Приёмник «Поделиться» для модулей (PWA-стиль): виден в системном меню шаринга -->
+        <activity android:name=".ModuleShareActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="audio/*" />
+            </intent-filter>
+        </activity>
         <activity android:name=".AppImagesActivity" android:exported="false" />
 
         <!-- Окно поверх блокировки для модулей (заставка ClockWallpaper) -->

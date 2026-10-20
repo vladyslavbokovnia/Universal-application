@@ -60,6 +60,7 @@ class ModuleSettingsActivity : Activity() {
             return
         }
         target = t
+        title = t // карточка в недавних подписана именем модуля (PWA-стиль)
         folderId = intent.getStringExtra(EXTRA_FOLDER)
         pendingKey = savedInstanceState?.getString("pending")
 

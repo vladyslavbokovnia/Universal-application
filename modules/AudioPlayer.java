@@ -43,6 +43,7 @@ import im.manus.universalhost.IKeyHandler;
 import im.manus.universalhost.IPlugin;
 import im.manus.universalhost.ISettingsProvider;
 import im.manus.universalhost.ISettingsViewProvider;
+import im.manus.universalhost.IShareHandler;
 import im.manus.universalhost.SettingItem;
 
 import java.util.ArrayList;
@@ -56,7 +57,8 @@ import java.util.Map;
  * работают с гарнитуры и из модуля «Пульт». Кнопки геймпада назначаются тут же.
  * Shizuku не нужен.
  */
-public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewProvider, IKeyHandler {
+public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewProvider, IKeyHandler,
+        IShareHandler {
 
     private static final String PREFS = "module_Аудиоплеер";
     private static final String CHANNEL = "audioplayer";
@@ -137,7 +139,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         cancelNotif();
     }
 
-    @Override public Object execute(Map<String, Object> data) { return null; }
+    @Override public Object execute(Map<String, ?> data) { return null; }
     @Override public void onAccessibilityEvent(AccessibilityEvent event, AccessibilityService service) { }
     @Override public Bitmap createIcon(int sizePx) { return null; }
 
@@ -513,6 +515,52 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         refreshUiAll();
     }
 
+    // ---------------------------------------------------------- «Поделиться» (PWA-стиль)
+
+    @Override public List<String> shareMimeTypes() {
+        List<String> r = new ArrayList<String>();
+        r.add("audio/*");
+        return r;
+    }
+
+    /**
+     * Входящий файл из меню «Поделиться»: добавляем первым в список и сразу играем.
+     * Работает, даже если модуль ещё не был проинициализирован службой.
+     */
+    @Override public boolean onShare(Context ctx, Intent intent) {
+        try {
+            if (appCtx == null) {
+                appCtx = ctx.getApplicationContext();
+                h = new Handler(Looper.getMainLooper());
+            }
+            Uri stream = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (stream == null || appCtx == null) return false;
+            String title = null;
+            Cursor c = null;
+            try {
+                c = ctx.getContentResolver().query(stream,
+                        new String[]{MediaStore.MediaColumns.DISPLAY_NAME}, null, null, null);
+                if (c != null && c.moveToFirst()) title = c.getString(0);
+            } catch (Throwable t) { }
+            finally { if (c != null) try { c.close(); } catch (Throwable t) { } }
+            if (title == null || title.length() == 0) title = "Из «Поделиться»";
+            Track tr = new Track();
+            tr.id = -System.currentTimeMillis();
+            tr.title = title;
+            tr.artist = "Поделиться";
+            tr.dur = 0;
+            tr.uri = stream;
+            tracks.add(0, tr);
+            ensureSession();
+            ensureReceiver();
+            playAt(0);
+            toast("Играет: " + title);
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     // ---------------------------------------------------------- геймпад
 
     private static int gDefaultFor(String action) {
@@ -607,10 +655,16 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         List<SettingItem> r = new ArrayList<SettingItem>();
         r.add(SettingItem.section("Плеер"));
         r.add(SettingItem.custom("player", "Плеер", "Песни с устройства, удаление, кнопки геймпада"));
+        r.add(SettingItem.action("pin", "Ярлык на рабочий стол", "Значок модуля на рабочий стол — откроется отдельным окном"));
         return r;
     }
 
-    @Override public void onSettingChanged(String key) { }
+    @Override public void onSettingChanged(String key) {
+        if ("pin".equals(key)) {
+            try { im.manus.universalhost.ModuleShortcuts.pin(appCtx, this); }
+            catch (Throwable t) { }
+        }
+    }
 
     @Override public View createSettingsView(Context context, String key) {
         return new PlayerView(context);
