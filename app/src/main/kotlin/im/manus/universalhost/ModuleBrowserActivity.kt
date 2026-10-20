@@ -19,6 +19,7 @@ class ModuleBrowserActivity : Activity() {
     }
 
     private var plugin: IPlugin? = null
+    private var name: String? = null
 
     private fun call(cmd: String, extra: Map<String, Any> = emptyMap()): Any? {
         val plugin = plugin ?: return null
@@ -32,7 +33,8 @@ class ModuleBrowserActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        plugin = moduleName()?.let { PluginRegistry.find(this, it) }
+        name = moduleName()
+        plugin = name?.let { PluginRegistry.find(this, it) }
         window.statusBarColor = Color.BLACK
         window.navigationBarColor = Color.BLACK
         val v = call("createView") as? View
@@ -45,6 +47,23 @@ class ModuleBrowserActivity : Activity() {
         root.setBackgroundColor(Color.BLACK)
         root.addView(v, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
+        applyTaskDescription()
+    }
+
+    /** Своя карточка в недавних: название и значок модуля, а не хоста. */
+    @Suppress("DEPRECATION")
+    private fun applyTaskDescription() {
+        val n = name ?: return
+        try {
+            setTaskDescription(android.app.ActivityManager.TaskDescription(n, ModuleWindows.icon(this, n, 192), Color.BLACK))
+        } catch (t: Throwable) { }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val n = name ?: return
+        // как открыть это окно снова из модуля «Недавние»
+        ModuleWindows.record(this, n, Intent().setClassName(packageName, "im.manus.universalhost.BrowserApp"))
     }
 
     /**
@@ -53,18 +72,11 @@ class ModuleBrowserActivity : Activity() {
      */
     private fun moduleName(): String? {
         val viaAlias = intent.component?.className?.endsWith(".BrowserApp") == true
-        if (!viaAlias) return intent.getStringExtra("module")
-        intent.removeExtra("profile")
-        intent.removeExtra("url")
-        return BROWSER_MODULE
+        return if (viaAlias) BROWSER_MODULE else intent.getStringExtra("module")
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        if (intent.component?.className?.endsWith(".BrowserApp") == true) {
-            intent.removeExtra("profile")
-            intent.removeExtra("url")
-        }
         setIntent(intent)
         call("newIntent")
     }

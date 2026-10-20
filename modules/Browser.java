@@ -10,6 +10,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -25,6 +26,7 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.text.InputType;
 import android.util.Base64;
+import android.view.DragEvent;
 import android.view.GestureDetector;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -129,6 +131,12 @@ import java.util.regex.Pattern;
  * при прокрутке вниз. Браузер по настройке открывается с панели вкладок. «Ярлык на рабочий стол» закрепляет значок
  * «Браузер»: окно открывается своей задачей со своим названием и значком в недавних.
  *
+ * Карточки вкладок: снимок страницы с крупными значками сайта и профиля поверх него. Вкладки перетаскиваются: вкладка на
+ * вкладку создаёт группу, вкладка на группу добавляется в неё, в открытой группе вкладку можно поставить на первое место
+ * (её снимок станет обложкой группы) или вытащить из группы. Долгое нажатие и отпустить на месте открывает меню.
+ * Значок профиля меняется: эмодзи, номер или своя картинка (меню, «Значки профилей»). Цвет строки состояния берётся со
+ * страницы (theme-color или фон). Окно браузера регистрируется в реестре окон хоста, поэтому модуль «Недавние» его показывает.
+ *
  * Озвучка. WebView сам не озвучивает speechSynthesis, поэтому при включённой настройке «Озвучка для скриптов»
  * в страницы подставляются window.speechSynthesis и SpeechSynthesisUtterance поверх нативного Android TextToSpeech
  * (события start/end/error приходят из движка). Воспроизведение звука страницей разрешено без касания.
@@ -137,7 +145,8 @@ public class Browser implements IPlugin, ISettingsProvider {
 
     private static final String PREFS = "module________";
     private static final String VALUES_PREFS = "module_________values";
-    private static final String BROWSER_ACTIVITY = "im.manus.universalhost.ModuleBrowserActivity";
+    private static final String BROWSER_ACTIVITY = "im.manus.universalhost.BrowserApp";     // активити-псевдоним из манифеста: свой значок и название
+    private static final int REQ_PROFILE_IMG = 7312;
     private static final int REQ_FILE = 7311;
     private static final String SCRIPTS_SUBDIR = "UniversalPlugins/BrowserScripts";
     private static final String DEF_HOME = "https://www.google.com/";
@@ -380,7 +389,7 @@ public class Browser implements IPlugin, ISettingsProvider {
 
     @Override
     public Bitmap createIcon(int sizePx) {
-        return null;        // хост нарисует монограмму
+        return makeIcon(Math.max(48, sizePx));
     }
 
     private SharedPreferences prefs() {
@@ -953,6 +962,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         Bitmap icon;
         String uid = randHex(5);
         String iconHost;
+        int bar;                // цвет строки состояния для этой страницы, 0: не определён
         int group;              // 0: вне группы
         long lastUsed;
         Tab opener;
@@ -1066,7 +1076,12 @@ public class Browser implements IPlugin, ISettingsProvider {
         private boolean closed;
         private ValueCallback<Uri[]> fileCb;
         private String defaultUa;
-        private boolean fullscreen, dockHidden, started, wantPanel, tabsPanel;
+        private boolean fullscreen, dockHidden, started, wantPanel, tabsPanel, lightBar;
+        private ScrollView tabScroll;
+        private Object dragItem;
+        private int dragScrollDir;
+        private int pendingProfile = -1;
+        private final Map<Integer, Bitmap> profileImgs = new HashMap<Integer, Bitmap>();
         private int scrollAccum;
         private final List<Group> groups = new ArrayList<Group>();
         private int nextGroup = 1;
@@ -1229,7 +1244,11 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
             if (url != null && url.length() > 0) {
                 String norm = normalize(url);
-                if (norm != null) newTab(norm, in.getIntExtra("profile", 0), null, true);
+                if (norm != null) {
+                    wantPanel = false;
+                    closeLayer(false);                  // открытая панель вкладок или меню не должны закрывать новую страницу
+                    newTab(norm, in.getIntExtra("profile", 0), null, true);
+                }
             } else if (sp.getBoolean("open_tabs_first", true)) {
                 wantPanel = true;
             }
@@ -1238,6 +1257,12 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         /** Результат окна выбора файла: страница получает выбранные адреса или null, если выбор отменён. */
         void activityResult(int requestCode, int resultCode, Intent data) {
+            if (requestCode == REQ_PROFILE_IMG) {
+                final int idx = pendingProfile;
+                pendingProfile = -1;
+                if (idx >= 0 && resultCode == Activity.RESULT_OK && data != null && data.getData() != null) saveProfileImage(idx, data.getData());
+                return;
+            }
             if (requestCode != REQ_FILE) return;
             ValueCallback<Uri[]> cb = fileCb;
             fileCb = null;
@@ -1433,13 +1458,65 @@ public class Browser implements IPlugin, ISettingsProvider {
             FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) content.getLayoutParams();
             lp.bottomMargin = fullscreen ? 0 : dp(55);
             content.setLayoutParams(lp);
-            if (customView == null) {
-                act.getWindow().getDecorView().setSystemUiVisibility(fullscreen
-                        ? (View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
-                        : 0);
-            }
+            applySysUi();
             setDockHidden(false, false);
+        }
+
+        /** Флаги системных панелей: полный экран или обычный режим со светлыми/тёмными значками в зависимости от цвета строки. */
+        @SuppressWarnings("deprecation")
+        private void applySysUi() {
+            if (customView != null) return;
+            int f = 0;
+            if (fullscreen) {
+                f = View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_STABLE;
+            } else if (lightBar && Build.VERSION.SDK_INT >= 23) {
+                f = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            }
+            act.getWindow().getDecorView().setSystemUiVisibility(f);
+        }
+
+        /** Строка состояния берёт цвет страницы (theme-color или фон), а не остаётся чёрной полосой над ней. */
+        private void applyBar(Tab t) {
+            int col = t == null || t.bar == 0 ? C_BG : t.bar;
+            lightBar = (0.299f * Color.red(col) + 0.587f * Color.green(col) + 0.114f * Color.blue(col)) > 150f;
+            try { act.getWindow().setStatusBarColor(col); } catch (Throwable ignored) { }
+            applySysUi();
+        }
+
+        private static final String BAR_JS = "(function(){try{var m=document.querySelector('meta[name=theme-color]');var c=m&&m.content;"
+                + "if(!c){var e=document.body||document.documentElement;c=getComputedStyle(e).backgroundColor;"
+                + "if(!c||c==='transparent'||/rgba\\(.*,\\s*0\\)$/.test(c)){c=getComputedStyle(document.documentElement).backgroundColor;}}"
+                + "return c||'';}catch(e){return '';}})()";
+
+        private void probeBar(final Tab t) {
+            if (t.wv == null || t.blocked || closed) return;
+            try {
+                t.wv.evaluateJavascript(BAR_JS, new ValueCallback<String>() {
+                    @Override public void onReceiveValue(String v) {
+                        int col = parseCssColor(v);
+                        t.bar = col;
+                        if (t == cur) applyBar(t);
+                    }
+                });
+            } catch (Throwable ignored) { }
+        }
+
+        /** #rgb, #rrggbb, rgb(), rgba(); прозрачное или непонятное считается белым фоном страницы. */
+        private int parseCssColor(String raw) {
+            if (raw == null) return 0xFFFFFFFF;
+            String s = raw.replace("\"", "").trim().toLowerCase(Locale.ROOT);
+            try {
+                if (s.startsWith("#")) return Color.parseColor(s.length() == 4
+                        ? "#" + s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2) + s.charAt(3) + s.charAt(3) : s);
+                Matcher m = Pattern.compile("rgba?\\(\\s*(\\d+)[ ,]+(\\d+)[ ,]+(\\d+)(?:[ ,/]+([0-9.]+))?").matcher(s);
+                if (m.find()) {
+                    float a = m.group(4) == null ? 1f : Float.parseFloat(m.group(4));
+                    if (a < 0.5f) return 0xFFFFFFFF;
+                    return Color.rgb(Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)), Integer.parseInt(m.group(3)));
+                }
+            } catch (Throwable ignored) { }
+            return 0xFFFFFFFF;
         }
 
         private void setDockHidden(boolean hide, boolean animate) {
@@ -1671,6 +1748,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 if (cur.wv != null) content.removeView(cur.wv);
             }
             cur = t;
+            applyBar(t);
             setDockHidden(false, false);
             t.lastUsed = SystemClock.uptimeMillis();
             ensureWebView(t, true);
@@ -1975,6 +2053,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 t.progress = 100;
                 injectScripts(t, url, false);
                 syncDocStart(t);
+                probeBar(t);
                 if (t.icon == null && iconOf(t) == null) fetchFavicon(t);
                 if (t == cur) {
                     refreshUi();
@@ -2815,16 +2894,19 @@ public class Browser implements IPlugin, ISettingsProvider {
             return v;
         }
 
+        private GradientDrawable ring(int color, int sizeDp) {
+            return round(color, sizeDp / 2, 0xB3000000, 2);        // тёмный контур, чтобы значок читался на любом снимке
+        }
+
         /** Значок сайта: favicon, а если его нет, буква хоста в цветном круге. */
         private View siteIcon(Tab t, int sizeDp) {
             Bitmap ic = iconOf(t);
-            int sz = dp(sizeDp);
             if (ic != null) {
                 ImageView iv = new ImageView(act);
                 iv.setImageBitmap(ic);
                 iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
-                iv.setBackground(round(0xFFEEEEEE, sizeDp / 2, 0, 0));
-                int pad = Math.max(1, dp(sizeDp) / 8);
+                iv.setBackground(ring(0xFFEEEEEE, sizeDp));
+                int pad = Math.max(1, dp(sizeDp) / 7);
                 iv.setPadding(pad, pad, pad, pad);
                 return iv;
             }
@@ -2838,21 +2920,163 @@ public class Browser implements IPlugin, ISettingsProvider {
             tv.setTypeface(tv.getTypeface(), android.graphics.Typeface.BOLD);
             tv.setTextSize(Math.max(10, sizeDp * 0.42f));
             tv.setGravity(Gravity.CENTER);
-            tv.setBackground(round(pal[Math.abs(host.hashCode()) % pal.length], sizeDp / 2, 0, 0));
+            tv.setBackground(ring(pal[Math.abs(host.hashCode()) % pal.length], sizeDp));
             return tv;
         }
 
-        /** Значок профиля: цветной круг с номером профиля. */
+        private final String[] PROFILE_GLYPHS = {"👤", "🏠", "💼", "🛒", "🎮", "📺", "🎵", "📚", "✈️", "💬",
+                "⭐", "🔒", "❤️", "🍀", "🔧", "🎓", "📰", "💰", "📷", "🧪", "⚽", "🍕", "🐱", "🌍"};
+
+        private File profileImageFile(int idx) { return new File(act.getFilesDir(), "ubprofile_" + idx + ".png"); }
+
+        private Bitmap profileImage(int idx) {
+            Integer k = Integer.valueOf(idx);
+            Bitmap b = profileImgs.get(k);
+            if (b == null) {
+                b = loadBitmap(profileImageFile(idx));
+                if (b != null) profileImgs.put(k, b);
+            }
+            return b;
+        }
+
+        /** Значок профиля: своя картинка, либо эмодзи, либо номер, на цветном круге профиля. */
         private View profileBadge(int idx, int sizeDp) {
+            int i = Math.max(0, Math.min(PROFILES - 1, idx));
+            Bitmap img = profileImage(i);
+            if (img != null) {
+                ImageView iv = new ImageView(act);
+                iv.setImageBitmap(img);
+                iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                iv.setBackground(ring(profileColor(i), sizeDp));
+                iv.setClipToOutline(true);
+                iv.setContentDescription(profileName(i));
+                return iv;
+            }
+            String glyph = sp.getString("profile_glyph_" + i, "");
             TextView tv = new TextView(act);
-            tv.setText(String.valueOf(Math.max(0, Math.min(PROFILES - 1, idx)) + 1));
+            tv.setText(glyph.length() > 0 ? glyph : String.valueOf(i + 1));
             tv.setTextColor(0xFF121212);
-            tv.setTypeface(tv.getTypeface(), android.graphics.Typeface.BOLD);
-            tv.setTextSize(Math.max(10, sizeDp * 0.46f));
+            if (glyph.length() == 0) tv.setTypeface(tv.getTypeface(), android.graphics.Typeface.BOLD);
+            tv.setTextSize(Math.max(10, sizeDp * (glyph.length() > 0 ? 0.5f : 0.46f)));
             tv.setGravity(Gravity.CENTER);
-            tv.setBackground(round(profileColor(idx), sizeDp / 2, 0, 0));
-            tv.setContentDescription(profileName(idx));
+            tv.setIncludeFontPadding(false);
+            tv.setBackground(ring(profileColor(i), sizeDp));
+            tv.setContentDescription(profileName(i));
             return tv;
+        }
+
+        private void saveProfileImage(final int idx, final Uri uri) {
+            try {
+                pool.execute(new Runnable() {
+                    @Override public void run() {
+                        try {
+                            InputStream in = act.getContentResolver().openInputStream(uri);
+                            Bitmap src;
+                            try {
+                                BitmapFactory.Options o = new BitmapFactory.Options();
+                                o.inSampleSize = 1;
+                                byte[] data = Net.readAll(in, 12 * 1024 * 1024);
+                                BitmapFactory.Options b = new BitmapFactory.Options();
+                                b.inJustDecodeBounds = true;
+                                BitmapFactory.decodeByteArray(data, 0, data.length, b);
+                                while (Math.max(b.outWidth, b.outHeight) / (o.inSampleSize * 2) >= 256) o.inSampleSize *= 2;
+                                src = BitmapFactory.decodeByteArray(data, 0, data.length, o);
+                            } finally {
+                                if (in != null) in.close();
+                            }
+                            if (src == null) throw new IOException("не картинка");
+                            int side = Math.min(src.getWidth(), src.getHeight());
+                            Bitmap sq = Bitmap.createBitmap(src, (src.getWidth() - side) / 2, (src.getHeight() - side) / 2, side, side);
+                            final Bitmap fin = Bitmap.createScaledBitmap(sq, 128, 128, true);
+                            OutputStream o2 = new FileOutputStream(profileImageFile(idx));
+                            try { fin.compress(Bitmap.CompressFormat.PNG, 90, o2); } finally { o2.close(); }
+                            h.post(new Runnable() {
+                                @Override public void run() {
+                                    if (closed) return;
+                                    profileImgs.put(Integer.valueOf(idx), fin);
+                                    sp.edit().putString("profile_glyph_" + idx, "").apply();
+                                    toast("Значок профиля заменён");
+                                    if (tabsPanel) showTabs();
+                                }
+                            });
+                        } catch (Throwable e) {
+                            h.post(new Runnable() { @Override public void run() { toast("Не удалось использовать картинку"); } });
+                        }
+                    }
+                });
+            } catch (Throwable ignored) { }
+        }
+
+        /** Список профилей: тап открывает замену значка. */
+        private void showProfileList() {
+            List<View> icons = new ArrayList<View>();
+            List<String> labels = new ArrayList<String>();
+            List<Runnable> actions = new ArrayList<Runnable>();
+            for (int i = 0; i < PROFILES; i++) {
+                final int idx = i;
+                icons.add(profileBadge(i, 30));
+                labels.add(profileName(i));
+                actions.add(new Runnable() { @Override public void run() { showProfileIconEditor(idx); } });
+            }
+            showList("Значки профилей", icons, labels, actions);
+        }
+
+        /** Замена значка профиля: эмодзи, номер, своя картинка; здесь же переименование. */
+        private void showProfileIconEditor(final int idx) {
+            LinearLayout c = card();
+            c.addView(panelTitle("Значок: " + profileName(idx)));
+            int perRow = 6;
+            LinearLayout rowL = null;
+            for (int i = 0; i < PROFILE_GLYPHS.length; i++) {
+                if (i % perRow == 0) {
+                    rowL = new LinearLayout(act);
+                    rowL.setOrientation(LinearLayout.HORIZONTAL);
+                    rowL.setPadding(dp(8), 0, dp(8), 0);
+                    c.addView(rowL, new LinearLayout.LayoutParams(-1, -2));
+                }
+                final String g = PROFILE_GLYPHS[i];
+                TextView cell = glyph(g);
+                cell.setTextSize(26);
+                cell.setBackground(pressable());
+                cell.setClickable(true);
+                cell.setFocusable(true);
+                cell.setContentDescription("Значок " + g);
+                cell.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        try { profileImageFile(idx).delete(); } catch (Throwable ignored) { }
+                        profileImgs.remove(Integer.valueOf(idx));
+                        sp.edit().putString("profile_glyph_" + idx, g).apply();
+                        closeLayer(false);
+                        if (tabsPanel) showTabs(); else showProfileList();
+                    }
+                });
+                rowL.addView(cell, new LinearLayout.LayoutParams(0, dp(52), 1f));
+            }
+            c.addView(row(glyph("№"), "Показывать номер", new Runnable() { @Override public void run() {
+                try { profileImageFile(idx).delete(); } catch (Throwable ignored) { }
+                profileImgs.remove(Integer.valueOf(idx));
+                sp.edit().putString("profile_glyph_" + idx, "").apply();
+                if (tabsPanel) showTabs(); else showProfileList();
+            } }));
+            c.addView(row(glyph("🖼"), "Своя картинка…", new Runnable() { @Override public void run() {
+                pendingProfile = idx;
+                try {
+                    act.startActivityForResult(new Intent(Intent.ACTION_GET_CONTENT).setType("image/*")
+                            .addCategory(Intent.CATEGORY_OPENABLE), REQ_PROFILE_IMG);
+                } catch (Throwable e) {
+                    pendingProfile = -1;
+                    toast("Нет приложения для выбора картинки");
+                }
+            } }));
+            c.addView(row(glyph("✎"), "Переименовать профиль", new Runnable() { @Override public void run() {
+                showPrompt("Название профиля", null, profileName(idx), new PromptDone() {
+                    @Override public void done(String value) {
+                        if (value != null && value.trim().length() > 0) sp.edit().putString("profile_name_" + idx, value.trim()).apply();
+                        showProfileList();
+                    }
+                });
+            } }));
+            showLayer(c, false, null, "Значок профиля " + profileName(idx));
         }
 
         private void installSwipeOnUrlField() {
@@ -3039,6 +3263,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             if (!t.menu.isEmpty()) {
                 add(icons, labels, actions, "📜", "Команды скриптов: " + t.menu.size(), new Runnable() { @Override public void run() { showScriptCommands(t); } });
             }
+            add(icons, labels, actions, "🎭", "Значки профилей…", new Runnable() { @Override public void run() { showProfileList(); } });
             add(icons, labels, actions, "⛶", fullscreen ? "Выйти из полноэкранного режима" : "Полноэкранный режим", new Runnable() { @Override public void run() {
                 sp.edit().putBoolean("fullscreen", !sp.getBoolean("fullscreen", false)).apply();
                 applyFullscreen();
@@ -3129,7 +3354,10 @@ public class Browser implements IPlugin, ISettingsProvider {
             head.addView(close, new LinearLayout.LayoutParams(dp(52), dp(52)));
             root.addView(head, new LinearLayout.LayoutParams(-1, -2));
 
+            if (og != null) root.addView(outOfGroupZone(og), new LinearLayout.LayoutParams(-1, -2));
+
             ScrollView sv = new ScrollView(act);
+            tabScroll = sv;
             LinearLayout grid = new LinearLayout(act);
             grid.setOrientation(LinearLayout.VERTICAL);
             grid.setPadding(dp(6), dp(4), dp(6), dp(16));
@@ -3166,18 +3394,17 @@ public class Browser implements IPlugin, ISettingsProvider {
             tabsPanel = true;
         }
 
-        /** Карточка: снимок страницы, под ним только значок сайта и значок профиля. Группа выглядит так же, но по первой вкладке и со счётчиком. */
+        /** Карточка: снимок страницы, поверх него крупные значки сайта (слева внизу) и профиля (справа внизу). */
         private FrameLayout cardBody(Tab t, boolean current, boolean isGroup, int count) {
             FrameLayout box = new FrameLayout(act);
             box.setBackground(round(C_SURFACE, 12, current ? C_ACCENT : (isGroup ? C_TEXT2 : C_SURFACE2), current ? 3 : (isGroup ? 2 : 1)));
             box.setClickable(true);
             box.setFocusable(true);
+            box.setClipToOutline(true);
 
-            LinearLayout col = new LinearLayout(act);
-            col.setOrientation(LinearLayout.VERTICAL);
-            col.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
             FrameLayout thumbBox = new FrameLayout(act);
             thumbBox.setBackgroundColor(C_SURFACE2);
+            thumbBox.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
             Bitmap tb = thumbOf(t);
             if (tb != null) {
                 ImageView iv = new ImageView(act);
@@ -3185,28 +3412,26 @@ public class Browser implements IPlugin, ISettingsProvider {
                 iv.setImageBitmap(tb);
                 thumbBox.addView(iv, new FrameLayout.LayoutParams(-1, -1));
             } else {
-                thumbBox.addView(siteIcon(t, 48), new FrameLayout.LayoutParams(dp(48), dp(48), Gravity.CENTER));
+                TextView ph = label(displayUrl(t), 14, C_TEXT2, false);
+                ph.setGravity(Gravity.CENTER);
+                thumbBox.addView(ph, new FrameLayout.LayoutParams(-1, -1));
             }
-            col.addView(thumbBox, new LinearLayout.LayoutParams(-1, dp(150)));
+            box.addView(thumbBox, new FrameLayout.LayoutParams(-1, dp(190)));
 
-            LinearLayout info = new LinearLayout(act);
-            info.setOrientation(LinearLayout.HORIZONTAL);
-            info.setGravity(Gravity.CENTER_VERTICAL);
-            info.setPadding(dp(8), dp(5), dp(8), dp(5));
-            info.addView(siteIcon(t, 24), new LinearLayout.LayoutParams(dp(24), dp(24)));
-            LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(dp(24), dp(24));
-            plp.setMargins(dp(8), 0, 0, 0);
-            info.addView(profileBadge(t.profile, 24), plp);
-            col.addView(info, new LinearLayout.LayoutParams(-1, -2));
-            box.addView(col, new FrameLayout.LayoutParams(-1, -2));
+            FrameLayout.LayoutParams slp = new FrameLayout.LayoutParams(dp(48), dp(48), Gravity.BOTTOM | Gravity.START);
+            slp.setMargins(dp(8), 0, 0, dp(8));
+            box.addView(siteIcon(t, 48), slp);
+            FrameLayout.LayoutParams plp = new FrameLayout.LayoutParams(dp(48), dp(48), Gravity.BOTTOM | Gravity.END);
+            plp.setMargins(0, 0, dp(8), dp(8));
+            box.addView(profileBadge(t.profile, 48), plp);
 
             if (isGroup) {
-                TextView badge = label("📁 " + count, 14, C_TEXT, true);
+                TextView badge = label("📁 " + count, 15, C_TEXT, true);
                 badge.setGravity(Gravity.CENTER);
                 badge.setBackground(round(0xCC000000, 14, 0, 0));
                 badge.setPadding(dp(10), dp(4), dp(10), dp(4));
                 FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START);
-                blp.setMargins(dp(6), dp(6), 0, 0);
+                blp.setMargins(dp(8), dp(8), 0, 0);
                 box.addView(badge, blp);
             }
             return box;
@@ -3214,7 +3439,7 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         private View tabCard(final Tab t, int index, int total) {
             boolean current = t == cur;
-            FrameLayout box = cardBody(t, current, false, 0);
+            final FrameLayout box = cardBody(t, current, false, 0);
             box.setContentDescription("Вкладка " + (index + 1) + " из " + total + ": " + tabTitle(t) + ", " + displayUrl(t)
                     + ", профиль " + profileName(t.profile) + (current ? ", текущая" : ""));
 
@@ -3234,13 +3459,15 @@ public class Browser implements IPlugin, ISettingsProvider {
             xlp.setMargins(0, dp(6), dp(6), 0);
             box.addView(x, xlp);
 
+            final Runnable menu = new Runnable() { @Override public void run() { showTabMenu(t); } };
+            attachDrop(box, t, menu);
             cardGestures(box, new Runnable() {
                 @Override public void run() {
                     closeLayer(false);
                     selectTab(t);
                 }
             }, new Runnable() {
-                @Override public void run() { showTabMenu(t); }
+                @Override public void run() { startItemDrag(box, t, menu); }
             }, new Runnable() {
                 @Override public void run() {
                     closeTab(t);                     // смахнули карточку: закрыть вкладку
@@ -3260,18 +3487,20 @@ public class Browser implements IPlugin, ISettingsProvider {
             FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(-1, -1);
             blp.setMargins(dp(7), dp(7), 0, 0);
             outer.addView(back, blp);
-            FrameLayout box = cardBody(first, current, true, gt.size());
+            final FrameLayout box = cardBody(first, current, true, gt.size());
             box.setContentDescription("Группа " + g.name + ", вкладок " + gt.size() + (current ? ", в ней текущая вкладка" : ""));
             FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(-1, -2);
             clp.setMargins(0, 0, dp(7), dp(7));
             outer.addView(box, clp);
+            final Runnable menu = new Runnable() { @Override public void run() { showGroupMenu(g); } };
+            attachDrop(box, g, menu);
             cardGestures(box, new Runnable() {
                 @Override public void run() {
                     openGroup = g;
                     showTabs();
                 }
             }, new Runnable() {
-                @Override public void run() { showGroupMenu(g); }
+                @Override public void run() { startItemDrag(box, g, menu); }
             }, null);
             return outer;
         }
@@ -3337,6 +3566,215 @@ public class Browser implements IPlugin, ISettingsProvider {
                     }
                 }
             });
+        }
+
+        // ------------------------------------------------------------ перетаскивание: группы и обложка группы
+
+        /** Долгое нажатие поднимает карточку. Если отпустить её на ней же, откроется меню. */
+        private void startItemDrag(View v, Object item, Runnable menu) {
+            dragItem = item;
+            boolean ok = false;
+            try {
+                v.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
+                ok = v.startDragAndDrop(ClipData.newPlainText("item", "item"), new View.DragShadowBuilder(v), item, 0);
+            } catch (Throwable ignored) { }
+            if (!ok) {
+                dragItem = null;
+                menu.run();
+            }
+        }
+
+        private GradientDrawable dropHint() { return round(0x334FC3F7, 12, C_ACCENT, 4); }
+
+        private void attachDrop(final FrameLayout box, final Object item, final Runnable menu) {
+            box.setOnDragListener(new View.OnDragListener() {
+                @Override public boolean onDrag(View v, DragEvent e) {
+                    Object d = e.getLocalState();
+                    switch (e.getAction()) {
+                        case DragEvent.ACTION_DRAG_STARTED:
+                            if (d == item) v.setAlpha(0.35f);
+                            return d != null;
+                        case DragEvent.ACTION_DRAG_ENTERED:
+                            if (d != item) box.setForeground(dropHint());
+                            return true;
+                        case DragEvent.ACTION_DRAG_EXITED:
+                            box.setForeground(null);
+                            return true;
+                        case DragEvent.ACTION_DRAG_LOCATION:
+                            dragAutoScroll(v, e);
+                            return true;
+                        case DragEvent.ACTION_DROP: {
+                            box.setForeground(null);
+                            final Object dropped = d;
+                            h.post(new Runnable() {
+                                @Override public void run() { handleDrop(dropped, item, menu); }
+                            });
+                            return true;
+                        }
+                        case DragEvent.ACTION_DRAG_ENDED:
+                            v.setAlpha(1f);
+                            box.setForeground(null);
+                            stopDragScroll();
+                            dragItem = null;
+                            return true;
+                        default:
+                            return true;
+                    }
+                }
+            });
+        }
+
+        /** Зона «вынуть из группы»: появляется в открытой группе только пока тянут вкладку. */
+        private View outOfGroupZone(final Group g) {
+            final TextView z = label("↩  Перетащите сюда, чтобы вынуть из группы", 15, C_TEXT, true);
+            z.setGravity(Gravity.CENTER);
+            z.setPadding(dp(12), dp(14), dp(12), dp(14));
+            z.setBackground(round(C_SURFACE2, 10, C_ACCENT, 2));
+            z.setVisibility(View.GONE);
+            z.setOnDragListener(new View.OnDragListener() {
+                @Override public boolean onDrag(View v, DragEvent e) {
+                    Object d = e.getLocalState();
+                    switch (e.getAction()) {
+                        case DragEvent.ACTION_DRAG_STARTED:
+                            if (!(d instanceof Tab)) return false;
+                            z.setVisibility(View.VISIBLE);
+                            return true;
+                        case DragEvent.ACTION_DRAG_ENTERED:
+                            z.setBackground(round(0x554FC3F7, 10, C_ACCENT, 3));
+                            return true;
+                        case DragEvent.ACTION_DRAG_EXITED:
+                            z.setBackground(round(C_SURFACE2, 10, C_ACCENT, 2));
+                            return true;
+                        case DragEvent.ACTION_DROP: {
+                            final Object dropped = d;
+                            h.post(new Runnable() {
+                                @Override public void run() {
+                                    if (!(dropped instanceof Tab)) return;
+                                    Tab dt = (Tab) dropped;
+                                    Tab anchor = lastOfGroup(g.id, dt);
+                                    dt.group = 0;
+                                    if (anchor != null) moveAfter(dt, anchor);
+                                    finishDrop();
+                                }
+                            });
+                            return true;
+                        }
+                        case DragEvent.ACTION_DRAG_ENDED:
+                            z.setVisibility(View.GONE);
+                            return true;
+                        default:
+                            return true;
+                    }
+                }
+            });
+            return z;
+        }
+
+        private final Runnable dragScroller = new Runnable() {
+            @Override public void run() {
+                if (dragScrollDir == 0 || tabScroll == null || closed) return;
+                tabScroll.scrollBy(0, dragScrollDir * dp(14));
+                h.postDelayed(this, 16);
+            }
+        };
+
+        private void dragAutoScroll(View card, DragEvent e) {
+            if (tabScroll == null) return;
+            int[] a = new int[2];
+            int[] s = new int[2];
+            card.getLocationOnScreen(a);
+            tabScroll.getLocationOnScreen(s);
+            float y = a[1] + e.getY();
+            int dir = 0;
+            if (y < s[1] + dp(90)) dir = -1;
+            else if (y > s[1] + tabScroll.getHeight() - dp(90)) dir = 1;
+            if (dir != dragScrollDir) {
+                dragScrollDir = dir;
+                h.removeCallbacks(dragScroller);
+                if (dir != 0) h.post(dragScroller);
+            }
+        }
+
+        private void stopDragScroll() {
+            dragScrollDir = 0;
+            h.removeCallbacks(dragScroller);
+        }
+
+        private Tab lastOfGroup(int gid, Tab exclude) {
+            Tab last = null;
+            for (Tab t : tabs) if (t.group == gid && t != exclude) last = t;
+            return last;
+        }
+
+        private void moveAfter(Tab t, Tab anchor) {
+            tabs.remove(t);
+            int i = tabs.indexOf(anchor);
+            tabs.add(i < 0 ? tabs.size() : i + 1, t);
+        }
+
+        private void finishDrop() {
+            cleanGroups();
+            saveTabs();
+            showTabs();
+        }
+
+        /**
+         * Бросили [d] на [target]. В общем списке: вкладка на вкладку создаёт группу, вкладка на группу добавляется в неё,
+         * группа на группу сливается. Внутри группы: вкладка встаёт на место той, на которую её бросили; бросить на первую
+         * значит сделать её обложкой группы (по первой вкладке рисуется карточка группы).
+         */
+        private void handleDrop(Object d, Object target, Runnable menu) {
+            if (closed || d == null) return;
+            if (d == target) { menu.run(); return; }
+            if (openGroup != null) {
+                if (d instanceof Tab && target instanceof Tab) {
+                    Tab dt = (Tab) d, tt = (Tab) target;
+                    boolean after = tabs.indexOf(dt) < tabs.indexOf(tt);
+                    tabs.remove(dt);
+                    int ti = tabs.indexOf(tt);
+                    tabs.add(after ? ti + 1 : ti, dt);
+                    finishDrop();
+                }
+                return;
+            }
+            if (d instanceof Tab) {
+                Tab dt = (Tab) d;
+                if (target instanceof Tab) {
+                    Tab tt = (Tab) target;
+                    int gid;
+                    if (tt.group != 0) {
+                        gid = tt.group;
+                    } else {
+                        Group g = newGroup();
+                        tt.group = g.id;
+                        gid = g.id;
+                    }
+                    Tab anchor = lastOfGroup(gid, dt);
+                    dt.group = gid;
+                    if (anchor != null) moveAfter(dt, anchor);
+                } else if (target instanceof Group) {
+                    Group g = (Group) target;
+                    Tab anchor = lastOfGroup(g.id, dt);
+                    dt.group = g.id;
+                    if (anchor != null) moveAfter(dt, anchor);
+                }
+            } else if (d instanceof Group) {
+                Group dg = (Group) d;
+                if (target instanceof Tab) {
+                    Tab tt = (Tab) target;
+                    Tab anchor = lastOfGroup(dg.id, tt);
+                    tt.group = dg.id;
+                    if (anchor != null) moveAfter(tt, anchor);
+                } else if (target instanceof Group) {
+                    Group tg = (Group) target;
+                    for (Tab m : tabsOf(dg)) {
+                        Tab anchor = lastOfGroup(tg.id, m);
+                        m.group = tg.id;
+                        if (anchor != null) moveAfter(m, anchor);
+                    }
+                }
+            }
+            finishDrop();
         }
 
         /** Долгое нажатие на вкладку: группы и закрытие. */

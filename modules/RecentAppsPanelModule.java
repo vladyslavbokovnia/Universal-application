@@ -52,6 +52,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 import im.manus.universalhost.IPlugin;
 import im.manus.universalhost.ISettingsProvider;
+import im.manus.universalhost.ModuleWindows;
 import im.manus.universalhost.SettingItem;
 
 import java.io.File;
@@ -207,7 +208,14 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         CharSequence cs = event.getPackageName();
         if (cs == null) return;
         String pkg = cs.toString();
-        if (pkg.equals(ctx.getPackageName())) return;      // собственные окна хоста
+        if (pkg.equals(ctx.getPackageName())) {            // собственные окна хоста; окна модулей (браузер и др.) обновляют список
+            CharSequence cn = event.getClassName();
+            if (cn != null && (cn.toString().endsWith("ModuleBrowserActivity") || cn.toString().endsWith("ModuleSettingsActivity"))) {
+                handler.removeCallbacks(refreshFromEvent);
+                handler.postDelayed(refreshFromEvent, EVENT_DEBOUNCE_MS + 500L);
+            }
+            return;
+        }
         dismissOverlay();                                  // смена окна закрывает меню
         if (!repo.isLaunchable(pkg) || pkg.equals(imePackage())) return;  // systemui, клавиатура и т.п.
         store.setActive(pkg);
@@ -438,7 +446,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
                     for (Entry e : loaded) {
                         if (iconCache.get(e.pkg) == null) {
                             try {
-                                Drawable d = ctx.getPackageManager().getApplicationIcon(e.pkg);
+                                Drawable d = appIcon(e.pkg);
                                 if (d.getConstantState() != null) iconCache.put(e.pkg, d.getConstantState());
                             } catch (Throwable ignored) { }
                         }
@@ -589,7 +597,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
             icon = cs.newDrawable(ctx.getResources());
         } else {
             try {
-                Drawable d = ctx.getPackageManager().getApplicationIcon(entry.pkg);
+                Drawable d = appIcon(entry.pkg);
                 if (d.getConstantState() != null) iconCache.put(entry.pkg, d.getConstantState());
                 icon = d;
             } catch (Throwable ignored) { }
@@ -608,15 +616,39 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         return v;
     }
 
+    /** Окна модулей (браузер и др.) живут в списке под псевдо-пакетом «module:Имя». */
+    private static final String MODULE_PREFIX = "module:";
+
+    private static boolean isModuleEntry(String pkg) { return pkg != null && pkg.startsWith(MODULE_PREFIX); }
+
+    private static String moduleOf(String pkg) { return pkg.substring(MODULE_PREFIX.length()); }
+
+    private Drawable appIcon(String pkg) throws PackageManager.NameNotFoundException {
+        if (isModuleEntry(pkg)) {
+            try {
+                return ModuleWindows.iconDrawable(ctx, moduleOf(pkg), 192);
+            } catch (Throwable t) {
+                throw new PackageManager.NameNotFoundException(pkg);
+            }
+        }
+        return ctx.getPackageManager().getApplicationIcon(pkg);
+    }
+
     private void launch(Entry entry) {
         dismissOverlay();
         if (expanded) toggleExpand(false);
         store.launched(entry.pkg);
         store.setActive(entry.pkg);
-        Intent i = ctx.getPackageManager().getLaunchIntentForPackage(entry.pkg);
-        if (i != null) {
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            try { ctx.startActivity(i); } catch (Throwable ignored) { }
+        if (isModuleEntry(entry.pkg)) {
+            if (!ModuleWindows.launch(ctx, moduleOf(entry.pkg))) {
+                Toast.makeText(ctx, "Не удалось открыть окно модуля", Toast.LENGTH_SHORT).show();
+            }
+        } else {
+            Intent i = ctx.getPackageManager().getLaunchIntentForPackage(entry.pkg);
+            if (i != null) {
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                try { ctx.startActivity(i); } catch (Throwable ignored) { }
+            }
         }
         handler.removeCallbacks(refreshFromEvent);
         handler.postDelayed(refreshFromEvent, 250L);
@@ -728,6 +760,10 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
                 break;
             }
             case K_INFO: {
+                if (isModuleEntry(entry.pkg)) {
+                    Toast.makeText(ctx, "Окно модуля «" + moduleOf(entry.pkg) + "»", Toast.LENGTH_SHORT).show();
+                    break;
+                }
                 Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + entry.pkg));
                 i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 try { ctx.startActivity(i); } catch (Throwable ignored) { }
@@ -774,7 +810,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
             row.setPadding(dp(4), dp(8), dp(4), dp(8));
             ImageView iv = new ImageView(ctx);
             iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            try { iv.setImageDrawable(ctx.getPackageManager().getApplicationIcon(e.pkg)); } catch (Throwable ignored) { }
+            try { iv.setImageDrawable(appIcon(e.pkg)); } catch (Throwable ignored) { }
             row.addView(iv, new LinearLayout.LayoutParams(dp(40), dp(40)));
             TextView tv = new TextView(ctx);
             tv.setText(e.label);
@@ -1033,8 +1069,21 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
             return map;
         }
 
+        /** Окна модулей из реестра хоста: каждое отдельной записью со своим значком. */
+        private Map<String, Entry> moduleWindows() {
+            Map<String, Entry> m = new LinkedHashMap<String, Entry>();
+            try {
+                for (String n : ModuleWindows.names(c)) {
+                    long t = ModuleWindows.lastUsed(c, n);
+                    m.put(MODULE_PREFIX + n, new Entry(MODULE_PREFIX + n, n, t, t));
+                }
+            } catch (Throwable ignored) { }
+            return m;
+        }
+
         List<Entry> hiddenEntries() {
-            Map<String, Entry> b = base != null ? base : scan();
+            Map<String, Entry> b = new LinkedHashMap<String, Entry>(base != null ? base : scan());
+            b.putAll(moduleWindows());
             List<Entry> out = new ArrayList<Entry>();
             for (String pkg : store.hidden()) {
                 Entry e = b.get(pkg);
@@ -1047,7 +1096,8 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         }
 
         List<Entry> load() {
-            Map<String, Entry> b = base != null ? base : scan();
+            Map<String, Entry> b = new LinkedHashMap<String, Entry>(base != null ? base : scan());
+            b.putAll(moduleWindows());
             Set<String> hidden = store.hidden();
             long now = System.currentTimeMillis();
             Map<String, Long> usage = new HashMap<String, Long>();
@@ -1071,7 +1121,8 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
             for (Entry e : b.values()) {
                 if (hidden.contains(e.pkg)) continue;
                 Long u = usage.get(e.pkg);
-                out.add(new Entry(e.pkg, e.label, u == null ? 0L : u, e.installTime));
+                long used = isModuleEntry(e.pkg) ? e.lastUsed : (u == null ? 0L : u);
+                out.add(new Entry(e.pkg, e.label, used, e.installTime));
             }
             final boolean byInstall = store.sortInstall();
             Collections.sort(out, new Comparator<Entry>() {

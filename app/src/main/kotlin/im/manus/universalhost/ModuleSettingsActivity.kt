@@ -61,6 +61,7 @@ class ModuleSettingsActivity : Activity() {
         }
         target = t
         title = t // карточка в недавних подписана именем модуля (PWA-стиль)
+        applyModuleTaskDescription(t)
         folderId = intent.getStringExtra(EXTRA_FOLDER)
         pendingKey = savedInstanceState?.getString("pending")
 
@@ -79,6 +80,15 @@ class ModuleSettingsActivity : Activity() {
         outState.putString("pending", pendingKey)
     }
 
+    /** Карточка в недавних со значком самого модуля, а не хоста; окно из ярлыка (module://) попадает в модуль «Недавние». */
+    @Suppress("DEPRECATION")
+    private fun applyModuleTaskDescription(name: String) {
+        if (intent.getStringExtra(EXTRA_FOLDER) != null) return
+        try {
+            setTaskDescription(android.app.ActivityManager.TaskDescription(name, ModuleWindows.icon(this, name, 192), Color.BLACK))
+        } catch (t: Throwable) { }
+    }
+
     // ------------------------------------------------------------ сборка экрана
 
     private fun build() {
@@ -92,6 +102,9 @@ class ModuleSettingsActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        if (intent.data?.scheme == "module" && intent.getStringExtra(EXTRA_FOLDER) == null) {
+            ModuleWindows.record(this, target, Intent(intent).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
         ui.removeCallbacks(tick)
         if (monitors.isNotEmpty()) ui.post(tick)
     }
