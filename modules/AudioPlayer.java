@@ -19,6 +19,7 @@ import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.media.AudioAttributes;
+import android.media.AudioManager;
 import android.media.MediaMetadata;
 import android.media.MediaPlayer;
 import android.media.session.MediaSession;
@@ -30,8 +31,8 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.view.Gravity;
-import android.view.InputDevice;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.accessibility.AccessibilityEvent;
 import android.widget.Button;
@@ -40,10 +41,12 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 import im.manus.universalhost.IKeyHandler;
+import im.manus.universalhost.IMotionHandler;
 import im.manus.universalhost.IPlugin;
 import im.manus.universalhost.ISettingsProvider;
 import im.manus.universalhost.ISettingsViewProvider;
 import im.manus.universalhost.IShareHandler;
+import im.manus.universalhost.PadMapper;
 import im.manus.universalhost.SettingItem;
 
 import java.util.ArrayList;
@@ -54,11 +57,12 @@ import java.util.Map;
  * Аудиоплеер — свой плеер прямо в хосте.
  *
  * Песни с устройства (список, удаление), своя медиа-сессия — поэтому пауза/треки
- * работают с гарнитуры и из модуля «Пульт». Кнопки геймпада назначаются тут же.
- * Shizuku не нужен.
+ * работают с гарнитуры и из модуля «Пульт». Кнопки геймпада назначаются тут же, на картинке геймпада
+ * (как в модуле Gamepad): нажатие, двойное и долгое. Shizuku не нужен: кнопки идут через службу
+ * специальных возможностей, стики и курки — через неё же на Android 14+.
  */
 public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewProvider, IKeyHandler,
-        IShareHandler {
+        IMotionHandler, IShareHandler {
 
     private static final String PREFS = "module_Аудиоплеер";
     private static final String CHANNEL = "audioplayer";
@@ -68,21 +72,20 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     private static final String A_NEXT = "im.manus.plugins.audioplayer.NEXT";
     private static final String A_PREV = "im.manus.plugins.audioplayer.PREV";
 
-    /** Геймпад: действия плеера. */
-    private static final String[] G_KEYS = {"play_pause", "prev", "next", "seek_back", "seek_fwd"};
-    private static final String[] G_NAMES = {
-            "Пауза / воспроизведение", "Предыдущий трек", "Следующий трек", "Назад 10 с", "Вперёд 10 с"
+    /** Геймпад: действия плеера — id, подпись. */
+    private static final String[][] ACTIONS = {
+            {"play_pause", "Пауза / воспроизведение"},
+            {"play", "Воспроизведение"},
+            {"pause", "Пауза"},
+            {"prev", "Предыдущий трек"},
+            {"next", "Следующий трек"},
+            {"seek_back", "Назад 10 с"},
+            {"seek_fwd", "Вперёд 10 с"},
+            {"stop", "Стоп"},
+            {"vol_down", "Тише"},
+            {"vol_up", "Громче"},
+            {"mute", "Без звука"},
     };
-    private static final int[][] G_DEFAULTS = {
-            {KeyEvent.KEYCODE_BUTTON_A, 0},
-            {KeyEvent.KEYCODE_BUTTON_X, 1},
-            {KeyEvent.KEYCODE_BUTTON_Y, 2},
-            {KeyEvent.KEYCODE_BUTTON_L1, 3},
-            {KeyEvent.KEYCODE_BUTTON_R1, 4},
-    };
-
-    /** Пока открыт экран настроек, кнопки уходят в обучение, а не в действия. */
-    private static boolean uiOpen = false;
 
     static class Track {
         long id;
@@ -102,9 +105,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     private MediaSession session;
     private BroadcastReceiver cmdReceiver;
     private PlayerView boundView;
+    private PadMapper mapper;
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 1; }
+    @Override public int getVersion() { return 2; }
     @Override public String getDescription() {
         return "Свой аудиоплеер: песни с устройства, удаление, управление с геймпада и гарнитуры.";
     }
@@ -116,10 +120,14 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         svc = (context instanceof AccessibilityService) ? (AccessibilityService) context : null;
         ensureSession();
         loadTracks();
+        PadMapper m = mapper(context);
+        if (svc != null) m.applyAxesCapture(svc);
     }
 
     @Override public void stop() {
         boundView = null;
+        PadMapper pm = mapper;
+        if (pm != null) pm.stop(svc);
         try {
             if (cmdReceiver != null && appCtx != null) appCtx.unregisterReceiver(cmdReceiver);
         } catch (Throwable t) { }
@@ -563,90 +571,69 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
     // ---------------------------------------------------------- геймпад
 
-    private static int gDefaultFor(String action) {
-        for (int[] d : G_DEFAULTS) if (G_KEYS[d[1]].equals(action)) return d[0];
-        return -1;
-    }
-
-    int gButtonFor(String action) {
-        SharedPreferences p = prefs();
-        if (p == null || !p.contains("gbtn_" + action)) return gDefaultFor(action);
-        return p.getInt("gbtn_" + action, -1);
-    }
-
-    void setGButton(String action, int code) {
-        SharedPreferences p = prefs();
-        if (p == null) return;
-        SharedPreferences.Editor e = p.edit();
-        for (String a : G_KEYS) {
-            String k = "gbtn_" + a;
-            int curB = p.contains(k) ? p.getInt(k, -1) : gDefaultFor(a);
-            if (curB == code && code >= 0) e.putInt(k, -1);
+    /** Один PadMapper на модуль; создаётся и до init(), чтобы экран настроек работал при выключенной службе. */
+    private PadMapper mapper(Context c) {
+        PadMapper m = mapper;
+        if (m != null) return m;
+        if (appCtx == null) {
+            appCtx = c.getApplicationContext();
+            h = new Handler(Looper.getMainLooper());
         }
-        e.putInt("gbtn_" + action, code);
-        e.apply();
-    }
-
-    private String gActionFor(int code) {
-        for (String a : G_KEYS) if (gButtonFor(a) == code) return a;
-        return null;
-    }
-
-    static String gActName(String key) {
-        for (int i = 0; i < G_KEYS.length; i++) if (G_KEYS[i].equals(key)) return G_NAMES[i];
-        return key;
-    }
-
-    static boolean isPadKey(KeyEvent e) {
-        int s = e.getSource();
-        if ((s & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD) return true;
-        int c = e.getKeyCode();
-        if (KeyEvent.isGamepadButton(c)) return true;
-        return c >= KeyEvent.KEYCODE_DPAD_UP && c <= KeyEvent.KEYCODE_DPAD_CENTER;
+        SharedPreferences p = appCtx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        m = new PadMapper(p, ACTIONS, new PadMapper.Performer() {
+            @Override public void perform(String action) { doPerform(action); }
+        });
+        m.addDefault(KeyEvent.KEYCODE_BUTTON_A, "t", "play_pause");
+        m.addDefault(KeyEvent.KEYCODE_BUTTON_X, "t", "prev");
+        m.addDefault(KeyEvent.KEYCODE_BUTTON_Y, "t", "next");
+        m.addDefault(KeyEvent.KEYCODE_BUTTON_L1, "t", "seek_back");
+        m.addDefault(KeyEvent.KEYCODE_BUTTON_R1, "t", "seek_fwd");
+        m.migrateLegacy("gbtn_");
+        mapper = m;
+        return m;
     }
 
     @Override public boolean onKeyEvent(KeyEvent e) {
-        try {
-            if (uiOpen) return false;
-            int code = e.getKeyCode();
-            if (!isPadKey(e)) return false;
-            String a = gActionFor(code);
-            if (a == null) return false;
-            if (e.getAction() == KeyEvent.ACTION_DOWN && e.getRepeatCount() == 0) {
-                if (a.equals("play_pause")) toggle();
-                else if (a.equals("prev")) prev();
-                else if (a.equals("next")) next();
-                else if (a.equals("seek_back")) seekBy(-10000);
-                else if (a.equals("seek_fwd")) seekBy(10000);
-            }
-            return true;
-        } catch (Throwable t) {
-            return false;
-        }
+        PadMapper m = mapper;
+        return m != null && m.onKeyEvent(e);
     }
 
-    static String keyName(int code) {
-        switch (code) {
-            case KeyEvent.KEYCODE_BUTTON_A: return "A";
-            case KeyEvent.KEYCODE_BUTTON_B: return "B";
-            case KeyEvent.KEYCODE_BUTTON_X: return "X";
-            case KeyEvent.KEYCODE_BUTTON_Y: return "Y";
-            case KeyEvent.KEYCODE_BUTTON_L1: return "LB";
-            case KeyEvent.KEYCODE_BUTTON_R1: return "RB";
-            case KeyEvent.KEYCODE_BUTTON_L2: return "LT";
-            case KeyEvent.KEYCODE_BUTTON_R2: return "RT";
-            case KeyEvent.KEYCODE_BUTTON_THUMBL: return "Левый стик";
-            case KeyEvent.KEYCODE_BUTTON_THUMBR: return "Правый стик";
-            case KeyEvent.KEYCODE_BUTTON_START: return "Start";
-            case KeyEvent.KEYCODE_BUTTON_SELECT: return "Select";
-            case KeyEvent.KEYCODE_BUTTON_MODE: return "Mode";
-            case KeyEvent.KEYCODE_DPAD_UP: return "Крестовина вверх";
-            case KeyEvent.KEYCODE_DPAD_DOWN: return "Крестовина вниз";
-            case KeyEvent.KEYCODE_DPAD_LEFT: return "Крестовина влево";
-            case KeyEvent.KEYCODE_DPAD_RIGHT: return "Крестовина вправо";
-            case KeyEvent.KEYCODE_DPAD_CENTER: return "Крестовина (центр)";
-            default: return "код " + code;
-        }
+    @Override public void onMotionEvent(MotionEvent e) {
+        PadMapper m = mapper;
+        if (m != null) m.onMotionEvent(e);
+    }
+
+    private void doPerform(String a) {
+        if (a == null) return;
+        if (a.equals("play_pause")) toggle();
+        else if (a.equals("play")) { if (!isPlaying()) toggle(); }
+        else if (a.equals("pause")) pause();
+        else if (a.equals("prev")) prev();
+        else if (a.equals("next")) next();
+        else if (a.equals("seek_back")) seekBy(-10000);
+        else if (a.equals("seek_fwd")) seekBy(10000);
+        else if (a.equals("stop")) stopPlayback();
+        else if (a.equals("vol_up")) volume(AudioManager.ADJUST_RAISE);
+        else if (a.equals("vol_down")) volume(AudioManager.ADJUST_LOWER);
+        else if (a.equals("mute")) volume(AudioManager.ADJUST_TOGGLE_MUTE);
+    }
+
+    /** Стоп: пауза и возврат в начало трека. */
+    private void stopPlayback() {
+        try {
+            if (mp != null && prepared) {
+                if (mp.isPlaying()) mp.pause();
+                mp.seekTo(0);
+                afterChange();
+            }
+        } catch (Throwable t) { }
+    }
+
+    private void volume(int direction) {
+        Context c = appCtx;
+        if (c == null) return;
+        AudioManager am = (AudioManager) c.getSystemService(Context.AUDIO_SERVICE);
+        if (am != null) am.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, AudioManager.FLAG_SHOW_UI);
     }
 
     // ---------------------------------------------------------- настройки
@@ -654,8 +641,18 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     @Override public List<SettingItem> getSettingsSchema() {
         List<SettingItem> r = new ArrayList<SettingItem>();
         r.add(SettingItem.section("Плеер"));
-        r.add(SettingItem.custom("player", "Плеер", "Песни с устройства, удаление, кнопки геймпада"));
+        r.add(SettingItem.custom("player", "Плеер", "Песни с устройства, удаление, кнопки геймпада на картинке"));
+        r.add(SettingItem.section("Геймпад"));
+        r.add(SettingItem.toggle("intercept", "Перехват кнопок",
+                "Включено: назначенная кнопка работает только на плеер. Выключено: действие срабатывает, а приложение тоже получает нажатие",
+                true));
+        r.add(SettingItem.toggle("axes_service", "Стики и курки через службу (Android 14+)",
+                "Пока включено, другие приложения не получают движения стиков", true));
+        r.add(SettingItem.slider("long_ms", "Долгое нажатие, мс", "", 300, 1000, 50, 500));
+        r.add(SettingItem.slider("double_ms", "Окно двойного нажатия, мс", "", 150, 600, 50, 300));
+        r.add(SettingItem.section("Прочее"));
         r.add(SettingItem.action("pin", "Ярлык на рабочий стол", "Значок модуля на рабочий стол — откроется отдельным окном"));
+        r.add(SettingItem.action("reset", "Сбросить кнопки геймпада", "Вернуть кнопки по умолчанию"));
         return r;
     }
 
@@ -663,10 +660,17 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         if ("pin".equals(key)) {
             try { im.manus.universalhost.ModuleShortcuts.pin(appCtx, this); }
             catch (Throwable t) { }
+        } else if ("reset".equals(key)) {
+            PadMapper m = mapper;
+            if (m != null) m.reset();
+        } else if ("axes_service".equals(key)) {
+            PadMapper m = mapper;
+            if (m != null && svc != null) m.applyAxesCapture(svc);
         }
     }
 
     @Override public View createSettingsView(Context context, String key) {
+        mapper(context);
         return new PlayerView(context);
     }
 
@@ -677,11 +681,12 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         private final LinearLayout permBox;
         private final TextView nowTitle;
         private final Button bPlay;
-        private final LinearLayout gRows;
+        private final Button bPad;
+        private final LinearLayout padBox;
         private final TextView trackHead;
         private final LinearLayout trackRows;
         private final TextView status;
-        private String learning = null;
+        private boolean padOpen = false;
 
         PlayerView(Context ctx) {
             super(ctx);
@@ -739,15 +744,17 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             ctrls.addView(bNext);
             body.addView(ctrls);
 
-            // геймпад
-            TextView gl = new TextView(ctx);
-            gl.setText("Геймпад");
-            gl.setTextSize(16);
-            gl.setPadding(0, dp(8), 0, 0);
-            body.addView(gl);
-            gRows = new LinearLayout(ctx);
-            gRows.setOrientation(LinearLayout.VERTICAL);
-            body.addView(gRows);
+            // геймпад: картинка открывается по кнопке; пока она открыта, кнопки геймпада выбирают
+            // назначение, а не управляют плеером
+            bPad = new Button(ctx);
+            bPad.setText("Кнопки геймпада");
+            bPad.setOnClickListener(new OnClickListener() {
+                @Override public void onClick(View v) { togglePad(); }
+            });
+            body.addView(bPad);
+            padBox = new LinearLayout(ctx);
+            padBox.setOrientation(LinearLayout.VERTICAL);
+            body.addView(padBox);
 
             // песни
             trackHead = new TextView(ctx);
@@ -772,14 +779,12 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
         @Override protected void onAttachedToWindow() {
             super.onAttachedToWindow();
-            uiOpen = true;
             boundView = this;
             requestFocus();
             refresh();
         }
 
         @Override protected void onDetachedFromWindow() {
-            uiOpen = false;
             if (boundView == this) boundView = null;
             super.onDetachedFromWindow();
         }
@@ -789,14 +794,16 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             if (hasFocus) refresh();
         }
 
-        @Override public boolean onKeyDown(int keyCode, KeyEvent event) {
-            if (learning != null && isPadKey(event) && event.getRepeatCount() == 0) {
-                setGButton(learning, keyCode);
-                learning = null;
-                refresh();
-                return true;
+        private void togglePad() {
+            padOpen = !padOpen;
+            padBox.removeAllViews();
+            if (padOpen) {
+                Context c = getContext();
+                String hint = (svc != null) ? ""
+                        : "Включи службу специальных возможностей — иначе кнопки геймпада не дойдут.";
+                padBox.addView(mapper(c).createView(c, hint));
             }
-            return super.onKeyDown(keyCode, event);
+            bPad.setText(padOpen ? "Скрыть кнопки геймпада" : "Кнопки геймпада");
         }
 
         /** Дешёвое обновление: шапка, кнопка, статус. */
@@ -810,70 +817,14 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             Track t = (cur >= 0 && cur < tracks.size()) ? tracks.get(cur) : null;
             nowTitle.setText(t == null ? "Не играет" : "▶ " + t.title + "\n" + t.artist);
             bPlay.setText(isPlaying() ? "⏸" : "▶");
-            String s = (svc != null)
-                    ? ""
-                    : "Включи службу специальных возможностей — иначе кнопки геймпада не дойдут. ";
-            if (learning != null) s += "Нажми кнопку геймпада для «" + gActName(learning) + "»…";
-            status.setText(s);
+            status.setText(svc != null ? ""
+                    : "Включи службу специальных возможностей — иначе кнопки геймпада не дойдут.");
         }
 
-        /** Полное обновление: шапка + геймпад + список песен. */
+        /** Полное обновление: шапка + список песен. */
         void refresh() {
             refreshHead();
-            buildGRows();
             buildTrackRows();
-        }
-
-        private void buildGRows() {
-            gRows.removeAllViews();
-            final Context ctx = getContext();
-            for (int i = 0; i < G_KEYS.length; i++) {
-                final String ak = G_KEYS[i];
-                LinearLayout row = new LinearLayout(ctx);
-                row.setOrientation(LinearLayout.HORIZONTAL);
-                row.setGravity(Gravity.CENTER_VERTICAL);
-                int rp = dp(6);
-                row.setPadding(0, rp, 0, rp);
-
-                TextView name = new TextView(ctx);
-                name.setText(G_NAMES[i]);
-                name.setTextSize(15);
-                row.addView(name, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
-
-                int btn = gButtonFor(ak);
-                TextView curB = new TextView(ctx);
-                curB.setText(btn < 0 ? "—" : keyName(btn));
-                curB.setTextSize(15);
-                int cp = dp(8);
-                curB.setPadding(cp, 0, cp, 0);
-                row.addView(curB);
-
-                Button b = new Button(ctx);
-                final boolean isL = ak.equals(learning);
-                b.setText(isL ? "Жду…" : "Назначить");
-                b.setOnClickListener(new OnClickListener() {
-                    @Override public void onClick(View v) {
-                        learning = isL ? null : ak;
-                        requestFocus();
-                        buildGRows();
-                        refreshHead();
-                    }
-                });
-                row.addView(b);
-
-                Button x = new Button(ctx);
-                x.setText("✕");
-                x.setOnClickListener(new OnClickListener() {
-                    @Override public void onClick(View v) {
-                        setGButton(ak, -1);
-                        if (ak.equals(learning)) learning = null;
-                        buildGRows();
-                        refreshHead();
-                    }
-                });
-                row.addView(x);
-                gRows.addView(row);
-            }
         }
 
         private void buildTrackRows() {
