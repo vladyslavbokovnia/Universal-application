@@ -46,7 +46,8 @@ object ModuleShortcuts {
                 putExtra(ModuleSettingsActivity.EXTRA_TARGET, plugin.name)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
             }
-            val bmp = try { plugin.createIcon(192) } catch (t: Throwable) { null }
+            // Значок: createIcon живёт на ISettingsProvider (как в IconFactory), иначе монограмма.
+            val bmp = try { (plugin as? ISettingsProvider)?.createIcon(192) } catch (t: Throwable) { null }
                 ?: monogram(plugin.name)
             val info = ShortcutInfo.Builder(context, "module_" + plugin.name)
                 .setShortLabel(plugin.name)
