@@ -11,7 +11,7 @@ import android.content.Intent
  * Реализуется вместе с IPlugin (удобно на Java).
  */
 interface IShareHandler {
-    /** MIME-типы, которые модуль принимает, например listOf("audio/*"). */
+    /** MIME-типы, которые модуль принимает (например: аудио). */
     fun shareMimeTypes(): List<String>
 
     /**
