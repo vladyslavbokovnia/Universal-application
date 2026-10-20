@@ -76,6 +76,7 @@ public class Remote implements IPlugin, ISettingsProvider, ISettingsViewProvider
         appCtx = context.getApplicationContext();
         svc = (context instanceof AccessibilityService) ? (AccessibilityService) context : null;
     }
+    @Override public void stop() { /* ничего держать не нужно */ }
     @Override public Object execute(Map<String, ?> data) { return null; }
     @Override public void onAccessibilityEvent(AccessibilityEvent event, AccessibilityService service) { }
     @Override public Bitmap createIcon(int sizePx) { return null; }
