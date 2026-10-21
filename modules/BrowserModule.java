@@ -254,6 +254,7 @@ public class BrowserModule implements IPlugin, ISettingsProvider {
         l.add(SettingItem.slider("max_live", "Вкладок в памяти",
                 "Остальные выгружаются и при выборе загружаются заново", 1, 8, 1, 3));
         l.add(SettingItem.toggle("keep_screen_on", "Не гасить экран", "Пока открыт браузер", false));
+        l.add(SettingItem.toggle("fullscreen", "Полный экран", "Скрывает статус-бар; показать его можно смахиванием от верхнего края", true));
         l.add(SettingItem.toggle("tts_bridge", "Озвучка для скриптов",
                 "Подставляет в страницы speechSynthesis поверх голоса Android, иначе скрипты в WebView молчат. Применяется при следующей загрузке страницы", true));
 
@@ -303,7 +304,7 @@ public class BrowserModule implements IPlugin, ISettingsProvider {
             new Thread(new Runnable() {
                 @Override public void run() { toast(ScriptStore.updateAll()); }
             }).start();
-        } else if ("user_agent".equals(key) || "keep_screen_on".equals(key)) {
+        } else if ("user_agent".equals(key) || "keep_screen_on".equals(key) || "fullscreen".equals(key)) {
             final BrowserView v = view;
             if (v != null) main.post(new Runnable() {
                 @Override public void run() { v.applySettingsLive(); }
@@ -1127,6 +1128,7 @@ public class BrowserModule implements IPlugin, ISettingsProvider {
             for (Tab t : tabs) applyUserAgent(t);
             if (sp.getBoolean("keep_screen_on", false)) act.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             else act.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            applyFullscreen();
         }
 
         private void maybeAutoUpdate() {
@@ -1161,6 +1163,42 @@ public class BrowserModule implements IPlugin, ISettingsProvider {
             w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
             w.setStatusBarColor(C_BG);
             w.setNavigationBarColor(C_SURFACE);
+            applyFullscreen();
+        }
+
+        /**
+         * Полный экран: прячет статус-бар (навигацию не трогает, внизу наша панель). Android 11+ через WindowInsetsController,
+         * ниже через FLAG_FULLSCREEN. Статус-бар можно вытянуть смахиванием от верхнего края, он сам скроется снова.
+         */
+        @SuppressWarnings("deprecation")
+        private void applyFullscreen() {
+            Window w = act.getWindow();
+            boolean on = sp.getBoolean("fullscreen", true);
+            if (Build.VERSION.SDK_INT >= 28) {
+                try {
+                    WindowManager.LayoutParams lp = w.getAttributes();
+                    lp.layoutInDisplayCutoutMode = on
+                            ? WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                            : WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT;
+                    w.setAttributes(lp);
+                } catch (Throwable ignored) { }
+            }
+            if (Build.VERSION.SDK_INT >= 30) {
+                try {
+                    android.view.WindowInsetsController c = w.getInsetsController();
+                    if (c == null) return;
+                    if (on) {
+                        c.setSystemBarsBehavior(android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                        c.hide(android.view.WindowInsets.Type.statusBars());
+                    } else {
+                        c.show(android.view.WindowInsets.Type.statusBars());
+                    }
+                } catch (Throwable ignored) { }
+            } else if (on) {
+                w.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+            } else {
+                w.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+            }
         }
 
         @Override protected void onAttachedToWindow() {
@@ -1651,6 +1689,7 @@ public class BrowserModule implements IPlugin, ISettingsProvider {
             customView = null;
             column.setVisibility(View.VISIBLE);
             act.getWindow().getDecorView().setSystemUiVisibility(savedUi);
+            applyFullscreen();
             WebChromeClient.CustomViewCallback cb = customCb;
             customCb = null;
             if (cb != null) cb.onCustomViewHidden();
