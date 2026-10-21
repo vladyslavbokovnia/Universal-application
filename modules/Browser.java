@@ -56,6 +56,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -134,6 +135,10 @@ import java.util.regex.Pattern;
  * Карточки вкладок: снимок страницы с крупными значками сайта и профиля поверх него. Вкладки перетаскиваются: вкладка на
  * вкладку создаёт группу, вкладка на группу добавляется в неё, в открытой группе вкладку можно поставить на первое место
  * (её снимок станет обложкой группы) или вытащить из группы. Долгое нажатие и отпустить на месте открывает меню.
+ * Закладки: ряд значков сайтов над карточками вкладок. Слева значок профиля, в котором откроются закладки (нажатие выбирает
+ * другой профиль; по умолчанию профиль текущей вкладки), справа ⭐ добавляет текущую страницу. Нажатие на значок открывает
+ * закладку в новой вкладке, долгое нажатие даёт меню (открыть в другом профиле, в фоне, переименовать, переместить, удалить).
+ * Крестиков на карточках вкладок нет: вкладка закрывается смахиванием или из меню долгого нажатия.
  * Значок профиля меняется: эмодзи, номер или своя картинка (меню, «Значки профилей»). Цвет строки состояния берётся со
  * страницы (theme-color или фон). Окно браузера регистрируется в реестре окон хоста, поэтому модуль «Недавние» его показывает.
  *
@@ -1081,6 +1086,9 @@ public class Browser implements IPlugin, ISettingsProvider {
         private Object dragItem;
         private int dragScrollDir;
         private int pendingProfile = -1;
+        private final List<Bookmark> bookmarks = new ArrayList<Bookmark>();
+        private boolean bookmarksLoaded;
+        private int bmProfile = -1;                 // профиль, в котором открываются закладки; -1: профиль текущей вкладки
         private final Map<Integer, Bitmap> profileImgs = new HashMap<Integer, Bitmap>();
         private int scrollAccum;
         private final List<Group> groups = new ArrayList<Group>();
@@ -3288,6 +3296,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 sp.edit().putBoolean("fullscreen", !sp.getBoolean("fullscreen", false)).apply();
                 applyFullscreen();
             } });
+            add(icons, labels, actions, "⭐", "Добавить в закладки", new Runnable() { @Override public void run() { addBookmark(t); } });
             add(icons, labels, actions, "🔗", "Скопировать ссылку", new Runnable() { @Override public void run() {
                 try {
                     ((ClipboardManager) act.getSystemService(Context.CLIPBOARD_SERVICE))
@@ -3326,6 +3335,261 @@ public class Browser implements IPlugin, ISettingsProvider {
                 } });
             }
             showList("Команды скриптов", icons, labels, actions);
+        }
+
+        // ------------------------------------------------------------ закладки: ряд значков в панели вкладок
+
+        private final class Bookmark {
+            final long id;
+            String url;
+            String title;
+            int profile;
+            Bitmap icon;
+            boolean iconTried;
+
+            Bookmark(long id, String url, String title, int profile) {
+                this.id = id;
+                this.url = url;
+                this.title = title;
+                this.profile = profile;
+            }
+        }
+
+        private File bookmarkIconFile(Bookmark b) { return new File(thumbDir(), "bm_" + b.id + ".png"); }
+
+        private void loadBookmarks() {
+            if (bookmarksLoaded) return;
+            bookmarksLoaded = true;
+            bookmarks.clear();
+            try {
+                JSONArray a = new JSONArray(sp.getString("bookmarks", "[]"));
+                for (int i = 0; i < a.length(); i++) {
+                    JSONObject o = a.getJSONObject(i);
+                    String u = o.optString("u", "");
+                    if (u.length() == 0) continue;
+                    bookmarks.add(new Bookmark(o.optLong("i", System.currentTimeMillis() + i), u, o.optString("t", ""),
+                            Math.max(0, Math.min(PROFILES - 1, o.optInt("p", 0)))));
+                }
+            } catch (Throwable ignored) { }
+        }
+
+        private void saveBookmarks() {
+            try {
+                JSONArray a = new JSONArray();
+                for (Bookmark b : bookmarks) {
+                    JSONObject o = new JSONObject();
+                    o.put("i", b.id);
+                    o.put("u", b.url);
+                    o.put("t", b.title);
+                    o.put("p", b.profile);
+                    a.put(o);
+                }
+                sp.edit().putString("bookmarks", a.toString()).apply();
+            } catch (Throwable ignored) { }
+        }
+
+        private void addBookmark(Tab t) {
+            loadBookmarks();
+            String u = t == null ? null : t.url;
+            if (u == null || !(u.startsWith("http://") || u.startsWith("https://"))) { toast("Эту страницу в закладки не добавить"); return; }
+            for (Bookmark x : bookmarks) if (x.url.equals(u)) { toast("Уже в закладках"); return; }
+            Bookmark b = new Bookmark(System.currentTimeMillis(), u, tabTitle(t), t.profile);
+            Bitmap ic = iconOf(t);
+            if (ic != null) {
+                b.icon = ic;
+                b.iconTried = true;
+                saveBitmapAsync(ic, bookmarkIconFile(b), true);
+            }
+            bookmarks.add(b);
+            saveBookmarks();
+            toast("Добавлено в закладки");
+            if (ic == null) fetchBookmarkIcon(b);
+        }
+
+        private Bitmap bookmarkIconOf(Bookmark b) {
+            if (b.icon == null && !b.iconTried) {
+                b.iconTried = true;
+                b.icon = loadBitmap(bookmarkIconFile(b));
+                if (b.icon == null) fetchBookmarkIcon(b);
+            }
+            return b.icon;
+        }
+
+        /** Значок закладки: favicon.ico с хоста страницы; пока его нет, в ряду буква хоста. */
+        private void fetchBookmarkIcon(final Bookmark b) {
+            final String host = hostOf(b.url);
+            if (host.length() == 0) return;
+            final String target = (b.url.startsWith("http://") ? "http://" : "https://") + host + "/favicon.ico";
+            try {
+                pool.execute(new Runnable() {
+                    @Override public void run() {
+                        HttpURLConnection c = null;
+                        try {
+                            c = (HttpURLConnection) new URL(target).openConnection();
+                            c.setConnectTimeout(8000);
+                            c.setReadTimeout(8000);
+                            c.setRequestProperty("User-Agent", "UniversalBrowser/1");
+                            if (c.getResponseCode() != 200) return;
+                            byte[] data = Net.readAll(c.getInputStream(), 200 * 1024);
+                            Bitmap raw = android.graphics.BitmapFactory.decodeByteArray(data, 0, data.length);
+                            if (raw == null || raw.getWidth() < 8) return;
+                            final Bitmap sc = Bitmap.createScaledBitmap(raw, dp(48), dp(48), true);
+                            h.post(new Runnable() {
+                                @Override public void run() {
+                                    if (closed || !bookmarks.contains(b)) return;
+                                    b.icon = sc;
+                                    saveBitmapAsync(sc, bookmarkIconFile(b), true);
+                                    if (tabsPanel && openGroup == null) showTabs();
+                                }
+                            });
+                        } catch (Throwable ignored) {
+                        } finally {
+                            if (c != null) c.disconnect();
+                        }
+                    }
+                });
+            } catch (Throwable ignored) { }
+        }
+
+        private View bookmarkIcon(Bookmark b, int sizeDp) {
+            Bitmap ic = bookmarkIconOf(b);
+            if (ic != null) {
+                ImageView iv = new ImageView(act);
+                iv.setImageBitmap(ic);
+                iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                iv.setBackground(round(0xFFEEEEEE, sizeDp / 2, C_SURFACE2, 1));
+                int pad = Math.max(1, dp(sizeDp) / 6);
+                iv.setPadding(pad, pad, pad, pad);
+                return iv;
+            }
+            String host = hostOf(b.url);
+            if (host.startsWith("www.")) host = host.substring(4);
+            String letter = host.length() > 0 && Character.isLetterOrDigit(host.charAt(0))
+                    ? host.substring(0, 1).toUpperCase(Locale.ROOT) : "🌐";
+            int[] pal = {0xFF90A4AE, 0xFFA1887F, 0xFF9575CD, 0xFF4DB6AC, 0xFFF06292, 0xFFAED581};
+            TextView tv = new TextView(act);
+            tv.setText(letter);
+            tv.setTextColor(0xFF121212);
+            tv.setTypeface(tv.getTypeface(), android.graphics.Typeface.BOLD);
+            tv.setTextSize(Math.max(10, sizeDp * 0.42f));
+            tv.setGravity(Gravity.CENTER);
+            tv.setBackground(round(pal[Math.abs(host.hashCode()) % pal.length], sizeDp / 2, C_SURFACE2, 1));
+            return tv;
+        }
+
+        /** Профиль, в котором откроется закладка: выбранный в ряду, а если не выбран, профиль текущей вкладки. */
+        private int bookmarkTargetProfile() {
+            return bmProfile >= 0 ? bmProfile : (cur != null ? cur.profile : 0);
+        }
+
+        private void openBookmark(Bookmark b, int profile, boolean select) {
+            if (profile != 0 && !Profiles.supported()) { toast(Profiles.status()); return; }
+            if (select) closeLayer(false);
+            newTab(b.url, profile, null, select);
+            if (!select) { toast("Открыто в фоне: " + b.title); showTabs(); }
+        }
+
+        /** Ряд значков закладок: слева значок профиля (выбор профиля для открытия), справа «+» (добавить текущую страницу). */
+        private View bookmarkStrip() {
+            loadBookmarks();
+            final int sel = bookmarkTargetProfile();
+            HorizontalScrollView hs = new HorizontalScrollView(act);
+            hs.setHorizontalScrollBarEnabled(false);
+            LinearLayout r = new LinearLayout(act);
+            r.setOrientation(LinearLayout.HORIZONTAL);
+            r.setGravity(Gravity.CENTER_VERTICAL);
+            r.setPadding(dp(10), dp(4), dp(10), dp(6));
+            hs.addView(r, new ViewGroup.LayoutParams(-2, -2));
+
+            View pb = profileBadge(sel, 44);
+            pb.setClickable(true);
+            pb.setFocusable(true);
+            pb.setContentDescription("Профиль для закладок: " + profileName(sel) + ". Нажмите, чтобы выбрать другой");
+            pb.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    chooseProfile("Открывать закладки в профиле", new Pick() {
+                        @Override public void on(int idx) {
+                            bmProfile = idx;
+                            showTabs();
+                        }
+                    });
+                }
+            });
+            LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(dp(44), dp(44));
+            plp.setMargins(0, 0, dp(12), 0);
+            r.addView(pb, plp);
+
+            for (final Bookmark b : new ArrayList<Bookmark>(bookmarks)) {
+                View ic = bookmarkIcon(b, 44);
+                ic.setClickable(true);
+                ic.setFocusable(true);
+                ic.setContentDescription("Закладка: " + b.title + ", " + hostOf(b.url) + ", профиль " + profileName(sel));
+                ic.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) { openBookmark(b, bookmarkTargetProfile(), true); }
+                });
+                ic.setOnLongClickListener(new View.OnLongClickListener() {
+                    @Override public boolean onLongClick(View v) {
+                        showBookmarkMenu(b);
+                        return true;
+                    }
+                });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(44), dp(44));
+                lp.setMargins(0, 0, dp(10), 0);
+                r.addView(ic, lp);
+            }
+
+            TextView plus = glyph("⭐", C_TEXT);
+            plus.setBackground(round(C_SURFACE2, 22, 0, 0));
+            plus.setClickable(true);
+            plus.setFocusable(true);
+            plus.setContentDescription("Добавить текущую страницу в закладки");
+            plus.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    addBookmark(cur);
+                    showTabs();
+                }
+            });
+            r.addView(plus, new LinearLayout.LayoutParams(dp(44), dp(44)));
+            return hs;
+        }
+
+        /** Долгое нажатие на закладку. */
+        private void showBookmarkMenu(final Bookmark b) {
+            List<View> icons = new ArrayList<View>();
+            List<String> labels = new ArrayList<String>();
+            List<Runnable> actions = new ArrayList<Runnable>();
+            add(icons, labels, actions, "↗", "Открыть в профиле…", new Runnable() { @Override public void run() {
+                chooseProfile("Открыть в профиле", new Pick() {
+                    @Override public void on(int idx) { openBookmark(b, idx, true); }
+                });
+            } });
+            add(icons, labels, actions, "⧉", "Открыть в фоне", new Runnable() { @Override public void run() {
+                openBookmark(b, bookmarkTargetProfile(), false);
+            } });
+            add(icons, labels, actions, "✎", "Переименовать", new Runnable() { @Override public void run() {
+                showPrompt("Название закладки", null, b.title, new PromptDone() {
+                    @Override public void done(String value) {
+                        if (value != null && value.trim().length() > 0) {
+                            b.title = value.trim();
+                            saveBookmarks();
+                        }
+                        showTabs();
+                    }
+                });
+            } });
+            add(icons, labels, actions, "⇤", "Переместить в начало", new Runnable() { @Override public void run() {
+                bookmarks.remove(b);
+                bookmarks.add(0, b);
+                saveBookmarks();
+                showTabs();
+            } });
+            add(icons, labels, actions, "✕", "Удалить закладку", new Runnable() { @Override public void run() {
+                bookmarks.remove(b);
+                try { bookmarkIconFile(b).delete(); } catch (Throwable ignored) { }
+                saveBookmarks();
+                showTabs();
+            } });
+            showList(b.title.length() > 0 ? b.title : hostOf(b.url), icons, labels, actions);
         }
 
         // ------------------------------------------------------------ панель вкладок: снимок, значок сайта, значок профиля; группы
@@ -3375,6 +3639,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             root.addView(head, new LinearLayout.LayoutParams(-1, -2));
 
             if (og != null) root.addView(outOfGroupZone(og), new LinearLayout.LayoutParams(-1, -2));
+            else root.addView(bookmarkStrip(), new LinearLayout.LayoutParams(-1, -2));
 
             ScrollView sv = new ScrollView(act);
             tabScroll = sv;
@@ -3463,22 +3728,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             box.setContentDescription("Вкладка " + (index + 1) + " из " + total + ": " + tabTitle(t) + ", " + displayUrl(t)
                     + ", профиль " + profileName(t.profile) + (current ? ", текущая" : ""));
 
-            TextView x = label("✕", 16, C_TEXT, true);
-            x.setGravity(Gravity.CENTER);
-            x.setBackground(round(0xCC000000, 18, 0, 0));
-            x.setContentDescription("Закрыть вкладку " + (index + 1) + ": " + tabTitle(t));
-            x.setClickable(true);
-            x.setFocusable(true);
-            x.setOnClickListener(new View.OnClickListener() {
-                @Override public void onClick(View v) {
-                    closeTab(t);
-                    showTabs();
-                }
-            });
-            FrameLayout.LayoutParams xlp = new FrameLayout.LayoutParams(dp(36), dp(36), Gravity.TOP | Gravity.END);
-            xlp.setMargins(0, dp(6), dp(6), 0);
-            box.addView(x, xlp);
-
+            // крестика на карточке нет: вкладка закрывается смахиванием или пунктом «Закрыть вкладку» в меню долгого нажатия
             final Runnable menu = new Runnable() { @Override public void run() { showTabMenu(t); } };
             attachDrop(box, t, menu);
             cardGestures(box, new Runnable() {
