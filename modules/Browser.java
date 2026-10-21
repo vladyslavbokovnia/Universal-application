@@ -3255,59 +3255,324 @@ public class Browser implements IPlugin, ISettingsProvider {
         private void showMenu() {
             final Tab t = cur;
             if (t == null) return;
-            final List<View> icons = new ArrayList<View>();
-            final List<String> labels = new ArrayList<String>();
-            final List<Runnable> actions = new ArrayList<Runnable>();
-            add(icons, labels, actions, "＋", "Новая вкладка…", new Runnable() { @Override public void run() {
+            final List<GridItem> items = new ArrayList<GridItem>();
+            addG(items, "new", "＋", "Новая вкладка…", new Runnable() { @Override public void run() {
                 chooseProfile("Новая вкладка: выберите профиль", new Pick() {
                     @Override public void on(int idx) { newTab(home(), idx, null, true); }
                 });
             } });
-            add(icons, labels, actions, "📁", "Группа этой вкладки…", new Runnable() { @Override public void run() { showTabMenu(t); } });
+            addG(items, "group", "📁", "Группа этой вкладки…", new Runnable() { @Override public void run() { showTabMenu(t); } });
             if (tabs.size() > 1) {
-                add(icons, labels, actions, "›", "Следующая вкладка", new Runnable() { @Override public void run() { switchTab(1); } });
-                add(icons, labels, actions, "‹", "Предыдущая вкладка", new Runnable() { @Override public void run() { switchTab(-1); } });
+                addG(items, "next", "›", "Следующая вкладка", new Runnable() { @Override public void run() { switchTab(1); } });
+                addG(items, "prev", "‹", "Предыдущая вкладка", new Runnable() { @Override public void run() { switchTab(-1); } });
             }
-            add(icons, labels, actions, "✕", "Закрыть эту вкладку", new Runnable() { @Override public void run() { closeTab(t); } });
+            addG(items, "closetab", "✕", "Закрыть эту вкладку", new Runnable() { @Override public void run() { closeTab(t); } });
             if (t.wv != null && t.wv.canGoForward()) {
-                add(icons, labels, actions, "→", "Вперёд", new Runnable() { @Override public void run() { t.wv.goForward(); } });
+                addG(items, "fwd", "→", "Вперёд", new Runnable() { @Override public void run() { t.wv.goForward(); } });
             }
-            add(icons, labels, actions, t.loading ? "✕" : "↻", t.loading ? "Остановить загрузку" : "Обновить страницу", new Runnable() { @Override public void run() {
+            addG(items, "reload", t.loading ? "✕" : "↻", t.loading ? "Остановить загрузку" : "Обновить страницу", new Runnable() { @Override public void run() {
                 if (t.wv == null) return;
                 if (t.loading) t.wv.stopLoading(); else t.wv.reload();
             } });
-            add(icons, labels, actions, t.desktop ? "📱" : "🖥", t.desktop ? "Версия для телефона" : "Версия для компьютера", new Runnable() { @Override public void run() {
+            addG(items, "desktop", t.desktop ? "📱" : "🖥", t.desktop ? "Версия для телефона" : "Версия для компьютера", new Runnable() { @Override public void run() {
                 t.desktop = !t.desktop;
                 applyUserAgent(t);
                 if (t.wv != null) t.wv.reload();
             } });
             if (!t.menu.isEmpty()) {
-                add(icons, labels, actions, "📜", "Команды скриптов: " + t.menu.size(), new Runnable() { @Override public void run() { showScriptCommands(t); } });
+                addG(items, "scripts", "📜", "Команды скриптов: " + t.menu.size(), new Runnable() { @Override public void run() { showScriptCommands(t); } });
             }
-            add(icons, labels, actions, "🎭", "Значки профилей…", new Runnable() { @Override public void run() { showProfileList(); } });
-            add(icons, labels, actions, "⛶", fullscreen ? "Выйти из полноэкранного режима" : "Полноэкранный режим", new Runnable() { @Override public void run() {
+            addG(items, "profiles", "🎭", "Значки профилей…", new Runnable() { @Override public void run() { showProfileList(); } });
+            addG(items, "fullscreen", "⛶", fullscreen ? "Выйти из полноэкранного режима" : "Полноэкранный режим", new Runnable() { @Override public void run() {
                 sp.edit().putBoolean("fullscreen", !sp.getBoolean("fullscreen", false)).apply();
                 applyFullscreen();
             } });
-            add(icons, labels, actions, "⭐", "Добавить в закладки", new Runnable() { @Override public void run() { addBookmark(t); } });
-            add(icons, labels, actions, "🔗", "Скопировать ссылку", new Runnable() { @Override public void run() {
+            addG(items, "bookmark", "⭐", "Добавить в закладки", new Runnable() { @Override public void run() { addBookmark(t); } });
+            addG(items, "copy", "🔗", "Скопировать ссылку", new Runnable() { @Override public void run() {
                 try {
                     ((ClipboardManager) act.getSystemService(Context.CLIPBOARD_SERVICE))
                             .setPrimaryClip(ClipData.newPlainText("url", t.url == null ? "" : t.url));
                     toast("Ссылка скопирована");
                 } catch (Throwable ignored) { }
             } });
-            add(icons, labels, actions, "↗", "Поделиться ссылкой", new Runnable() { @Override public void run() {
+            addG(items, "share", "↗", "Поделиться ссылкой", new Runnable() { @Override public void run() {
                 Intent send = new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, t.url == null ? "" : t.url);
                 try { act.startActivity(Intent.createChooser(send, "Поделиться ссылкой").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); }
                 catch (Throwable ignored) { }
             } });
-            add(icons, labels, actions, "⧉", "Открыть в другом приложении", new Runnable() { @Override public void run() {
+            addG(items, "external", "⧉", "Открыть в другом приложении", new Runnable() { @Override public void run() {
                 if (t.url != null) launchExternal(t, t.url);
             } });
-            add(icons, labels, actions, "📌", "Ярлык на рабочий стол", new Runnable() { @Override public void run() { pinShortcut(); } });
-            add(icons, labels, actions, "⏻", "Закрыть браузер", new Runnable() { @Override public void run() { act.finish(); } });
-            showList("Меню · " + profileName(t.profile), icons, labels, actions);
+            addG(items, "pin", "📌", "Ярлык на рабочий стол", new Runnable() { @Override public void run() { pinShortcut(); } });
+            addG(items, "exit", "⏻", "Закрыть браузер", new Runnable() { @Override public void run() { act.finish(); } });
+            showIconGrid("menu", "Меню · " + profileName(t.profile), items);
+        }
+
+        // ------------------------------------------------------------ меню сеткой значков: прозрачный фон, подсказка, перетаскивание, скрытие
+
+        private final class GridItem {
+            final String key;
+            final String glyph;
+            final String label;
+            final Runnable action;
+
+            GridItem(String key, String glyph, String label, Runnable action) {
+                this.key = key;
+                this.glyph = glyph;
+                this.label = label;
+                this.action = action;
+            }
+        }
+
+        private void addG(List<GridItem> l, String key, String glyph, String label, Runnable action) {
+            l.add(new GridItem(key, glyph, label, action));
+        }
+
+        private List<String> splitKeys(String s) {
+            List<String> out = new ArrayList<String>();
+            if (s == null) return out;
+            for (String k : s.split(",")) if (k.length() > 0) out.add(k);
+            return out;
+        }
+
+        private String joinKeys(java.util.Collection<String> c) {
+            StringBuilder sb = new StringBuilder();
+            for (String k : c) {
+                if (sb.length() > 0) sb.append(',');
+                sb.append(k);
+            }
+            return sb.toString();
+        }
+
+        /**
+         * Меню сеткой круглых значков на прозрачном фоне. Нажатие выполняет пункт, долгое нажатие показывает пояснение,
+         * удержание и движение перетаскивает значок на новое место. Значок «настроить» включает режим, где нажатие
+         * скрывает пункт или возвращает его. Порядок и скрытые пункты хранятся отдельно для каждого меню (scope).
+         */
+        private void showIconGrid(String scope, String title, List<GridItem> items) {
+            closeLayer(true);
+            setDockHidden(false, false);
+            final GridPanel gp = new GridPanel(scope, title, items);
+            FrameLayout l = new FrameLayout(act);
+            l.setClickable(true);
+            l.setBackgroundColor(0x1A000000);
+            l.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { closeLayer(true); }
+            });
+            l.setClipChildren(false);
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            lp.setMargins(dp(8), dp(8), dp(8), dp(28));
+            l.addView(gp.box, lp);
+            layer = l;
+            layerCancel = null;
+            addView(l, new FrameLayout.LayoutParams(-1, -1));
+            column.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+            l.announceForAccessibility(title);
+        }
+
+        private final class GridPanel {
+            static final int COLS = 4;
+            final String scope;
+            final String title;
+            final Map<String, GridItem> byKey = new HashMap<String, GridItem>();
+            final List<String> order = new ArrayList<String>();
+            final Set<String> hidden = new HashSet<String>();
+            final LinearLayout box;
+            final TextView tip;
+            final LinearLayout cells;
+            final List<String> shownKeys = new ArrayList<String>();
+            final List<View> shownViews = new ArrayList<View>();
+            boolean edit;
+
+            GridPanel(String scope, String title, List<GridItem> items) {
+                this.scope = scope;
+                this.title = title;
+                for (GridItem g : items) byKey.put(g.key, g);
+                for (String k : splitKeys(sp.getString("grid_order_" + scope, ""))) if (byKey.containsKey(k) && !order.contains(k)) order.add(k);
+                for (GridItem g : items) if (!order.contains(g.key)) order.add(g.key);
+                hidden.addAll(splitKeys(sp.getString("grid_hidden_" + scope, "")));
+
+                box = new LinearLayout(act);
+                box.setOrientation(LinearLayout.VERTICAL);
+                box.setGravity(Gravity.CENTER_HORIZONTAL);
+                box.setClipChildren(false);
+                tip = label("", 15, C_TEXT, false);
+                tip.setGravity(Gravity.CENTER);
+                tip.setBackground(round(0xE6202124, 14, C_SURFACE2, 1));
+                tip.setPadding(dp(14), dp(8), dp(14), dp(8));
+                tip.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+                LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-2, -2);
+                tlp.setMargins(0, 0, 0, dp(10));
+                box.addView(tip, tlp);
+                MaxScroll sv = new MaxScroll(act, Math.round(act.getResources().getDisplayMetrics().heightPixels * 0.7f));
+                sv.setClipChildren(false);
+                cells = new LinearLayout(act);
+                cells.setOrientation(LinearLayout.VERTICAL);
+                cells.setClipChildren(false);
+                sv.addView(cells, new ViewGroup.LayoutParams(-2, -2));
+                box.addView(sv, new LinearLayout.LayoutParams(-2, -2));
+                redraw();
+            }
+
+            void save() {
+                sp.edit().putString("grid_order_" + scope, joinKeys(order)).putString("grid_hidden_" + scope, joinKeys(hidden)).apply();
+            }
+
+            void redraw() {
+                cells.removeAllViews();
+                shownKeys.clear();
+                shownViews.clear();
+                tip.setText(edit ? "Нажмите на значок: скрыть или вернуть. Перетащите, чтобы переставить" : title);
+                List<View> all = new ArrayList<View>();
+                for (String k : order) {
+                    if (!edit && hidden.contains(k)) continue;
+                    View v = cellFor(k);
+                    shownKeys.add(k);
+                    shownViews.add(v);
+                    all.add(v);
+                }
+                all.add(editCell());
+                LinearLayout row = null;
+                for (int i = 0; i < all.size(); i++) {
+                    if (i % COLS == 0) {
+                        row = new LinearLayout(act);
+                        row.setOrientation(LinearLayout.HORIZONTAL);
+                        row.setClipChildren(false);
+                        cells.addView(row, new LinearLayout.LayoutParams(-2, -2));
+                    }
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(64), dp(64));
+                    lp.setMargins(dp(8), dp(8), dp(8), dp(8));
+                    row.addView(all.get(i), lp);
+                }
+            }
+
+            private FrameLayout disc(String glyph, String desc) {
+                FrameLayout cell = new FrameLayout(act);
+                cell.setClipChildren(false);
+                cell.setBackground(round(0xE6202124, 32, C_SURFACE2, 1));
+                TextView g = glyph(glyph);
+                g.setTextSize(26);
+                g.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                cell.addView(g, new FrameLayout.LayoutParams(-1, -1));
+                cell.setClickable(true);
+                cell.setFocusable(true);
+                cell.setContentDescription(desc);
+                return cell;
+            }
+
+            private View editCell() {
+                FrameLayout c = disc(edit ? "✔" : "⚙", edit ? "Готово" : "Настроить меню: скрыть пункты, переставить");
+                final String lab = edit ? "Готово" : "Настроить меню";
+                c.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        edit = !edit;
+                        redraw();
+                    }
+                });
+                c.setOnLongClickListener(new View.OnLongClickListener() {
+                    @Override public boolean onLongClick(View v) {
+                        tip.setText(lab);
+                        return true;
+                    }
+                });
+                return c;
+            }
+
+            private View cellFor(final String key) {
+                final GridItem g = byKey.get(key);
+                final boolean isHidden = hidden.contains(key);
+                FrameLayout cell = disc(g.glyph, g.label + (edit ? (isHidden ? ", скрыт. Нажмите, чтобы вернуть" : ". Нажмите, чтобы скрыть") : ""));
+                if (isHidden) cell.setAlpha(0.4f);
+                if (edit) {
+                    TextView badge = label(isHidden ? "🚫" : "👁", 11, C_TEXT, false);
+                    badge.setGravity(Gravity.CENTER);
+                    badge.setBackground(round(0xFF202124, 9, C_TEXT2, 1));
+                    badge.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                    cell.addView(badge, new FrameLayout.LayoutParams(dp(18), dp(18), Gravity.TOP | Gravity.END));
+                }
+                final boolean[] held = new boolean[1];
+                final boolean[] dragging = new boolean[1];
+                final float[] down = new float[2];
+                cell.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        if (edit) {
+                            if (!hidden.remove(key)) hidden.add(key);
+                            save();
+                            redraw();
+                        } else {
+                            closeLayer(false);
+                            if (g.action != null) g.action.run();
+                        }
+                    }
+                });
+                cell.setOnLongClickListener(new View.OnLongClickListener() {
+                    @Override public boolean onLongClick(View v) {
+                        held[0] = true;
+                        tip.setText(g.label);
+                        return true;
+                    }
+                });
+                cell.setOnTouchListener(new View.OnTouchListener() {
+                    @Override public boolean onTouch(View v, MotionEvent e) {
+                        switch (e.getActionMasked()) {
+                            case MotionEvent.ACTION_DOWN:
+                                down[0] = e.getRawX();
+                                down[1] = e.getRawY();
+                                held[0] = false;
+                                dragging[0] = false;
+                                return false;
+                            case MotionEvent.ACTION_MOVE:
+                                if (!dragging[0] && held[0]
+                                        && Math.hypot(e.getRawX() - down[0], e.getRawY() - down[1]) > dp(10)) {
+                                    dragging[0] = true;
+                                    v.getParent().requestDisallowInterceptTouchEvent(true);
+                                    ((View) v.getParent()).setElevation(dp(12));
+                                    v.setElevation(dp(12));
+                                    v.setScaleX(1.15f);
+                                    v.setScaleY(1.15f);
+                                }
+                                if (dragging[0]) {
+                                    v.setTranslationX(e.getRawX() - down[0]);
+                                    v.setTranslationY(e.getRawY() - down[1]);
+                                    return true;
+                                }
+                                return false;
+                            case MotionEvent.ACTION_UP:
+                            case MotionEvent.ACTION_CANCEL:
+                                if (dragging[0]) {
+                                    dragging[0] = false;
+                                    v.setPressed(false);
+                                    if (e.getActionMasked() == MotionEvent.ACTION_UP) drop(key, e.getRawX(), e.getRawY());
+                                    else redraw();
+                                    return true;
+                                }
+                                return false;
+                            default:
+                                return false;
+                        }
+                    }
+                });
+                return cell;
+            }
+
+            /** Отпустили значок над другим: он встаёт на его место, остальные сдвигаются. */
+            void drop(String key, float rawX, float rawY) {
+                int[] loc = new int[2];
+                for (int i = 0; i < shownViews.size(); i++) {
+                    String tk = shownKeys.get(i);
+                    if (tk.equals(key)) continue;
+                    View v = shownViews.get(i);
+                    v.getLocationOnScreen(loc);
+                    if (rawX >= loc[0] && rawX <= loc[0] + v.getWidth() && rawY >= loc[1] && rawY <= loc[1] + v.getHeight()) {
+                        int ti = order.indexOf(tk);
+                        order.remove(key);
+                        order.add(ti, key);
+                        save();
+                        break;
+                    }
+                }
+                redraw();
+            }
         }
 
         private void add(List<View> icons, List<String> labels, List<Runnable> actions, String glyph, String label, Runnable action) {
@@ -4042,10 +4307,8 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         /** Долгое нажатие на вкладку: группы и закрытие. */
         private void showTabMenu(final Tab t) {
-            List<View> icons = new ArrayList<View>();
-            List<String> labels = new ArrayList<String>();
-            List<Runnable> actions = new ArrayList<Runnable>();
-            add(icons, labels, actions, "📁", "В новую группу", new Runnable() { @Override public void run() {
+            List<GridItem> items = new ArrayList<GridItem>();
+            addG(items, "grp_new", "📁", "В новую группу", new Runnable() { @Override public void run() {
                 Group g = newGroup();
                 t.group = g.id;
                 saveTabs();
@@ -4053,7 +4316,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             } });
             for (final Group g : new ArrayList<Group>(groups)) {
                 if (g.id == t.group) continue;
-                add(icons, labels, actions, "📂", "В группу «" + g.name + "»", new Runnable() { @Override public void run() {
+                addG(items, "grp_" + g.id, "📂", "В группу «" + g.name + "»", new Runnable() { @Override public void run() {
                     t.group = g.id;
                     cleanGroups();
                     saveTabs();
@@ -4061,7 +4324,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 } });
             }
             if (t.group != 0) {
-                add(icons, labels, actions, "↩", "Убрать из группы", new Runnable() { @Override public void run() {
+                addG(items, "ungroup", "↩", "Убрать из группы", new Runnable() { @Override public void run() {
                     t.group = 0;
                     cleanGroups();
                     saveTabs();
@@ -4069,16 +4332,16 @@ public class Browser implements IPlugin, ISettingsProvider {
                 } });
             }
             if (t.wv != null && t != cur) {
-                add(icons, labels, actions, "⏏", "Выгрузить из памяти", new Runnable() { @Override public void run() {
+                addG(items, "unload", "⏏", "Выгрузить из памяти", new Runnable() { @Override public void run() {
                     unloadTab(t);
                     showTabs();
                 } });
             }
-            add(icons, labels, actions, "✕", "Закрыть вкладку", new Runnable() { @Override public void run() {
+            addG(items, "close", "✕", "Закрыть вкладку", new Runnable() { @Override public void run() {
                 closeTab(t);
                 showTabs();
             } });
-            showList(displayUrl(t), icons, labels, actions);
+            showIconGrid("tab", displayUrl(t), items);
         }
 
         /** Долгое нажатие на группу. */
