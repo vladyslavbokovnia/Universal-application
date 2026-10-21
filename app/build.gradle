@@ -37,7 +37,7 @@ dependencies {
     implementation 'androidx.core:core-ktx:1.9.0'
     implementation 'com.google.android.material:material:1.8.0'
 
-    // Профили WebView (раздельные сессии) для модуля BrowserModule; модуль обращается к API через reflection
+    // Профили WebView (раздельные сессии) для модуля Browser; модуль обращается к API через reflection
     implementation 'androidx.webkit:webkit:1.17.1'
 
     // Клиентская часть Shizuku (сервер — приложение-форк thedjchi/Shizuku, API совместим с оригиналом)

@@ -63,7 +63,7 @@
             android:turnScreenOn="true"
             android:exported="false" />
 
-        <!-- Обычное окно для модулей-браузеров (BrowserModule): Недавние, поворот, без флагов блокировки -->
+        <!-- Обычное окно для модулей-браузеров (Browser): Недавние, поворот, без флагов блокировки -->
         <activity android:name=".ModuleBrowserActivity"
             android:theme="@android:style/Theme.Black.NoTitleBar"
             android:taskAffinity="im.manus.universalhost.browser"
