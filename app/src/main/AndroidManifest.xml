@@ -65,7 +65,7 @@
 
         <!-- Обычное окно для модулей-браузеров (Browser): Недавние, поворот, без флагов блокировки -->
         <activity android:name=".ModuleBrowserActivity"
-            android:theme="@android:style/Theme.Black.NoTitleBar"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
             android:taskAffinity="im.manus.universalhost.browser"
             android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|uiMode|density|fontScale"
