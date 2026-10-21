@@ -2,8 +2,11 @@ name: Build Universal Host and Modules
 
 on:
   push:
-    branches: [ "main", "feature/browser-ui" ]
+    branches: [ "main" ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -73,3 +76,20 @@ jobs:
         name: dex-modules
         path: output_modules/*.dex
         if-no-files-found: error
+    # Страница релиза «Latest build»: APK, архив modules.zip и каждый модуль отдельным файлом .dex,
+    # скачивается без входа в GitHub. Релиз пересоздаётся при каждой сборке main.
+    - name: Publish release with APK and modules
+      if: github.ref == 'refs/heads/main'
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p release_files
+        cp app/build/outputs/apk/debug/app-debug.apk release_files/app-debug.apk
+        cp output_modules/*.dex release_files/
+        (cd output_modules && zip -q -j ../release_files/modules.zip *.dex)
+        short="$(git rev-parse --short HEAD)"
+        notes="Сборка из main, коммит ${short}: $(git log -1 --pretty=%s)"$'\n\n'"app-debug.apk — приложение. modules.zip — все модули одним архивом. Отдельные файлы *.dex — по одному модулю на файл (положить в Загрузки/UniversalPlugins)."
+        gh release delete latest --cleanup-tag --yes 2>/dev/null || true
+        gh release create latest release_files/* --target "$GITHUB_SHA" --title "Latest build (${short})" --notes "$notes" --latest
