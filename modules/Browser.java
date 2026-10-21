@@ -1458,8 +1458,28 @@ public class Browser implements IPlugin, ISettingsProvider {
             FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) content.getLayoutParams();
             lp.bottomMargin = fullscreen ? 0 : dp(55);
             content.setLayoutParams(lp);
+            applyCutoutMode();
             applySysUi();
             setDockHidden(false, false);
+        }
+
+        /**
+         * Вырез камеры: по умолчанию система закрашивает чёрным всю полосу над окном (у выреза сверху это и есть «чёрное наложение»
+         * вместо полного экрана). В полноэкранном режиме разрешаем окну заходить под вырез по короткому краю.
+         */
+        private void applyCutoutMode() {
+            if (Build.VERSION.SDK_INT < 28) return;
+            try {
+                Window w = act.getWindow();
+                WindowManager.LayoutParams wl = w.getAttributes();
+                int mode = fullscreen
+                        ? WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                        : WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT;
+                if (wl.layoutInDisplayCutoutMode != mode) {
+                    wl.layoutInDisplayCutoutMode = mode;
+                    w.setAttributes(wl);
+                }
+            } catch (Throwable ignored) { }
         }
 
         /** Флаги системных панелей: полный экран или обычный режим со светлыми/тёмными значками в зависимости от цвета строки. */
