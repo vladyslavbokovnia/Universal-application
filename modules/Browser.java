@@ -327,7 +327,9 @@ public class Browser implements IPlugin, ISettingsProvider {
         l.add(SettingItem.toggle("restore_tabs", "Восстанавливать вкладки", "При следующем открытии вернуть вкладки, которые были открыты", true));
         l.add(SettingItem.toggle("keep_screen_on", "Не гасить экран", "Пока открыт браузер", false));
         l.add(SettingItem.toggle("fullscreen", "Полноэкранный режим",
-                "Системные панели скрыты, нижняя панель прячется при прокрутке вниз и возвращается при прокрутке вверх", false));
+                "Системные панели скрыты, нижняя панель лежит поверх страницы", false));
+        l.add(SettingItem.toggle("autohide_dock", "Прятать нижнюю панель при прокрутке",
+                "Прячется, когда страницу листают вниз, и возвращается при прокрутке вверх или в начале страницы", true));
         l.add(SettingItem.toggle("open_tabs_first", "Открывать с панели вкладок", "При запуске браузера сначала показывать панель вкладок", true));
         l.add(SettingItem.action("pin_shortcut", "Ярлык на рабочий стол",
                 "Отдельный значок «Браузер»: окно открывается как самостоятельное приложение со своей карточкой в недавних"));
@@ -1089,6 +1091,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         private int bmProfile = -1;                 // профиль, в котором открываются закладки; -1: профиль текущей вкладки
         private final Map<Integer, Bitmap> profileImgs = new HashMap<Integer, Bitmap>();
         private int scrollAccum;
+        private long dockToggleAt;
         private final List<Group> groups = new ArrayList<Group>();
         private int nextGroup = 1;
         private Group openGroup;
@@ -1546,28 +1549,42 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         private void setDockHidden(boolean hide, boolean animate) {
-            if (!fullscreen) hide = false;
+            if (!sp.getBoolean("autohide_dock", true)) hide = false;
             if (hide && (layer != null || urlField.hasFocus())) hide = false;
+            boolean changed = hide != dockHidden;
             dockHidden = hide;
+            if (changed) dockToggleAt = SystemClock.uptimeMillis();
             float to = hide ? dock.getHeight() : 0f;
             dock.animate().cancel();
             if (animate) dock.animate().translationY(to).setDuration(180).start();
             else dock.setTranslationY(to);
+            if (!fullscreen) {
+                // вне полного экрана страница заканчивается над панелью: пока панель спрятана, страница занимает и её место
+                FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) content.getLayoutParams();
+                int want = hide ? 0 : dp(55);
+                if (lp.bottomMargin != want) {
+                    lp.bottomMargin = want;
+                    content.setLayoutParams(lp);
+                }
+            }
         }
 
-        /** Прокрутка вниз прячет нижнюю панель, вверх или возврат к началу страницы возвращает. */
-        private void onPageScroll(Tab t, int sy, int oy) {
-            if (t != cur || !fullscreen) return;
-            int dy = sy - oy;
-            if (sy <= dp(8)) {
-                scrollAccum = 0;
-                if (dockHidden) setDockHidden(false, true);
-                return;
-            }
+        /** Движение пальца по странице: вверх (содержимое едет вниз) прячет нижнюю панель, вниз возвращает. Работает и там, где страница прокручивает свой внутренний блок. */
+        private void onSwipe(Tab t, float dy) {
+            if (t != cur) return;
             if ((dy > 0) != (scrollAccum > 0)) scrollAccum = 0;
-            scrollAccum += dy;
+            scrollAccum += Math.round(dy);
             if (scrollAccum > dp(24) && !dockHidden) setDockHidden(true, true);
             else if (scrollAccum < -dp(24) && dockHidden) setDockHidden(false, true);
+        }
+
+        /** Возврат к началу страницы возвращает панель. Остальное решает onSwipe; сразу после смены размера страницы событие прокрутки не в счёт. */
+        private void onPageScroll(Tab t, int sy, int oy) {
+            if (t != cur) return;
+            if (sy <= dp(8) && SystemClock.uptimeMillis() - dockToggleAt > 400) {
+                scrollAccum = 0;
+                if (dockHidden) setDockHidden(false, true);
+            }
         }
 
         // ------------------------------------------------------------ группы, снимки и значки сайтов (хранятся на диске)
@@ -1665,7 +1682,10 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         private Bitmap thumbOf(Tab t) {
-            if (t.thumb == null) t.thumb = loadBitmap(new File(thumbDir(), t.uid + ".jpg"));
+            if (t.thumb == null) {
+                File pin = pinFile(t);
+                t.thumb = loadBitmap(pin.exists() ? pin : new File(thumbDir(), t.uid + ".jpg"));
+            }
             return t.thumb;
         }
 
@@ -1769,6 +1789,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         private void selectTab(Tab t) {
+            endThumbEdit();
             if (cur != null && cur != t) {
                 captureThumb(cur);
                 if (cur.wv != null) content.removeView(cur.wv);
@@ -1806,6 +1827,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             t.icon = null;
             try {
                 new File(thumbDir(), t.uid + ".jpg").delete();
+                pinFile(t).delete();
                 new File(thumbDir(), t.uid + "_i.png").delete();
             } catch (Throwable ignored) { }
             cleanGroups();
@@ -1871,6 +1893,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         private void captureThumb(Tab t) {
             WebView w = t == null ? null : t.wv;
             if (w == null || t.blocked || w.getParent() == null || w.getWidth() <= 0 || w.getHeight() <= 0) return;
+            if (pinFile(t).exists()) return;                 // превью выбрано вручную: автоматически не заменяется
             try {
                 int tw = dp(170);
                 int th = Math.round(tw * (float) w.getHeight() / w.getWidth());
@@ -1882,6 +1905,83 @@ public class Browser implements IPlugin, ISettingsProvider {
                 t.thumb = b;
                 saveBitmapAsync(b, new File(thumbDir(), t.uid + ".jpg"), false);
             } catch (Throwable ignored) { }
+        }
+
+        // ------------------------------------------------------------ превью вкладки: выбранный вручную кадр
+
+        private View thumbFrame, thumbBar;
+
+        private File pinFile(Tab t) { return new File(thumbDir(), t.uid + "_p.jpg"); }
+
+        private void endThumbEdit() {
+            if (thumbFrame != null) { content.removeView(thumbFrame); thumbFrame = null; }
+            if (thumbBar != null) { content.removeView(thumbBar); thumbBar = null; }
+        }
+
+        /** Рамка размером с превью на карточке. Страницу масштабируют и двигают как обычно; «Сохранить» запоминает то, что в рамке. */
+        private void startThumbEdit(final Tab t) {
+            final WebView w = t.wv;
+            if (t != cur || w == null || w.getWidth() <= 0 || w.getHeight() <= 0) { toast("Откройте вкладку со страницей"); return; }
+            endThumbEdit();
+            int cardW = Math.max(dp(80), (act.getResources().getDisplayMetrics().widthPixels - dp(32)) / 2);
+            final int fw = w.getWidth();
+            final int fh = Math.min(w.getHeight(), Math.round(fw * (float) dp(190) / cardW));
+            final int top = (w.getHeight() - fh) / 2;
+            View frame = new View(act);
+            frame.setBackground(round(0, 0, C_ACCENT, 3));
+            FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(fw, fh, Gravity.TOP | Gravity.START);
+            flp.topMargin = top;
+            content.addView(frame, flp);
+            thumbFrame = frame;
+
+            LinearLayout bar = new LinearLayout(act);
+            bar.setOrientation(LinearLayout.HORIZONTAL);
+            bar.setGravity(Gravity.CENTER_VERTICAL);
+            bar.setBackground(round(0xE6202124, 24, C_SURFACE2, 1));
+            bar.setPadding(dp(6), dp(4), dp(6), dp(4));
+            bar.addView(thumbButton("✔", "Сохранить превью", new Runnable() { @Override public void run() {
+                try {
+                    int tw = dp(240);
+                    int th = Math.round(tw * (float) fh / fw);
+                    Bitmap b = Bitmap.createBitmap(tw, th, Bitmap.Config.RGB_565);
+                    Canvas c = new Canvas(b);
+                    float sc = (float) tw / fw;
+                    c.scale(sc, sc);
+                    c.translate(0, -top);
+                    w.draw(c);
+                    t.thumb = b;
+                    saveBitmapAsync(b, pinFile(t), false);
+                    toast("Превью сохранено");
+                } catch (Throwable e) {
+                    toast("Не удалось сохранить превью");
+                }
+                endThumbEdit();
+            } }));
+            bar.addView(thumbButton("↺", "Снова выбирать кадр автоматически", new Runnable() { @Override public void run() {
+                try { pinFile(t).delete(); } catch (Throwable ignored) { }
+                t.thumb = null;
+                captureThumb(t);
+                toast("Превью снова автоматическое");
+                endThumbEdit();
+            } }));
+            bar.addView(thumbButton("✕", "Отмена", new Runnable() { @Override public void run() { endThumbEdit(); } }));
+            FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+            blp.topMargin = dp(10);
+            content.addView(bar, blp);
+            thumbBar = bar;
+            toast("Масштабируйте и сдвиньте страницу, чтобы нужный момент попал в рамку, затем ✔");
+        }
+
+        private View thumbButton(String glyph, final String desc, final Runnable action) {
+            TextView b = toolButton(glyph, desc, new View.OnClickListener() {
+                @Override public void onClick(View v) { action.run(); }
+            });
+            b.setTextSize(22);
+            b.setOnLongClickListener(new View.OnLongClickListener() {
+                @Override public boolean onLongClick(View v) { toast(desc); return true; }
+            });
+            b.setLayoutParams(new LinearLayout.LayoutParams(dp(52), dp(44)));
+            return b;
         }
 
         private void saveTabs() {
@@ -2028,6 +2128,21 @@ public class Browser implements IPlugin, ISettingsProvider {
                     @Override public void onScrollChange(View v, int sx, int sy, int ox, int oy) { onPageScroll(t, sy, oy); }
                 });
             }
+            final float[] lastY = new float[1];
+            w.setOnTouchListener(new View.OnTouchListener() {
+                @Override public boolean onTouch(View v, MotionEvent e) {
+                    if (e.getPointerCount() > 1) { lastY[0] = e.getY(); return false; }
+                    switch (e.getActionMasked()) {
+                        case MotionEvent.ACTION_DOWN: lastY[0] = e.getY(); break;
+                        case MotionEvent.ACTION_MOVE:
+                            onSwipe(t, lastY[0] - e.getY());
+                            lastY[0] = e.getY();
+                            break;
+                        default: break;
+                    }
+                    return false;                   // касание идёт странице как обычно
+                }
+            });
             w.setDownloadListener(new DownloadListener() {
                 @Override public void onDownloadStart(String url, String ua, String cd, String mime, long len) {
                     download(t, url, ua, cd, mime);
@@ -3132,6 +3247,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         // ------------------------------------------------------------ панели поверх страницы (не всплывающие окна)
 
         private void showLayer(View body, boolean full, Runnable cancel, String announce) {
+            endThumbEdit();
             closeLayer(true);
             setDockHidden(false, false);
             FrameLayout l = new FrameLayout(act);
@@ -3287,6 +3403,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 sp.edit().putBoolean("fullscreen", !sp.getBoolean("fullscreen", false)).apply();
                 applyFullscreen();
             } });
+            addG(items, "thumb", "🖼", "Превью вкладки: выбрать кадр", new Runnable() { @Override public void run() { startThumbEdit(t); } });
             addG(items, "bookmark", "⭐", "Добавить в закладки", new Runnable() { @Override public void run() { addBookmark(t); } });
             addG(items, "copy", "🔗", "Скопировать ссылку", new Runnable() { @Override public void run() {
                 try {
@@ -3350,6 +3467,7 @@ public class Browser implements IPlugin, ISettingsProvider {
          * скрывает пункт или возвращает его. Порядок и скрытые пункты хранятся отдельно для каждого меню (scope).
          */
         private void showIconGrid(String scope, String title, List<GridItem> items) {
+            endThumbEdit();
             closeLayer(true);
             setDockHidden(false, false);
             final GridPanel gp = new GridPanel(scope, title, items);
