@@ -325,8 +325,6 @@ public class Browser implements IPlugin, ISettingsProvider {
         l.add(SettingItem.text("user_agent", "User-Agent",
                 "Пусто: стандартный (без метки «wv»). Если сайт, например вход Google, не пускает во встроенный браузер, впишите строку мобильного Chrome", ""));
         l.add(SettingItem.toggle("restore_tabs", "Восстанавливать вкладки", "При следующем открытии вернуть вкладки, которые были открыты", true));
-        l.add(SettingItem.slider("max_live", "Вкладок в памяти",
-                "Остальные выгружаются и при выборе загружаются заново", 1, 8, 1, 3));
         l.add(SettingItem.toggle("keep_screen_on", "Не гасить экран", "Пока открыт браузер", false));
         l.add(SettingItem.toggle("fullscreen", "Полноэкранный режим",
                 "Системные панели скрыты, нижняя панель прячется при прокрутке вниз и возвращается при прокрутке вверх", false));
@@ -1827,25 +1825,20 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
         }
 
-        /** Держит в памяти не больше «Вкладок в памяти» страниц: самые давние выгружаются вместе с историей и положением. */
-        private void trimLive() {
-            int max = Math.max(1, sp.getInt("max_live", 3));
-            while (true) {
-                int live = 0;
-                Tab victim = null;
-                for (Tab t : tabs) {
-                    if (t.wv == null) continue;
-                    live++;
-                    if (t != cur && (victim == null || t.lastUsed < victim.lastUsed)) victim = t;
-                }
-                if (live <= max || victim == null) break;
-                try {
-                    Bundle b = new Bundle();
-                    victim.wv.saveState(b);
-                    victim.saved = b;
-                } catch (Throwable ignored) { }
-                destroyWebView(victim);
-            }
+        /** Лимита вкладок в памяти нет: вкладка выгружается только вручную (меню вкладки, «Выгрузить из памяти»). */
+        private void trimLive() { }
+
+        /** Выгрузка вкладки из памяти: история и положение сохраняются, страница загрузится заново при выборе вкладки. */
+        private void unloadTab(Tab t) {
+            if (t == null || t == cur || t.wv == null) return;
+            captureThumb(t);
+            try {
+                Bundle b = new Bundle();
+                t.wv.saveState(b);
+                t.saved = b;
+            } catch (Throwable ignored) { }
+            destroyWebView(t);
+            toast("Выгружено из памяти: " + tabTitle(t));
         }
 
         private void destroyWebView(Tab t) {
@@ -4072,6 +4065,12 @@ public class Browser implements IPlugin, ISettingsProvider {
                     t.group = 0;
                     cleanGroups();
                     saveTabs();
+                    showTabs();
+                } });
+            }
+            if (t.wv != null && t != cur) {
+                add(icons, labels, actions, "⏏", "Выгрузить из памяти", new Runnable() { @Override public void run() {
+                    unloadTab(t);
                     showTabs();
                 } });
             }
