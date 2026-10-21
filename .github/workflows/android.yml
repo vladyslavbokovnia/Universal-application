@@ -38,7 +38,7 @@ jobs:
         set -uo pipefail
         ANDROID_JAR="$(find "$ANDROID_SDK_ROOT/platforms" -name android.jar | sort | tail -n 1)"
         D8_TOOL="$(find "$ANDROID_SDK_ROOT/build-tools" -type f -name d8 | sort | tail -n 1)"
-        APP_CLASSES="app/build/tmp/kotlin-classes/debug:app/build/intermediates/javac/debug/classes"
+        APP_CLASSES="app/build/tmp/kotlin-classes/debug:app/build/intermediates/javac/debug/compileDebugJavaWithJavac/classes:app/build/intermediates/javac/debug/classes"
         test -f "$ANDROID_JAR"
         test -f "$D8_TOOL"
         shopt -s nullglob
