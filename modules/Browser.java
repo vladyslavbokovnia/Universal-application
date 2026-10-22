@@ -154,7 +154,21 @@ public class Browser implements IPlugin, ISettingsProvider {
     private static final int REQ_PROFILE_IMG = 7312;
     private static final int REQ_FILE = 7311;
     private static final int REQ_BM_IMG = 7313;
-    private static final float HUB_ALPHA = 0.45f;
+    private static final float HUB_ALPHA = 0.62f;
+    /** Разрешает масштабирование щипком там, где страница запретила его через viewport. */
+    private static final String FORCE_ZOOM_JS =
+            "(function(){try{if(window.__zf)return;window.__zf=1;"
+            + "function f(){try{var ms=document.querySelectorAll('meta[name=viewport i]');"
+            + "for(var i=0;i<ms.length;i++){var m=ms[i],c=m.getAttribute('content')||'',n=c;"
+            + "n=n.replace(/user-scalable *= *[^,; ]*/ig,'user-scalable=yes').replace(/maximum-scale *= *[^,; ]*/ig,'maximum-scale=10').replace(/minimum-scale *= *[^,; ]*/ig,'minimum-scale=0.1');"
+            + "if(!/user-scalable/i.test(n))n+=(n?',':'')+'user-scalable=yes';"
+            + "if(!/maximum-scale/i.test(n))n+=',maximum-scale=10';"
+            + "if(n!==c)m.setAttribute('content',n);}}catch(e){}}"
+            + "var pend=false;function g(){if(pend)return;pend=true;setTimeout(function(){pend=false;f();},50);}"
+            + "f();var o=new MutationObserver(g);"
+            + "o.observe(document,{childList:true,subtree:true,attributes:true,attributeFilter:['content']});"
+            + "window.addEventListener('load',function(){f();setTimeout(function(){o.disconnect();},3000);});"
+            + "}catch(e){}})();";
     private static final String SCRIPTS_SUBDIR = "UniversalPlugins/BrowserScripts";
     private static final String DEF_HOME = "https://www.google.com/";
     private static final String DEF_SEARCH = "https://www.google.com/search?q=%s";
@@ -331,7 +345,9 @@ public class Browser implements IPlugin, ISettingsProvider {
         l.add(SettingItem.toggle("fullscreen", "Полноэкранный режим",
                 "Системные панели скрыты", false));
         l.add(SettingItem.toggle("autohide_dock", "Прятать кнопку при прокрутке",
-                "Кнопка прячется, пока страницу листают, и возвращается через секунду после остановки, при прокрутке в обратную сторону или в начале страницы", true));
+                "Кнопка прячется, когда страницу листают вниз, и возвращается при прокрутке вверх или в начале страницы", true));
+        l.add(SettingItem.toggle("force_zoom", "Масштабирование на всех сайтах",
+                "Разрешает масштаб щипком и там, где страница запретила его (user-scalable=no); применяется при загрузке страницы", true));
         l.add(SettingItem.toggle("open_tabs_first", "Открывать с панели вкладок", "При запуске браузера сначала показывать панель вкладок", true));
         l.add(SettingItem.action("pin_shortcut", "Ярлык на рабочий стол",
                 "Отдельный значок «Браузер»: окно открывается как самостоятельное приложение со своей карточкой в недавних"));
@@ -1098,6 +1114,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         private int nextGroup = 1;
         private Group openGroup;
         private TextView hub;
+        private final java.util.Map<String, Long> pixelAt = new java.util.HashMap<String, Long>();
         private boolean startOpen, startForNew;
         private long pendingBm = -1;
         private final List<View> ringViews = new ArrayList<View>();
@@ -1602,10 +1619,6 @@ public class Browser implements IPlugin, ISettingsProvider {
             scrollAccum += Math.round(dy);
             if (scrollAccum > dp(24) && !dockHidden) setDockHidden(true, true);
             else if (scrollAccum < -dp(24) && dockHidden) setDockHidden(false, true);
-            if (dockHidden) {
-                h.removeCallbacks(hubReturn);
-                h.postDelayed(hubReturn, 1000);
-            }
         }
 
         /** Возврат к началу страницы возвращает панель. Остальное решает onSwipe; сразу после смены размера страницы событие прокрутки не в счёт. */
@@ -1620,20 +1633,20 @@ public class Browser implements IPlugin, ISettingsProvider {
         // ------------------------------------------------------------ кнопка в центре экрана: нажатие, долгое нажатие, перетаскивание
 
         private void buildHub() {
-            hub = new TextView(act);
+            hub = new HubView(act);
             hub.setTextColor(0xFFFFFFFF);
             hub.setTextSize(15);
             hub.setTypeface(hub.getTypeface(), android.graphics.Typeface.BOLD);
             hub.setGravity(Gravity.CENTER);
-            hub.setText("1");
-            hub.setBackground(round(0x55000000, 28, 0x55FFFFFF, 1));
+            hub.setText("I");
+            hub.setBackground(round(0xCC000000, 39, 0x99FFFFFF, 2));
             hub.setAlpha(HUB_ALPHA);
             hub.setClickable(true);
             hub.setFocusable(true);
             hub.setContentDescription("Вкладки");
             hub.setTranslationX(sp.getFloat("hub_dx", 0f));
             hub.setTranslationY(sp.getFloat("hub_dy", 0f));
-            addView(hub, new FrameLayout.LayoutParams(dp(56), dp(56), Gravity.CENTER));
+            addView(hub, new FrameLayout.LayoutParams(dp(78), dp(78), Gravity.CENTER));
             // для экранного диктора: двойное нажатие и долгое двойное нажатие; обычные касания разбирает слушатель ниже
             hub.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) { openTabsRoot(); }
@@ -1706,17 +1719,58 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         private void moveHub(float tx, float ty) {
-            float maxX = Math.max(0f, getWidth() / 2f - dp(28));
-            float maxY = Math.max(0f, getHeight() / 2f - dp(28));
+            float maxX = Math.max(0f, getWidth() / 2f - dp(39));
+            float maxY = Math.max(0f, getHeight() / 2f - dp(39));
             hub.setTranslationX(Math.max(-maxX, Math.min(maxX, tx)));
             hub.setTranslationY(Math.max(-maxY, Math.min(maxY, ty)));
         }
 
         private void updateHub(Tab t) {
             if (hub == null) return;
-            hub.setText(String.valueOf(tabs.size()));
+            hub.setText(roman(tabs.size()));
             hub.setContentDescription("Вкладки: открыто " + tabs.size() + ", сейчас " + (tabs.indexOf(t) + 1)
                     + ". Долгое нажатие: кнопки управления");
+        }
+
+        /** Число вкладок римскими цифрами: подбирается размер, при котором углы рамки текста касаются края круга. */
+        private final class HubView extends TextView {
+            private final Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final android.graphics.Rect rb = new android.graphics.Rect();
+
+            HubView(Context c) {
+                super(c);
+                tp.setTypeface(android.graphics.Typeface.create(android.graphics.Typeface.SERIF, android.graphics.Typeface.BOLD));
+            }
+
+            @Override protected void onDraw(Canvas c) {
+                String s = String.valueOf(getText());
+                if (s.length() == 0) return;
+                float d = Math.min(getWidth(), getHeight());
+                tp.setColor(getCurrentTextColor());
+                tp.setTextSize(100f);
+                tp.getTextBounds(s, 0, s.length(), rb);
+                float w = rb.width();
+                float hh = rb.height();
+                if (w <= 0f || hh <= 0f) return;
+                float k = 0.98f * d / (float) Math.hypot(w, hh);
+                tp.setTextSize(100f * k);
+                tp.getTextBounds(s, 0, s.length(), rb);
+                c.drawText(s, getWidth() / 2f - rb.exactCenterX(), getHeight() / 2f - rb.exactCenterY(), tp);
+            }
+        }
+
+        private String roman(int n) {
+            if (n <= 0) return "0";
+            int[] v = {1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1};
+            String[] r = {"M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I"};
+            StringBuilder b = new StringBuilder();
+            for (int i = 0; i < v.length; i++) {
+                while (n >= v[i]) {
+                    b.append(r[i]);
+                    n -= v[i];
+                }
+            }
+            return b.toString();
         }
 
         private final class RingItem {
@@ -1760,8 +1814,8 @@ public class Browser implements IPlugin, ISettingsProvider {
             int[] mp = new int[2];
             hub.getLocationOnScreen(hp);
             getLocationOnScreen(mp);
-            float r = dp(96);
-            float half = dp(26);
+            float r = dp(130);
+            float half = dp(73) / 2f;
             float cx = hp[0] - mp[0] + hub.getWidth() / 2f;
             float cy = hp[1] - mp[1] + hub.getHeight() / 2f;
             float pad = r + half + dp(6);
@@ -1779,7 +1833,8 @@ public class Browser implements IPlugin, ISettingsProvider {
                 final RingItem it = items.get(i);
                 double ang = -Math.PI / 2 + 2 * Math.PI * i / items.size();
                 TextView v = glyph(it.glyph, C_TEXT);
-                v.setBackground(round(0xEE202124, 26, C_TEXT2, 1));
+                v.setTextSize(30);
+                v.setBackground(round(0xEE202124, 37, C_TEXT2, 1));
                 v.setContentDescription(it.desc);
                 v.setAlpha(it.on ? 1f : 0.4f);
                 v.setClickable(true);
@@ -1791,7 +1846,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                         it.run.run();
                     }
                 });
-                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(52), dp(52), Gravity.TOP | Gravity.START);
+                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(73), dp(73), Gravity.TOP | Gravity.START);
                 lp.leftMargin = Math.round(cx + (float) (r * Math.cos(ang)) - half);
                 lp.topMargin = Math.round(cy + (float) (r * Math.sin(ang)) - half);
                 l.addView(v, lp);
@@ -1807,7 +1862,7 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         private int ringIndexAt(float rx, float ry) {
             int best = -1;
-            float bestD = dp(38);
+            float bestD = dp(53);
             for (int i = 0; i < ringViews.size(); i++) {
                 View v = ringViews.get(i);
                 int[] p = new int[2];
@@ -1849,8 +1904,13 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         private void newTabWithStart() {
             if (cur == null) return;
-            newTab(home(), cur.profile, null, true);
-            showStart(true, true);
+            final Tab from = cur;
+            captureThumbThen(from, new Runnable() {
+                @Override public void run() {
+                    newTab(home(), from.profile, null, true);
+                    showStart(true, true);
+                }
+            });
         }
 
         /** Обновить стартовую страницу после смены закладки. */
@@ -2239,7 +2299,7 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         private void selectTab(Tab t) {
             if (cur != null && cur != t) {
-                captureThumb(cur);
+                if (layer == null) captureThumb(cur);       // под панелью вкладок снимок уже взят при её открытии
                 if (cur.wv != null) content.removeView(cur.wv);
             }
             cur = t;
@@ -2338,6 +2398,10 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         private void captureThumb(Tab t) {
+            if (t != null) {
+                Long px = pixelAt.get(String.valueOf(t.uid));
+                if (px != null && SystemClock.uptimeMillis() - px.longValue() < 4000) return;   // свежий снимок с экрана не затираем
+            }
             WebView w = t == null ? null : t.wv;
             if (w == null || t.blocked || w.getParent() == null || w.getWidth() <= 0 || w.getHeight() <= 0) return;
             try {
@@ -2351,6 +2415,65 @@ public class Browser implements IPlugin, ISettingsProvider {
                 t.thumb = b;
                 saveBitmapAsync(b, new File(thumbDir(), t.uid + ".jpg"), false);
             } catch (Throwable ignored) { }
+        }
+
+        /** Снимок того, что сейчас видно на экране (с масштабом и прокруткой), через PixelCopy; WebView.draw иногда рисует другое место. */
+        private void captureThumbThen(final Tab t, final Runnable after) {
+            final WebView w = t == null ? null : t.wv;
+            if (Build.VERSION.SDK_INT < 26 || w == null || t != cur || layer != null || t.blocked || w.getParent() == null
+                    || w.getWidth() <= 0 || w.getHeight() <= 0 || act.getWindow() == null) {
+                captureThumb(t);
+                if (after != null) after.run();
+                return;
+            }
+            final boolean hubWas = hub != null && hub.getVisibility() == View.VISIBLE;
+            if (hubWas) hub.setVisibility(View.INVISIBLE);       // кнопка не должна попасть на снимок
+            final boolean[] done = new boolean[1];
+            final Runnable finish = new Runnable() {
+                @Override public void run() {
+                    if (done[0]) return;
+                    done[0] = true;
+                    if (hubWas && hub != null && !dockHidden) hub.setVisibility(View.VISIBLE);
+                    if (after != null) after.run();
+                }
+            };
+            h.postDelayed(finish, 1500);                         // страховка, если копирование не ответит
+            h.postDelayed(new Runnable() {
+                @Override public void run() {
+                    try {
+                        if (done[0]) return;
+                        if (closed || t.wv != w || w.getParent() == null) {
+                            finish.run();
+                            return;
+                        }
+                        int[] loc = new int[2];
+                        w.getLocationInWindow(loc);
+                        android.graphics.Rect srcRect = new android.graphics.Rect(loc[0], loc[1], loc[0] + w.getWidth(), loc[1] + w.getHeight());
+                        int tw = dp(170);
+                        int th = Math.round(tw * (float) w.getHeight() / w.getWidth());
+                        final Bitmap full = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888);
+                        android.view.PixelCopy.request(act.getWindow(), srcRect, full, new android.view.PixelCopy.OnPixelCopyFinishedListener() {
+                            @Override public void onPixelCopyFinished(int result) {
+                                try {
+                                    if (!closed && result == android.view.PixelCopy.SUCCESS) {
+                                        Bitmap small = full.copy(Bitmap.Config.RGB_565, false);
+                                        Bitmap use = small != null ? small : full;
+                                        t.thumb = use;
+                                        pixelAt.put(String.valueOf(t.uid), Long.valueOf(SystemClock.uptimeMillis()));
+                                        saveBitmapAsync(use, new File(thumbDir(), t.uid + ".jpg"), false);
+                                    } else if (!closed) {
+                                        captureThumb(t);
+                                    }
+                                } catch (Throwable ignored) { }
+                                finish.run();
+                            }
+                        }, h);
+                    } catch (Throwable ex) {
+                        captureThumb(t);
+                        finish.run();
+                    }
+                }
+            }, 90);
         }
 
         private void saveTabs() {
@@ -2478,6 +2601,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             s.setJavaScriptCanOpenWindowsAutomatically(false);
             s.setUseWideViewPort(true);
             s.setLoadWithOverviewMode(true);
+            s.setSupportZoom(true);
             s.setBuiltInZoomControls(true);
             s.setDisplayZoomControls(false);
             s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
@@ -2490,6 +2614,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 installTtsDocumentStart(t, w);
             }
             syncDocStart(t);
+            if (sp.getBoolean("force_zoom", true)) addDocStart(w, FORCE_ZOOM_JS);
             w.setWebViewClient(new Client(t));
             w.setWebChromeClient(new Chrome(t));
             if (Build.VERSION.SDK_INT >= 23) {
@@ -2558,6 +2683,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 t.progress = 100;
                 injectScripts(t, url, false);
                 syncDocStart(t);
+                if (sp.getBoolean("force_zoom", true)) v.evaluateJavascript(FORCE_ZOOM_JS, null);
                 probeBar(t);
                 if (t.icon == null && iconOf(t) == null) fetchFavicon(t);
                 if (t == cur) {
@@ -3765,7 +3891,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 applyUserAgent(t);
                 if (t.wv != null) t.wv.reload();
             } });
-            addG(items, "scripts", "📜", "Скрипты и их настройки", new Runnable() { @Override public void run() { showScripts(t); } });
+            addG(items, "scripts", "📜", "Скрипты", new Runnable() { @Override public void run() { showScripts(t); } });
             addG(items, "profiles", "🎭", "Значки профилей…", new Runnable() { @Override public void run() { showProfileList(); } });
             addG(items, "fullscreen", "⛶", fullscreen ? "Выйти из полноэкранного режима" : "Полноэкранный режим", new Runnable() { @Override public void run() {
                 sp.edit().putBoolean("fullscreen", !sp.getBoolean("fullscreen", false)).apply();
@@ -4066,50 +4192,51 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         private boolean scriptsDirty;
+        private int scriptsScrollY;
+        private View scriptsLayer;
+        private ScrollView scriptsScroll;
 
-        private View switchRow(String text, boolean on, boolean big, int indentDp, android.widget.CompoundButton.OnCheckedChangeListener l) {
+        private View scriptSwitchRow(String text, boolean on, android.widget.CompoundButton.OnCheckedChangeListener l) {
             LinearLayout row = new LinearLayout(act);
             row.setOrientation(LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(dp(4 + indentDp), dp(6), dp(4), dp(6));
-            TextView tv = label(text, big ? 17 : 15, C_TEXT, big);
-            row.addView(tv, new LinearLayout.LayoutParams(0, -2, 1f));
+            row.setPadding(dp(4), dp(10), dp(4), dp(10));
             final android.widget.Switch sw = new android.widget.Switch(act);
             sw.setChecked(on);
             sw.setContentDescription(text);
             sw.setOnCheckedChangeListener(l);
             row.addView(sw, new LinearLayout.LayoutParams(-2, -2));
+            TextView tv = label(text, 18, C_TEXT, true);
+            tv.setPadding(dp(14), 0, 0, 0);
+            row.addView(tv, new LinearLayout.LayoutParams(0, -2, 1f));
             row.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) { sw.toggle(); }
             });
             return row;
         }
 
-        private void pushScriptValue(Tab t, UserScript s, String key, String oldJ, String newJ) {
-            values().edit().putString(s.id() + "\t" + key, newJ).apply();
-            for (Injected inj : new ArrayList<Injected>(t.injected.values())) {
-                if (inj.script.fileName.equals(s.fileName)) broadcastValue(t, inj, key, oldJ, newJ);
-            }
-            scriptsDirty = true;
+        /** Экран как окно Tampermonkey: скрипты с переключателями, под каждым его команды меню. Изменения включения применяются обновлением страницы при закрытии. */
+        private void showScripts(Tab t) {
+            scriptsDirty = false;
+            scriptsScrollY = 0;
+            buildScripts(t);
         }
 
-        /** Все скрипты с переключателями; под каждым его команды и сохранённые настройки (булевы значения). Изменения применяются обновлением страницы при закрытии. */
-        private void showScripts(final Tab t) {
-            scriptsDirty = false;
-            ScrollView sv = new ScrollView(act);
+        private void buildScripts(final Tab t) {
+            closeLayer(false);                      // обновление списка не должно запускать обновление страницы
+            final ScrollView sv = new ScrollView(act);
             LinearLayout col = new LinearLayout(act);
             col.setOrientation(LinearLayout.VERTICAL);
             col.setPadding(dp(14), dp(14), dp(14), dp(28));
             sv.addView(col, new ViewGroup.LayoutParams(-1, -2));
-            col.addView(panelTitle("Скрипты и их настройки"));
+            col.addView(panelTitle("Скрипты"));
             List<UserScript> scripts = ScriptStore.list();
             if (scripts.isEmpty()) {
                 col.addView(label("Скриптов нет. Папка: " + ScriptStore.dir().getPath(), 15, C_TEXT2, false));
             }
-            java.util.Map<String, ?> all = values().getAll();
             for (final UserScript s : scripts) {
-                col.addView(switchRow(s.name + (s.version.length() > 0 ? " " + s.version : ""),
-                        sp.getBoolean("script_on:" + s.fileName, true), true, 0,
+                col.addView(scriptSwitchRow("📄  " + s.name + (s.version.length() > 0 ? " " + s.version : ""),
+                        sp.getBoolean("script_on:" + s.fileName, true),
                         new android.widget.CompoundButton.OnCheckedChangeListener() {
                             @Override public void onCheckedChanged(android.widget.CompoundButton b, boolean on) {
                                 sp.edit().putBoolean("script_on:" + s.fileName, on).apply();
@@ -4118,48 +4245,29 @@ public class Browser implements IPlugin, ISettingsProvider {
                         }));
                 for (final MenuCmd m : new ArrayList<MenuCmd>(t.menu)) {
                     if (!m.inj.script.fileName.equals(s.fileName)) continue;
-                    TextView cmd = label("▶  " + m.name, 15, C_ACCENT, false);
-                    cmd.setPadding(dp(22), dp(8), dp(4), dp(8));
-                    cmd.setClickable(true);
-                    cmd.setOnClickListener(new View.OnClickListener() {
+                    LinearLayout row = new LinearLayout(act);
+                    row.setOrientation(LinearLayout.HORIZONTAL);
+                    row.setGravity(Gravity.CENTER_VERTICAL);
+                    row.setPadding(dp(20), dp(10), dp(4), dp(10));
+                    TextView gear = label("⚙", 22, C_TEXT2, false);
+                    row.addView(gear, new LinearLayout.LayoutParams(dp(34), -2));
+                    row.addView(label(m.name, 16, C_TEXT, false), new LinearLayout.LayoutParams(0, -2, 1f));
+                    row.setClickable(true);
+                    row.setContentDescription(m.name);
+                    row.setOnClickListener(new View.OnClickListener() {
                         @Override public void onClick(View v) {
                             if (t.wv != null) t.wv.evaluateJavascript("try{window['" + m.inj.disp + "'].m(" + m.id + ")}catch(e){}", null);
+                            final View mine = scriptsLayer;
+                            h.postDelayed(new Runnable() {
+                                @Override public void run() {
+                                    if (closed || layer == null || layer != mine) return;
+                                    if (scriptsScroll != null) scriptsScrollY = scriptsScroll.getScrollY();
+                                    buildScripts(t);       // скрипт мог переименовать команду, например «Жесты наклона: Вкл» -> «Выкл»
+                                }
+                            }, 450);
                         }
                     });
-                    col.addView(cmd);
-                }
-                String prefix = s.id() + "\t";
-                for (java.util.Map.Entry<String, ?> e : all.entrySet()) {
-                    if (!e.getKey().startsWith(prefix) || !(e.getValue() instanceof String)) continue;
-                    final String key = e.getKey().substring(prefix.length());
-                    final String json = (String) e.getValue();
-                    if ("true".equals(json) || "false".equals(json)) {
-                        col.addView(switchRow(key, "true".equals(json), false, 18,
-                                new android.widget.CompoundButton.OnCheckedChangeListener() {
-                                    @Override public void onCheckedChanged(android.widget.CompoundButton b, boolean on) {
-                                        pushScriptValue(t, s, key, null, on ? "true" : "false");
-                                    }
-                                }));
-                    } else if (json.startsWith("\u007b")) {
-                        try {
-                            final JSONObject o = new JSONObject(json);
-                            java.util.Iterator<String> it = o.keys();
-                            while (it.hasNext()) {
-                                final String f = it.next();
-                                if (!(o.get(f) instanceof Boolean)) continue;
-                                col.addView(switchRow(f, o.getBoolean(f), false, 18,
-                                        new android.widget.CompoundButton.OnCheckedChangeListener() {
-                                            @Override public void onCheckedChanged(android.widget.CompoundButton b, boolean on) {
-                                                try {
-                                                    String before = o.toString();
-                                                    o.put(f, on);
-                                                    pushScriptValue(t, s, key, before, o.toString());
-                                                } catch (JSONException ignored) { }
-                                            }
-                                        }));
-                            }
-                        } catch (JSONException ignored) { }
-                    }
+                    col.addView(row);
                 }
             }
             showLayer(sv, true, new Runnable() {
@@ -4169,7 +4277,12 @@ public class Browser implements IPlugin, ISettingsProvider {
                         t.wv.reload();
                     }
                 }
-            }, "Скрипты и их настройки");
+            }, "Скрипты");
+            scriptsLayer = layer;
+            scriptsScroll = sv;
+            sv.post(new Runnable() {
+                @Override public void run() { sv.scrollTo(0, scriptsScrollY); }
+            });
         }
 
         private void showScriptCommands(final Tab t) {
@@ -4461,11 +4574,16 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         private void openTabsRoot() {
             openGroup = null;
-            showTabs();
+            if (layer != null) {
+                showTabs();
+                return;
+            }
+            captureThumbThen(cur, new Runnable() {
+                @Override public void run() { showTabs(); }
+            });
         }
 
         private void showTabs() {
-            captureThumb(cur);
             cleanGroups();
             final Group og = openGroup;
             LinearLayout root = new LinearLayout(act);
