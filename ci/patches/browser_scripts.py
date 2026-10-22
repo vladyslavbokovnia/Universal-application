@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Второй патч для modules/Browser.java (применяется после browser_hub.py).
-Пункт меню «Команды скриптов: N» заменяется экраном «Скрипты» как в окне Tampermonkey:
-для каждого скрипта строка с переключателем включения, под ней его команды из GM_registerMenuCommand
-со значком шестерёнки. Нажатие на команду запускает её, а список сам обновляется, потому что скрипты
-переименовывают команду после нажатия («Жесты наклона: Вкл» -> «Жесты наклона: Выкл»).
+"""Патч для modules/Browser.java поверх уже применённых browser_hub.py и первой версии экрана скриптов.
+Заменяет экран «Скрипты и их настройки» (переключатели скриптов и сырые значения GM_setValue) на экран «Скрипты»
+как в окне Tampermonkey: для каждого скрипта строка с переключателем включения, под ней его команды
+из GM_registerMenuCommand со значком шестерёнки. Нажатие запускает команду, а список сам обновляется,
+потому что скрипты переименовывают команду после нажатия («Жесты наклона: Вкл» -> «Жесты наклона: Выкл»).
 Использование: python3 browser_scripts.py modules/Browser.java"""
 import sys
 
@@ -19,12 +19,16 @@ def rep(old, new, count=1):
     src = src.replace(old, new)
 
 
-rep('''            if (!t.menu.isEmpty()) {
-                addG(items, "scripts", "📜", "Команды скриптов: " + t.menu.size(), new Runnable() { @Override public void run() { showScriptCommands(t); } });
-            }
-''',
-    '''            addG(items, "scripts", "📜", "Скрипты", new Runnable() { @Override public void run() { showScripts(t); } });
-''')
+def rep_between(start, end, new):
+    global src
+    if src.count(start) != 1:
+        sys.exit("START ANCHOR FAILED (%d found): %s" % (src.count(start), start[:90]))
+    a = src.index(start)
+    b = src.find(end, a)
+    if b < 0:
+        sys.exit("END ANCHOR FAILED: " + end[:90])
+    src = src[:a] + new + src[b:]
+
 
 SCRIPTS_CODE = r'''        private boolean scriptsDirty;
         private int scriptsScrollY;
@@ -121,7 +125,11 @@ SCRIPTS_CODE = r'''        private boolean scriptsDirty;
         }
 
 '''
-rep("        private void showScriptCommands(final Tab t) {", SCRIPTS_CODE + "        private void showScriptCommands(final Tab t) {")
+
+rep_between("        private boolean scriptsDirty;\n\n        private View switchRow(",
+            "        private void showScriptCommands(final Tab t) {",
+            SCRIPTS_CODE)
+rep('"scripts", "📜", "Скрипты и их настройки"', '"scripts", "📜", "Скрипты"')
 
 if src.count("{") != src.count("}"):
     sys.exit("BRACE BALANCE FAILED: %d open, %d close" % (src.count("{"), src.count("}")))
