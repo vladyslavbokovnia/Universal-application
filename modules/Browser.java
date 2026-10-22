@@ -2889,7 +2889,9 @@ public class Browser implements IPlugin, ISettingsProvider {
                 Intent i;
                 if (url.startsWith("intent:")) {
                     i = Intent.parseUri(url, Intent.URI_INTENT_SCHEME);
-                    i.addCategory(Intent.CATEGORY_BROWSABLE);
+                    // Цели «Поделиться» (SEND) не объявляют категорию BROWSABLE — с ней они не находятся; прямая отправка в NewPipe/SnapTube
+                    boolean send = Intent.ACTION_SEND.equals(i.getAction()) || Intent.ACTION_SEND_MULTIPLE.equals(i.getAction());
+                    if (!send) i.addCategory(Intent.CATEGORY_BROWSABLE);
                     i.setComponent(null);
                     i.setSelector(null);
                     i.setFlags(i.getFlags() & ~(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
