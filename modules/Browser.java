@@ -903,9 +903,10 @@ public class Browser implements IPlugin, ISettingsProvider {
             "function GM_getTabs(cb){try{cb({});}catch(e){}}\n" +
             "function GM_xmlhttpRequest(d){\n" +
             "var id=++xhrN;xhr[id]=d;\n" +
-            "var data=null;\n" +
-            "if(d.data!==undefined&&d.data!==null)data=String(d.data);\n" +
-            "B.xhr(NO,id,JSON.stringify({method:String(d.method||'GET').toUpperCase(),url:String(d.url),headers:d.headers||{},data:data,timeout:d.timeout||0,responseType:d.responseType||''}));\n" +
+            "var data=null,b64=null,x=d.data;\n" +
+            "if(x!==undefined&&x!==null){var u8=null;if(x instanceof ArrayBuffer)u8=new Uint8Array(x);else if(ArrayBuffer.isView(x))u8=new Uint8Array(x.buffer,x.byteOffset,x.byteLength);\n" +
+            "if(u8){var bs='';for(var bi=0;bi<u8.length;bi+=8192)bs+=String.fromCharCode.apply(null,u8.subarray(bi,bi+8192));b64=btoa(bs);}else data=String(x);}\n" +
+            "B.xhr(NO,id,JSON.stringify({method:String(d.method||'GET').toUpperCase(),url:String(d.url),headers:d.headers||{},data:data,b64:b64,timeout:d.timeout||0,responseType:d.responseType||''}));\n" +
             "return{abort:function(){B.xhrAbort(NO,id);}};\n" +
             "}\n" +
             "function b64ab(s){var bin=atob(s),n=bin.length,u=new Uint8Array(n);for(var i=0;i<n;i++)u[i]=bin.charCodeAt(i);return u.buffer;}\n" +
@@ -3036,6 +3037,9 @@ public class Browser implements IPlugin, ISettingsProvider {
                         || method.equals("DELETE") || method.equals("OPTIONS"))) throw new IOException("метод " + method + " не поддерживается");
                 String cur = req.optString("url");
                 String data = req.isNull("data") ? null : req.optString("data", null);
+                String b64 = req.isNull("b64") ? null : req.optString("b64", null);
+                // Бинарное тело (ArrayBuffer/Uint8Array, например protobuf у VOT) приходит в base64 — раньше превращалось в строку и портилось
+                byte[] reqBody = b64 != null ? Base64.decode(b64, Base64.DEFAULT) : (data != null ? data.getBytes(Charset.forName("UTF-8")) : null);
                 JSONObject headers = req.optJSONObject("headers");
                 String type = req.optString("responseType", "");
                 boolean binary = type.equals("arraybuffer") || type.equals("blob");
@@ -3061,16 +3065,16 @@ public class Browser implements IPlugin, ISettingsProvider {
                             c.setRequestProperty(k, headers.optString(k));
                         }
                     }
-                    if (data != null && !method.equals("GET") && !method.equals("HEAD")) {
+                    if (reqBody != null && !method.equals("GET") && !method.equals("HEAD")) {
                         c.setDoOutput(true);
                         OutputStream os = c.getOutputStream();
-                        os.write(data.getBytes(Charset.forName("UTF-8")));
+                        os.write(reqBody);
                         os.close();
                     }
                     int code = c.getResponseCode();
                     if (code >= 300 && code < 400 && c.getHeaderField("Location") != null) {
                         cur = new URL(u, c.getHeaderField("Location")).toString();
-                        if (code == 303 || ((code == 301 || code == 302) && method.equals("POST"))) { method = "GET"; data = null; }
+                        if (code == 303 || ((code == 301 || code == 302) && method.equals("POST"))) { method = "GET"; data = null; reqBody = null; }
                         c.disconnect();
                         continue;
                     }
