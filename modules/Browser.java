@@ -153,6 +153,8 @@ public class Browser implements IPlugin, ISettingsProvider {
     private static final String BROWSER_ACTIVITY = "im.manus.universalhost.BrowserApp";     // активити-псевдоним из манифеста: свой значок и название
     private static final int REQ_PROFILE_IMG = 7312;
     private static final int REQ_FILE = 7311;
+    private static final int REQ_BM_IMG = 7313;
+    private static final float HUB_ALPHA = 0.45f;
     private static final String SCRIPTS_SUBDIR = "UniversalPlugins/BrowserScripts";
     private static final String DEF_HOME = "https://www.google.com/";
     private static final String DEF_SEARCH = "https://www.google.com/search?q=%s";
@@ -327,9 +329,9 @@ public class Browser implements IPlugin, ISettingsProvider {
         l.add(SettingItem.toggle("restore_tabs", "Восстанавливать вкладки", "При следующем открытии вернуть вкладки, которые были открыты", true));
         l.add(SettingItem.toggle("keep_screen_on", "Не гасить экран", "Пока открыт браузер", false));
         l.add(SettingItem.toggle("fullscreen", "Полноэкранный режим",
-                "Системные панели скрыты, нижняя панель лежит поверх страницы", false));
-        l.add(SettingItem.toggle("autohide_dock", "Прятать нижнюю панель при прокрутке",
-                "Прячется, когда страницу листают вниз, и возвращается при прокрутке вверх или в начале страницы", true));
+                "Системные панели скрыты", false));
+        l.add(SettingItem.toggle("autohide_dock", "Прятать кнопку при прокрутке",
+                "Кнопка прячется, пока страницу листают, и возвращается через секунду после остановки, при прокрутке в обратную сторону или в начале страницы", true));
         l.add(SettingItem.toggle("open_tabs_first", "Открывать с панели вкладок", "При запуске браузера сначала показывать панель вкладок", true));
         l.add(SettingItem.action("pin_shortcut", "Ярлык на рабочий стол",
                 "Отдельный значок «Браузер»: окно открывается как самостоятельное приложение со своей карточкой в недавних"));
@@ -1095,6 +1097,18 @@ public class Browser implements IPlugin, ISettingsProvider {
         private final List<Group> groups = new ArrayList<Group>();
         private int nextGroup = 1;
         private Group openGroup;
+        private TextView hub;
+        private boolean startOpen, startForNew;
+        private long pendingBm = -1;
+        private final List<View> ringViews = new ArrayList<View>();
+        private final List<Runnable> ringActions = new ArrayList<Runnable>();
+        private int ringHot = -1;
+        private final Runnable hubReturn = new Runnable() {
+            @Override public void run() {
+                scrollAccum = 0;
+                setDockHidden(false, true);
+            }
+        };
 
         BrowserView(Activity a) {
             super(a);
@@ -1194,11 +1208,13 @@ public class Browser implements IPlugin, ISettingsProvider {
             tool.addView(btnTabs, new LinearLayout.LayoutParams(dp(42), dp(40)));
             tool.addView(btnMenu, new LinearLayout.LayoutParams(dp(42), dp(52)));
 
-            dock.addView(bar, new LinearLayout.LayoutParams(-1, dp(3)));
             dock.addView(tool, new LinearLayout.LayoutParams(-1, dp(52)));
+            dock.setVisibility(View.GONE);          // нижней панели больше нет; её кнопки живут скрытыми, их состояние обновляет refreshUi
             column.addView(content, new FrameLayout.LayoutParams(-1, -1));
             column.addView(dock, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
+            column.addView(bar, new FrameLayout.LayoutParams(-1, dp(3), Gravity.TOP));
             addView(column, new FrameLayout.LayoutParams(-1, -1));
+            buildHub();
             loadGroups();
             applyFullscreen();
             try {       // своя карточка в системных «Недавних»: название и значок браузера, а не хоста
@@ -1270,6 +1286,12 @@ public class Browser implements IPlugin, ISettingsProvider {
                 final int idx = pendingProfile;
                 pendingProfile = -1;
                 if (idx >= 0 && resultCode == Activity.RESULT_OK && data != null && data.getData() != null) saveProfileImage(idx, data.getData());
+                return;
+            }
+            if (requestCode == REQ_BM_IMG) {
+                final long bmId = pendingBm;
+                pendingBm = -1;
+                if (bmId >= 0 && resultCode == Activity.RESULT_OK && data != null && data.getData() != null) saveBookmarkImage(bmId, data.getData());
                 return;
             }
             if (requestCode != REQ_FILE) return;
@@ -1465,7 +1487,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         private void applyFullscreen() {
             fullscreen = sp.getBoolean("fullscreen", false);
             FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) content.getLayoutParams();
-            lp.bottomMargin = fullscreen ? 0 : dp(55);
+            lp.bottomMargin = 0;
             content.setLayoutParams(lp);
             applyCutoutMode();
             applySysUi();
@@ -1550,22 +1572,26 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         private void setDockHidden(boolean hide, boolean animate) {
             if (!sp.getBoolean("autohide_dock", true)) hide = false;
-            if (hide && (layer != null || urlField.hasFocus())) hide = false;
+            if (hide && layer != null) hide = false;
             boolean changed = hide != dockHidden;
             dockHidden = hide;
             if (changed) dockToggleAt = SystemClock.uptimeMillis();
-            float to = hide ? dock.getHeight() : 0f;
-            dock.animate().cancel();
-            if (animate) dock.animate().translationY(to).setDuration(180).start();
-            else dock.setTranslationY(to);
-            if (!fullscreen) {
-                // вне полного экрана страница заканчивается над панелью: пока панель спрятана, страница занимает и её место
-                FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) content.getLayoutParams();
-                int want = hide ? 0 : dp(55);
-                if (lp.bottomMargin != want) {
-                    lp.bottomMargin = want;
-                    content.setLayoutParams(lp);
+            if (hub == null) return;
+            h.removeCallbacks(hubReturn);
+            hub.animate().cancel();
+            if (hide) {
+                if (animate) {
+                    hub.animate().alpha(0f).setDuration(150).withEndAction(new Runnable() {
+                        @Override public void run() { if (dockHidden) hub.setVisibility(View.INVISIBLE); }
+                    }).start();
+                } else {
+                    hub.setAlpha(0f);
+                    hub.setVisibility(View.INVISIBLE);
                 }
+            } else {
+                hub.setVisibility(View.VISIBLE);
+                if (animate) hub.animate().alpha(HUB_ALPHA).setDuration(150).start();
+                else hub.setAlpha(HUB_ALPHA);
             }
         }
 
@@ -1576,6 +1602,10 @@ public class Browser implements IPlugin, ISettingsProvider {
             scrollAccum += Math.round(dy);
             if (scrollAccum > dp(24) && !dockHidden) setDockHidden(true, true);
             else if (scrollAccum < -dp(24) && dockHidden) setDockHidden(false, true);
+            if (dockHidden) {
+                h.removeCallbacks(hubReturn);
+                h.postDelayed(hubReturn, 1000);
+            }
         }
 
         /** Возврат к началу страницы возвращает панель. Остальное решает onSwipe; сразу после смены размера страницы событие прокрутки не в счёт. */
@@ -1585,6 +1615,426 @@ public class Browser implements IPlugin, ISettingsProvider {
                 scrollAccum = 0;
                 if (dockHidden) setDockHidden(false, true);
             }
+        }
+
+        // ------------------------------------------------------------ кнопка в центре экрана: нажатие, долгое нажатие, перетаскивание
+
+        private void buildHub() {
+            hub = new TextView(act);
+            hub.setTextColor(0xFFFFFFFF);
+            hub.setTextSize(15);
+            hub.setTypeface(hub.getTypeface(), android.graphics.Typeface.BOLD);
+            hub.setGravity(Gravity.CENTER);
+            hub.setText("1");
+            hub.setBackground(round(0x55000000, 28, 0x55FFFFFF, 1));
+            hub.setAlpha(HUB_ALPHA);
+            hub.setClickable(true);
+            hub.setFocusable(true);
+            hub.setContentDescription("Вкладки");
+            hub.setTranslationX(sp.getFloat("hub_dx", 0f));
+            hub.setTranslationY(sp.getFloat("hub_dy", 0f));
+            addView(hub, new FrameLayout.LayoutParams(dp(56), dp(56), Gravity.CENTER));
+            // для экранного диктора: двойное нажатие и долгое двойное нажатие; обычные касания разбирает слушатель ниже
+            hub.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { openTabsRoot(); }
+            });
+            hub.setOnLongClickListener(new View.OnLongClickListener() {
+                @Override public boolean onLongClick(View v) {
+                    showRing();
+                    return true;
+                }
+            });
+            final float slop = ViewConfiguration.get(act).getScaledTouchSlop();
+            hub.setOnTouchListener(new View.OnTouchListener() {
+                private float downX, downY, startTx, startTy;
+                private boolean moved, ringShown, longFired;
+                private final Runnable longRun = new Runnable() {
+                    @Override public void run() {
+                        longFired = true;
+                        hub.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
+                        showRing();
+                        ringShown = layer != null;
+                    }
+                };
+
+                @Override public boolean onTouch(View v, MotionEvent e) {
+                    switch (e.getActionMasked()) {
+                        case MotionEvent.ACTION_DOWN:
+                            downX = e.getRawX();
+                            downY = e.getRawY();
+                            startTx = v.getTranslationX();
+                            startTy = v.getTranslationY();
+                            moved = false;
+                            longFired = false;
+                            ringShown = false;
+                            h.removeCallbacks(hubReturn);
+                            v.animate().cancel();
+                            v.setAlpha(1f);
+                            v.postDelayed(longRun, ViewConfiguration.getLongPressTimeout());
+                            if (v.getParent() != null) v.getParent().requestDisallowInterceptTouchEvent(true);
+                            return true;
+                        case MotionEvent.ACTION_MOVE: {
+                            if (ringShown) {
+                                ringHover(e.getRawX(), e.getRawY());
+                                return true;
+                            }
+                            float dx = e.getRawX() - downX;
+                            float dy = e.getRawY() - downY;
+                            if (!moved && !longFired && (Math.abs(dx) > slop * 2 || Math.abs(dy) > slop * 2)) {
+                                moved = true;
+                                v.removeCallbacks(longRun);
+                            }
+                            if (moved) moveHub(startTx + dx, startTy + dy);
+                            return true;
+                        }
+                        case MotionEvent.ACTION_UP:
+                            v.removeCallbacks(longRun);
+                            v.setAlpha(HUB_ALPHA);
+                            if (ringShown) ringRelease(e.getRawX(), e.getRawY());
+                            else if (moved) sp.edit().putFloat("hub_dx", v.getTranslationX()).putFloat("hub_dy", v.getTranslationY()).apply();
+                            else if (!longFired) openTabsRoot();
+                            return true;
+                        case MotionEvent.ACTION_CANCEL:
+                            v.removeCallbacks(longRun);
+                            v.setAlpha(HUB_ALPHA);
+                            return true;
+                        default:
+                            return true;
+                    }
+                }
+            });
+        }
+
+        private void moveHub(float tx, float ty) {
+            float maxX = Math.max(0f, getWidth() / 2f - dp(28));
+            float maxY = Math.max(0f, getHeight() / 2f - dp(28));
+            hub.setTranslationX(Math.max(-maxX, Math.min(maxX, tx)));
+            hub.setTranslationY(Math.max(-maxY, Math.min(maxY, ty)));
+        }
+
+        private void updateHub(Tab t) {
+            if (hub == null) return;
+            hub.setText(String.valueOf(tabs.size()));
+            hub.setContentDescription("Вкладки: открыто " + tabs.size() + ", сейчас " + (tabs.indexOf(t) + 1)
+                    + ". Долгое нажатие: кнопки управления");
+        }
+
+        private final class RingItem {
+            final String glyph, desc;
+            final boolean on;
+            final Runnable run;
+
+            RingItem(String glyph, String desc, boolean on, Runnable run) {
+                this.glyph = glyph;
+                this.desc = desc;
+                this.on = on;
+                this.run = run;
+            }
+        }
+
+        /** Полное кольцо значков без текста вокруг кнопки. Можно, не отпуская палец, довести его до значка и отпустить, или нажать значок отдельно. */
+        private void showRing() {
+            final Tab t = cur;
+            if (t == null || hub == null) return;
+            closeLayer(true);
+            ringViews.clear();
+            ringActions.clear();
+            ringHot = -1;
+            List<RingItem> items = new ArrayList<RingItem>();
+            boolean back = (t.wv != null && t.wv.canGoBack()) || (t.opener != null && tabs.contains(t.opener));
+            items.add(new RingItem("‹", "Назад", back, new Runnable() { @Override public void run() { goBackOrClose(); } }));
+            items.add(new RingItem("›", "Вперёд", t.wv != null && t.wv.canGoForward(), new Runnable() {
+                @Override public void run() { if (t.wv != null && t.wv.canGoForward()) t.wv.goForward(); }
+            }));
+            items.add(new RingItem(t.loading ? "✕" : "↻", t.loading ? "Остановить загрузку" : "Обновить страницу", true, new Runnable() {
+                @Override public void run() {
+                    if (t.wv == null) return;
+                    if (t.loading) t.wv.stopLoading(); else t.wv.reload();
+                }
+            }));
+            items.add(new RingItem("＋", "Новая вкладка", true, new Runnable() { @Override public void run() { newTabWithStart(); } }));
+            items.add(new RingItem("⌕", "Поиск, адрес и закладки", true, new Runnable() { @Override public void run() { showStart(false, true); } }));
+            items.add(new RingItem("⋮", "Меню", true, new Runnable() { @Override public void run() { showMenu(); } }));
+
+            int[] hp = new int[2];
+            int[] mp = new int[2];
+            hub.getLocationOnScreen(hp);
+            getLocationOnScreen(mp);
+            float r = dp(96);
+            float half = dp(26);
+            float cx = hp[0] - mp[0] + hub.getWidth() / 2f;
+            float cy = hp[1] - mp[1] + hub.getHeight() / 2f;
+            float pad = r + half + dp(6);
+            cx = Math.max(pad, Math.min(getWidth() - pad, cx));
+            cy = Math.max(pad, Math.min(getHeight() - pad, cy));
+
+            FrameLayout l = new FrameLayout(act);
+            l.setClickable(true);
+            l.setClipChildren(false);
+            l.setBackgroundColor(0x66000000);
+            l.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { closeLayer(true); }
+            });
+            for (int i = 0; i < items.size(); i++) {
+                final RingItem it = items.get(i);
+                double ang = -Math.PI / 2 + 2 * Math.PI * i / items.size();
+                TextView v = glyph(it.glyph, C_TEXT);
+                v.setBackground(round(0xEE202124, 26, C_TEXT2, 1));
+                v.setContentDescription(it.desc);
+                v.setAlpha(it.on ? 1f : 0.4f);
+                v.setClickable(true);
+                v.setFocusable(true);
+                v.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View x) {
+                        if (!it.on) return;
+                        closeLayer(false);
+                        it.run.run();
+                    }
+                });
+                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(52), dp(52), Gravity.TOP | Gravity.START);
+                lp.leftMargin = Math.round(cx + (float) (r * Math.cos(ang)) - half);
+                lp.topMargin = Math.round(cy + (float) (r * Math.sin(ang)) - half);
+                l.addView(v, lp);
+                ringViews.add(v);
+                ringActions.add(it.on ? it.run : null);
+            }
+            layer = l;
+            layerCancel = null;
+            addView(l, new FrameLayout.LayoutParams(-1, -1));
+            column.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+            l.announceForAccessibility("Кнопки управления браузером");
+        }
+
+        private int ringIndexAt(float rx, float ry) {
+            int best = -1;
+            float bestD = dp(38);
+            for (int i = 0; i < ringViews.size(); i++) {
+                View v = ringViews.get(i);
+                int[] p = new int[2];
+                v.getLocationOnScreen(p);
+                float d = (float) Math.hypot(rx - (p[0] + v.getWidth() / 2f), ry - (p[1] + v.getHeight() / 2f));
+                if (d < bestD) {
+                    bestD = d;
+                    best = i;
+                }
+            }
+            return best;
+        }
+
+        private void ringHover(float rx, float ry) {
+            int i = ringIndexAt(rx, ry);
+            if (i == ringHot) return;
+            if (ringHot >= 0 && ringHot < ringViews.size()) {
+                ringViews.get(ringHot).setScaleX(1f);
+                ringViews.get(ringHot).setScaleY(1f);
+            }
+            ringHot = i;
+            if (i >= 0) {
+                ringViews.get(i).setScaleX(1.25f);
+                ringViews.get(i).setScaleY(1.25f);
+                try { ringViews.get(i).performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK); } catch (Throwable ignored) { }
+            }
+        }
+
+        private void ringRelease(float rx, float ry) {
+            int i = ringIndexAt(rx, ry);
+            if (i < 0 || i >= ringActions.size()) return;       // отпустили не на значке: кольцо остаётся, значок можно нажать
+            Runnable a = ringActions.get(i);
+            if (a == null) return;
+            closeLayer(false);
+            a.run();
+        }
+
+        // ------------------------------------------------------------ стартовая страница: строка поиска и значки закладок
+
+        private void newTabWithStart() {
+            if (cur == null) return;
+            newTab(home(), cur.profile, null, true);
+            showStart(true, true);
+        }
+
+        /** Обновить стартовую страницу после смены закладки. */
+        private void afterBookmarkChange() {
+            if (cur != null) showStart(startForNew, false);
+        }
+
+        private void showStart(final boolean forNew, boolean keyboard) {
+            final Tab t = cur;
+            if (t == null) return;
+            loadBookmarks();
+            LinearLayout root = new LinearLayout(act);
+            root.setOrientation(LinearLayout.VERTICAL);
+            root.setPadding(dp(12), dp(16), dp(12), 0);
+
+            final EditText box = new EditText(act);
+            box.setSingleLine(true);
+            box.setTextColor(C_TEXT);
+            box.setHintTextColor(C_TEXT2);
+            box.setHint("Поиск или адрес");
+            box.setTextSize(17);
+            box.setSelectAllOnFocus(true);
+            box.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+            box.setImeOptions(EditorInfo.IME_ACTION_GO | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+            box.setBackground(round(C_SURFACE2, 24, 0, 0));
+            box.setPadding(dp(18), 0, dp(18), 0);
+            if (!forNew && t.url != null) box.setText(t.url);
+            box.setOnEditorActionListener(new TextView.OnEditorActionListener() {
+                @Override public boolean onEditorAction(TextView v, int actionId, KeyEvent e) {
+                    boolean go = actionId == EditorInfo.IME_ACTION_GO
+                            || (e != null && e.getKeyCode() == KeyEvent.KEYCODE_ENTER && e.getAction() == KeyEvent.ACTION_DOWN);
+                    if (!go) return false;
+                    String text = box.getText().toString();
+                    closeLayer(false);
+                    if (cur != null) navigate(cur, text);
+                    return true;
+                }
+            });
+            root.addView(box, new LinearLayout.LayoutParams(-1, dp(52)));
+
+            final int sel = bookmarkTargetProfile();
+            List<View> cells = new ArrayList<View>();
+
+            View pb = profileBadge(sel, 56);
+            pb.setClickable(true);
+            pb.setFocusable(true);
+            pb.setContentDescription("Профиль для закладок: " + profileName(sel) + ". Нажмите, чтобы выбрать другой");
+            pb.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    chooseProfile("Открывать закладки в профиле", new Pick() {
+                        @Override public void on(int idx) {
+                            bmProfile = idx;
+                            showStart(forNew, false);
+                        }
+                    });
+                }
+            });
+            cells.add(pb);
+
+            for (final Bookmark b : new ArrayList<Bookmark>(bookmarks)) {
+                View ic = bookmarkIcon(b, 56);
+                ic.setClickable(true);
+                ic.setFocusable(true);
+                ic.setContentDescription("Закладка: " + b.title + ", " + hostOf(b.url) + ", профиль " + profileName(sel));
+                ic.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        if (forNew && cur != null && bookmarkTargetProfile() == cur.profile) {
+                            closeLayer(false);
+                            navigate(cur, b.url);         // новая вкладка сразу открывает закладку, пустой вкладки не остаётся
+                        } else {
+                            openBookmark(b, bookmarkTargetProfile(), true);
+                        }
+                    }
+                });
+                ic.setOnLongClickListener(new View.OnLongClickListener() {
+                    @Override public boolean onLongClick(View v) {
+                        startForNew = forNew;
+                        showBookmarkMenu(b);
+                        return true;
+                    }
+                });
+                cells.add(ic);
+            }
+
+            TextView plus = glyph("⭐", C_TEXT);
+            plus.setBackground(round(C_SURFACE2, 28, 0, 0));
+            plus.setClickable(true);
+            plus.setFocusable(true);
+            plus.setContentDescription("Добавить текущую страницу в закладки");
+            plus.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    addBookmark(cur);
+                    showStart(forNew, false);
+                }
+            });
+            cells.add(plus);
+
+            ScrollView sv = new ScrollView(act);
+            LinearLayout grid = new LinearLayout(act);
+            grid.setOrientation(LinearLayout.VERTICAL);
+            grid.setPadding(0, dp(16), 0, dp(24));
+            sv.addView(grid, new ViewGroup.LayoutParams(-1, -2));
+            final int cols = 4;
+            LinearLayout row = null;
+            for (int i = 0; i < cells.size(); i++) {
+                if (i % cols == 0) {
+                    row = new LinearLayout(act);
+                    row.setOrientation(LinearLayout.HORIZONTAL);
+                    grid.addView(row, new LinearLayout.LayoutParams(-1, -2));
+                }
+                FrameLayout cell = new FrameLayout(act);
+                cell.addView(cells.get(i), new FrameLayout.LayoutParams(dp(56), dp(56), Gravity.CENTER));
+                row.addView(cell, new LinearLayout.LayoutParams(0, dp(76), 1f));
+            }
+            while (row != null && row.getChildCount() < cols) row.addView(new View(act), new LinearLayout.LayoutParams(0, dp(76), 1f));
+            root.addView(sv, new LinearLayout.LayoutParams(-1, 0, 1f));
+
+            showLayer(root, true, null, "Поиск и закладки");
+            startOpen = true;
+            startForNew = forNew;
+            if (keyboard) {
+                box.requestFocus();
+                box.postDelayed(new Runnable() {
+                    @Override public void run() {
+                        try {
+                            ((InputMethodManager) act.getSystemService(Context.INPUT_METHOD_SERVICE)).showSoftInput(box, InputMethodManager.SHOW_IMPLICIT);
+                        } catch (Throwable ignored) { }
+                    }
+                }, 200);
+            }
+        }
+
+        /** Своя картинка для значка закладки: квадрат из середины выбранной картинки. */
+        private void saveBookmarkImage(final long id, final Uri uri) {
+            loadBookmarks();
+            Bookmark found = null;
+            for (Bookmark x : bookmarks) if (x.id == id) found = x;
+            if (found == null) return;
+            final Bookmark b = found;
+            try {
+                pool.execute(new Runnable() {
+                    @Override public void run() {
+                        try {
+                            InputStream in = act.getContentResolver().openInputStream(uri);
+                            byte[] data;
+                            try {
+                                data = Net.readAll(in, 12 * 1024 * 1024);
+                            } finally {
+                                if (in != null) in.close();
+                            }
+                            BitmapFactory.Options bo = new BitmapFactory.Options();
+                            bo.inJustDecodeBounds = true;
+                            BitmapFactory.decodeByteArray(data, 0, data.length, bo);
+                            BitmapFactory.Options o = new BitmapFactory.Options();
+                            o.inSampleSize = 1;
+                            while (Math.max(bo.outWidth, bo.outHeight) / (o.inSampleSize * 2) >= 256) o.inSampleSize *= 2;
+                            Bitmap src = BitmapFactory.decodeByteArray(data, 0, data.length, o);
+                            if (src == null) throw new IOException("не картинка");
+                            int side = Math.min(src.getWidth(), src.getHeight());
+                            Bitmap sq = Bitmap.createBitmap(src, (src.getWidth() - side) / 2, (src.getHeight() - side) / 2, side, side);
+                            final Bitmap fin = Bitmap.createScaledBitmap(sq, 128, 128, true);
+                            OutputStream os = new FileOutputStream(bookmarkIconFile(b));
+                            try { fin.compress(Bitmap.CompressFormat.PNG, 90, os); } finally { os.close(); }
+                            h.post(new Runnable() {
+                                @Override public void run() {
+                                    if (closed) return;
+                                    b.icon = fin;
+                                    b.iconTried = true;
+                                    toast("Значок закладки заменён");
+                                    afterBookmarkChange();
+                                }
+                            });
+                        } catch (Throwable ex) {
+                            h.post(new Runnable() {
+                                @Override public void run() {
+                                    if (closed) return;
+                                    toast("Не удалось взять эту картинку");
+                                    afterBookmarkChange();
+                                }
+                            });
+                        }
+                    }
+                });
+            } catch (Throwable ignored) { }
         }
 
         // ------------------------------------------------------------ группы, снимки и значки сайтов (хранятся на диске)
@@ -2847,6 +3297,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             btnTabs.setText(String.valueOf(tabs.size()));
             btnTabs.setContentDescription("Вкладки: открыто " + tabs.size() + ", сейчас " + (tabs.indexOf(t) + 1)
                     + ", профиль " + profileName(t.profile));
+            updateHub(t);
         }
 
         private void setEnabledLook(TextView b, boolean on) {
@@ -3198,6 +3649,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             removeView(layer);
             layer = null;
             tabsPanel = false;
+            startOpen = false;
             Runnable c = layerCancel;
             layerCancel = null;
             column.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
@@ -3313,9 +3765,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 applyUserAgent(t);
                 if (t.wv != null) t.wv.reload();
             } });
-            if (!t.menu.isEmpty()) {
-                addG(items, "scripts", "📜", "Команды скриптов: " + t.menu.size(), new Runnable() { @Override public void run() { showScriptCommands(t); } });
-            }
+            addG(items, "scripts", "📜", "Скрипты и их настройки", new Runnable() { @Override public void run() { showScripts(t); } });
             addG(items, "profiles", "🎭", "Значки профилей…", new Runnable() { @Override public void run() { showProfileList(); } });
             addG(items, "fullscreen", "⛶", fullscreen ? "Выйти из полноэкранного режима" : "Полноэкранный режим", new Runnable() { @Override public void run() {
                 sp.edit().putBoolean("fullscreen", !sp.getBoolean("fullscreen", false)).apply();
@@ -3615,6 +4065,113 @@ public class Browser implements IPlugin, ISettingsProvider {
             actions.add(action);
         }
 
+        private boolean scriptsDirty;
+
+        private View switchRow(String text, boolean on, boolean big, int indentDp, android.widget.CompoundButton.OnCheckedChangeListener l) {
+            LinearLayout row = new LinearLayout(act);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(4 + indentDp), dp(6), dp(4), dp(6));
+            TextView tv = label(text, big ? 17 : 15, C_TEXT, big);
+            row.addView(tv, new LinearLayout.LayoutParams(0, -2, 1f));
+            final android.widget.Switch sw = new android.widget.Switch(act);
+            sw.setChecked(on);
+            sw.setContentDescription(text);
+            sw.setOnCheckedChangeListener(l);
+            row.addView(sw, new LinearLayout.LayoutParams(-2, -2));
+            row.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { sw.toggle(); }
+            });
+            return row;
+        }
+
+        private void pushScriptValue(Tab t, UserScript s, String key, String oldJ, String newJ) {
+            values().edit().putString(s.id() + "\t" + key, newJ).apply();
+            for (Injected inj : new ArrayList<Injected>(t.injected.values())) {
+                if (inj.script.fileName.equals(s.fileName)) broadcastValue(t, inj, key, oldJ, newJ);
+            }
+            scriptsDirty = true;
+        }
+
+        /** Все скрипты с переключателями; под каждым его команды и сохранённые настройки (булевы значения). Изменения применяются обновлением страницы при закрытии. */
+        private void showScripts(final Tab t) {
+            scriptsDirty = false;
+            ScrollView sv = new ScrollView(act);
+            LinearLayout col = new LinearLayout(act);
+            col.setOrientation(LinearLayout.VERTICAL);
+            col.setPadding(dp(14), dp(14), dp(14), dp(28));
+            sv.addView(col, new ViewGroup.LayoutParams(-1, -2));
+            col.addView(panelTitle("Скрипты и их настройки"));
+            List<UserScript> scripts = ScriptStore.list();
+            if (scripts.isEmpty()) {
+                col.addView(label("Скриптов нет. Папка: " + ScriptStore.dir().getPath(), 15, C_TEXT2, false));
+            }
+            java.util.Map<String, ?> all = values().getAll();
+            for (final UserScript s : scripts) {
+                col.addView(switchRow(s.name + (s.version.length() > 0 ? " " + s.version : ""),
+                        sp.getBoolean("script_on:" + s.fileName, true), true, 0,
+                        new android.widget.CompoundButton.OnCheckedChangeListener() {
+                            @Override public void onCheckedChanged(android.widget.CompoundButton b, boolean on) {
+                                sp.edit().putBoolean("script_on:" + s.fileName, on).apply();
+                                scriptsDirty = true;
+                            }
+                        }));
+                for (final MenuCmd m : new ArrayList<MenuCmd>(t.menu)) {
+                    if (!m.inj.script.fileName.equals(s.fileName)) continue;
+                    TextView cmd = label("▶  " + m.name, 15, C_ACCENT, false);
+                    cmd.setPadding(dp(22), dp(8), dp(4), dp(8));
+                    cmd.setClickable(true);
+                    cmd.setOnClickListener(new View.OnClickListener() {
+                        @Override public void onClick(View v) {
+                            if (t.wv != null) t.wv.evaluateJavascript("try{window['" + m.inj.disp + "'].m(" + m.id + ")}catch(e){}", null);
+                        }
+                    });
+                    col.addView(cmd);
+                }
+                String prefix = s.id() + "\t";
+                for (java.util.Map.Entry<String, ?> e : all.entrySet()) {
+                    if (!e.getKey().startsWith(prefix) || !(e.getValue() instanceof String)) continue;
+                    final String key = e.getKey().substring(prefix.length());
+                    final String json = (String) e.getValue();
+                    if ("true".equals(json) || "false".equals(json)) {
+                        col.addView(switchRow(key, "true".equals(json), false, 18,
+                                new android.widget.CompoundButton.OnCheckedChangeListener() {
+                                    @Override public void onCheckedChanged(android.widget.CompoundButton b, boolean on) {
+                                        pushScriptValue(t, s, key, null, on ? "true" : "false");
+                                    }
+                                }));
+                    } else if (json.startsWith("\u007b")) {
+                        try {
+                            final JSONObject o = new JSONObject(json);
+                            java.util.Iterator<String> it = o.keys();
+                            while (it.hasNext()) {
+                                final String f = it.next();
+                                if (!(o.get(f) instanceof Boolean)) continue;
+                                col.addView(switchRow(f, o.getBoolean(f), false, 18,
+                                        new android.widget.CompoundButton.OnCheckedChangeListener() {
+                                            @Override public void onCheckedChanged(android.widget.CompoundButton b, boolean on) {
+                                                try {
+                                                    String before = o.toString();
+                                                    o.put(f, on);
+                                                    pushScriptValue(t, s, key, before, o.toString());
+                                                } catch (JSONException ignored) { }
+                                            }
+                                        }));
+                            }
+                        } catch (JSONException ignored) { }
+                    }
+                }
+            }
+            showLayer(sv, true, new Runnable() {
+                @Override public void run() {
+                    if (scriptsDirty && t.wv != null) {
+                        scriptsDirty = false;
+                        t.wv.reload();
+                    }
+                }
+            }, "Скрипты и их настройки");
+        }
+
         private void showScriptCommands(final Tab t) {
             List<View> icons = new ArrayList<View>();
             List<String> labels = new ArrayList<String>();
@@ -3865,7 +4422,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                             b.title = value.trim();
                             saveBookmarks();
                         }
-                        showTabs();
+                        afterBookmarkChange();
                     }
                 });
             } });
@@ -3873,13 +4430,29 @@ public class Browser implements IPlugin, ISettingsProvider {
                 bookmarks.remove(b);
                 bookmarks.add(0, b);
                 saveBookmarks();
-                showTabs();
+                afterBookmarkChange();
+            } });
+            add(icons, labels, actions, "🖼", "Своя картинка…", new Runnable() { @Override public void run() {
+                pendingBm = b.id;
+                try {
+                    act.startActivityForResult(new Intent(Intent.ACTION_GET_CONTENT).setType("image/*")
+                            .addCategory(Intent.CATEGORY_OPENABLE), REQ_BM_IMG);
+                } catch (Throwable e) {
+                    pendingBm = -1;
+                    toast("Нет приложения для выбора картинки");
+                }
+            } });
+            add(icons, labels, actions, "↺", "Вернуть значок сайта", new Runnable() { @Override public void run() {
+                try { bookmarkIconFile(b).delete(); } catch (Throwable ignored) { }
+                b.icon = null;
+                b.iconTried = false;
+                afterBookmarkChange();
             } });
             add(icons, labels, actions, "✕", "Удалить закладку", new Runnable() { @Override public void run() {
                 bookmarks.remove(b);
                 try { bookmarkIconFile(b).delete(); } catch (Throwable ignored) { }
                 saveBookmarks();
-                showTabs();
+                afterBookmarkChange();
             } });
             showList(b.title.length() > 0 ? b.title : hostOf(b.url), icons, labels, actions);
         }
@@ -3898,46 +4471,15 @@ public class Browser implements IPlugin, ISettingsProvider {
             LinearLayout root = new LinearLayout(act);
             root.setOrientation(LinearLayout.VERTICAL);
 
-            LinearLayout head = new LinearLayout(act);
-            head.setOrientation(LinearLayout.HORIZONTAL);
-            head.setGravity(Gravity.CENTER_VERTICAL);
-            head.setPadding(dp(8), dp(4), dp(8), dp(4));
-            if (og != null) {
-                TextView back = toolButton("‹", "Ко всем вкладкам", new View.OnClickListener() {
-                    @Override public void onClick(View v) { openTabsRoot(); }
-                });
-                head.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
-            }
             int shown = og != null ? tabsOf(og).size() : tabs.size();
-            TextView title = label(og != null ? "📁 " + og.name + "  " + shown : "▦ " + shown, 20, C_TEXT, true);
-            title.setPadding(dp(10), 0, dp(10), 0);
-            title.setSingleLine(true);
-            title.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            title.setContentDescription(og != null ? "Группа " + og.name + ": вкладок " + shown : "Вкладки: " + shown);
-            title.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-            head.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
-            TextView add = toolButton("+", "Новая вкладка", new View.OnClickListener() {
-                @Override public void onClick(View v) {
-                    chooseProfile("Новая вкладка: выберите профиль", new Pick() {
-                        @Override public void on(int idx) { newTab(home(), idx, null, true, og != null ? og.id : 0); }
-                    });
-                }
-            });
-            TextView close = toolButton("✕", "Закрыть панель вкладок", new View.OnClickListener() {
-                @Override public void onClick(View v) { closeLayer(true); }
-            });
-            head.addView(add, new LinearLayout.LayoutParams(dp(52), dp(52)));
-            head.addView(close, new LinearLayout.LayoutParams(dp(52), dp(52)));
-            root.addView(head, new LinearLayout.LayoutParams(-1, -2));
 
             if (og != null) root.addView(outOfGroupZone(og), new LinearLayout.LayoutParams(-1, -2));
-            else root.addView(bookmarkStrip(), new LinearLayout.LayoutParams(-1, -2));
 
             ScrollView sv = new ScrollView(act);
             tabScroll = sv;
             LinearLayout grid = new LinearLayout(act);
             grid.setOrientation(LinearLayout.VERTICAL);
-            grid.setPadding(dp(6), dp(4), dp(6), dp(16));
+            grid.setPadding(dp(6), dp(14), dp(6), dp(16));
             sv.addView(grid, new ViewGroup.LayoutParams(-1, -2));
             root.addView(sv, new LinearLayout.LayoutParams(-1, 0, 1f));
 
@@ -4003,10 +4545,12 @@ public class Browser implements IPlugin, ISettingsProvider {
             box.addView(profileBadge(t.profile, 48), plp);
 
             if (isGroup) {
-                TextView badge = label("📁 " + count, 15, C_TEXT, true);
+                TextView badge = label(String.valueOf(count), 16, C_TEXT, true);
                 badge.setGravity(Gravity.CENTER);
-                badge.setBackground(round(0xCC000000, 14, 0, 0));
-                badge.setPadding(dp(10), dp(4), dp(10), dp(4));
+                badge.setBackground(round(0xCC000000, 16, 0, 0));
+                badge.setPadding(dp(8), dp(2), dp(8), dp(2));
+                badge.setMinWidth(dp(32));
+                badge.setMinHeight(dp(32));
                 FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START);
                 blp.setMargins(dp(8), dp(8), 0, 0);
                 box.addView(badge, blp);
