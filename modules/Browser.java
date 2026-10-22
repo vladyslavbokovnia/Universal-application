@@ -1683,8 +1683,7 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         private Bitmap thumbOf(Tab t) {
             if (t.thumb == null) {
-                File pin = pinFile(t);
-                t.thumb = loadBitmap(pin.exists() ? pin : new File(thumbDir(), t.uid + ".jpg"));
+                t.thumb = loadBitmap(new File(thumbDir(), t.uid + ".jpg"));
             }
             return t.thumb;
         }
@@ -1789,7 +1788,6 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         private void selectTab(Tab t) {
-            endThumbEdit();
             if (cur != null && cur != t) {
                 captureThumb(cur);
                 if (cur.wv != null) content.removeView(cur.wv);
@@ -1827,7 +1825,6 @@ public class Browser implements IPlugin, ISettingsProvider {
             t.icon = null;
             try {
                 new File(thumbDir(), t.uid + ".jpg").delete();
-                pinFile(t).delete();
                 new File(thumbDir(), t.uid + "_i.png").delete();
             } catch (Throwable ignored) { }
             cleanGroups();
@@ -1893,7 +1890,6 @@ public class Browser implements IPlugin, ISettingsProvider {
         private void captureThumb(Tab t) {
             WebView w = t == null ? null : t.wv;
             if (w == null || t.blocked || w.getParent() == null || w.getWidth() <= 0 || w.getHeight() <= 0) return;
-            if (pinFile(t).exists()) return;                 // превью выбрано вручную: автоматически не заменяется
             try {
                 int tw = dp(170);
                 int th = Math.round(tw * (float) w.getHeight() / w.getWidth());
@@ -1905,83 +1901,6 @@ public class Browser implements IPlugin, ISettingsProvider {
                 t.thumb = b;
                 saveBitmapAsync(b, new File(thumbDir(), t.uid + ".jpg"), false);
             } catch (Throwable ignored) { }
-        }
-
-        // ------------------------------------------------------------ превью вкладки: выбранный вручную кадр
-
-        private View thumbFrame, thumbBar;
-
-        private File pinFile(Tab t) { return new File(thumbDir(), t.uid + "_p.jpg"); }
-
-        private void endThumbEdit() {
-            if (thumbFrame != null) { content.removeView(thumbFrame); thumbFrame = null; }
-            if (thumbBar != null) { content.removeView(thumbBar); thumbBar = null; }
-        }
-
-        /** Рамка размером с превью на карточке. Страницу масштабируют и двигают как обычно; «Сохранить» запоминает то, что в рамке. */
-        private void startThumbEdit(final Tab t) {
-            final WebView w = t.wv;
-            if (t != cur || w == null || w.getWidth() <= 0 || w.getHeight() <= 0) { toast("Откройте вкладку со страницей"); return; }
-            endThumbEdit();
-            int cardW = Math.max(dp(80), (act.getResources().getDisplayMetrics().widthPixels - dp(32)) / 2);
-            final int fw = w.getWidth();
-            final int fh = Math.min(w.getHeight(), Math.round(fw * (float) dp(190) / cardW));
-            final int top = (w.getHeight() - fh) / 2;
-            View frame = new View(act);
-            frame.setBackground(round(0, 0, C_ACCENT, 3));
-            FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(fw, fh, Gravity.TOP | Gravity.START);
-            flp.topMargin = top;
-            content.addView(frame, flp);
-            thumbFrame = frame;
-
-            LinearLayout bar = new LinearLayout(act);
-            bar.setOrientation(LinearLayout.HORIZONTAL);
-            bar.setGravity(Gravity.CENTER_VERTICAL);
-            bar.setBackground(round(0xE6202124, 24, C_SURFACE2, 1));
-            bar.setPadding(dp(6), dp(4), dp(6), dp(4));
-            bar.addView(thumbButton("✔", "Сохранить превью", new Runnable() { @Override public void run() {
-                try {
-                    int tw = dp(240);
-                    int th = Math.round(tw * (float) fh / fw);
-                    Bitmap b = Bitmap.createBitmap(tw, th, Bitmap.Config.RGB_565);
-                    Canvas c = new Canvas(b);
-                    float sc = (float) tw / fw;
-                    c.scale(sc, sc);
-                    c.translate(0, -top);
-                    w.draw(c);
-                    t.thumb = b;
-                    saveBitmapAsync(b, pinFile(t), false);
-                    toast("Превью сохранено");
-                } catch (Throwable e) {
-                    toast("Не удалось сохранить превью");
-                }
-                endThumbEdit();
-            } }));
-            bar.addView(thumbButton("↺", "Снова выбирать кадр автоматически", new Runnable() { @Override public void run() {
-                try { pinFile(t).delete(); } catch (Throwable ignored) { }
-                t.thumb = null;
-                captureThumb(t);
-                toast("Превью снова автоматическое");
-                endThumbEdit();
-            } }));
-            bar.addView(thumbButton("✕", "Отмена", new Runnable() { @Override public void run() { endThumbEdit(); } }));
-            FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-            blp.topMargin = dp(10);
-            content.addView(bar, blp);
-            thumbBar = bar;
-            toast("Масштабируйте и сдвиньте страницу, чтобы нужный момент попал в рамку, затем ✔");
-        }
-
-        private View thumbButton(String glyph, final String desc, final Runnable action) {
-            TextView b = toolButton(glyph, desc, new View.OnClickListener() {
-                @Override public void onClick(View v) { action.run(); }
-            });
-            b.setTextSize(22);
-            b.setOnLongClickListener(new View.OnLongClickListener() {
-                @Override public boolean onLongClick(View v) { toast(desc); return true; }
-            });
-            b.setLayoutParams(new LinearLayout.LayoutParams(dp(52), dp(44)));
-            return b;
         }
 
         private void saveTabs() {
@@ -3247,7 +3166,6 @@ public class Browser implements IPlugin, ISettingsProvider {
         // ------------------------------------------------------------ панели поверх страницы (не всплывающие окна)
 
         private void showLayer(View body, boolean full, Runnable cancel, String announce) {
-            endThumbEdit();
             closeLayer(true);
             setDockHidden(false, false);
             FrameLayout l = new FrameLayout(act);
@@ -3403,7 +3321,6 @@ public class Browser implements IPlugin, ISettingsProvider {
                 sp.edit().putBoolean("fullscreen", !sp.getBoolean("fullscreen", false)).apply();
                 applyFullscreen();
             } });
-            addG(items, "thumb", "🖼", "Превью вкладки: выбрать кадр", new Runnable() { @Override public void run() { startThumbEdit(t); } });
             addG(items, "bookmark", "⭐", "Добавить в закладки", new Runnable() { @Override public void run() { addBookmark(t); } });
             addG(items, "copy", "🔗", "Скопировать ссылку", new Runnable() { @Override public void run() {
                 try {
@@ -3467,7 +3384,6 @@ public class Browser implements IPlugin, ISettingsProvider {
          * скрывает пункт или возвращает его. Порядок и скрытые пункты хранятся отдельно для каждого меню (scope).
          */
         private void showIconGrid(String scope, String title, List<GridItem> items) {
-            endThumbEdit();
             closeLayer(true);
             setDockHidden(false, false);
             final GridPanel gp = new GridPanel(scope, title, items);
