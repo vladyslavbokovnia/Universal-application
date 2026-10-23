@@ -3774,6 +3774,19 @@ public class Browser implements IPlugin, ISettingsProvider {
             addView(l, new FrameLayout.LayoutParams(-1, -1));
             column.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
             if (announce != null) l.announceForAccessibility(announce);
+            if (full) {
+                // панель вкладок и другие полноэкранные слои: клавиатура от адресной строки или поля на странице не должна оставаться
+                try {
+                    if (urlField != null && urlField.hasFocus()) urlField.clearFocus();
+                    if (cur != null && cur.wv != null) cur.wv.clearFocus();
+                    l.setFocusableInTouchMode(true);
+                    l.requestFocus();
+                } catch (Throwable ignored) { }
+                hideKeyboard();
+                h.postDelayed(new Runnable() {
+                    @Override public void run() { if (layer != null) hideKeyboard(); }
+                }, 150);
+            }
         }
 
         private void closeLayer(boolean runCancel) {
@@ -4597,15 +4610,17 @@ public class Browser implements IPlugin, ISettingsProvider {
 
             int shown = og != null ? tabsOf(og).size() : tabs.size();
 
-            if (og != null) root.addView(outOfGroupZone(og), new LinearLayout.LayoutParams(-1, -2));
-
             ScrollView sv = new ScrollView(act);
             tabScroll = sv;
             LinearLayout grid = new LinearLayout(act);
             grid.setOrientation(LinearLayout.VERTICAL);
             grid.setPadding(dp(6), dp(14), dp(6), dp(16));
             sv.addView(grid, new ViewGroup.LayoutParams(-1, -2));
-            root.addView(sv, new LinearLayout.LayoutParams(-1, 0, 1f));
+            // Зона сброса лежит поверх списка внизу: всегда видима (прозрачна), иначе скрытый вид не получает события перетаскивания
+            FrameLayout listBox = new FrameLayout(act);
+            listBox.addView(sv, new FrameLayout.LayoutParams(-1, -1));
+            listBox.addView(dragZone(og), new FrameLayout.LayoutParams(-1, dp(72), Gravity.BOTTOM));
+            root.addView(listBox, new LinearLayout.LayoutParams(-1, 0, 1f));
 
             List<Object> items = new ArrayList<Object>();
             if (og != null) {
@@ -4669,14 +4684,21 @@ public class Browser implements IPlugin, ISettingsProvider {
             box.addView(profileBadge(t.profile, 48), plp);
 
             if (isGroup) {
-                TextView badge = label(String.valueOf(count), 16, C_TEXT, true);
+                TextView badge = label(String.valueOf(count), 24, C_TEXT, true);
                 badge.setGravity(Gravity.CENTER);
-                badge.setBackground(round(0xCC000000, 16, 0, 0));
-                badge.setPadding(dp(8), dp(2), dp(8), dp(2));
-                badge.setMinWidth(dp(32));
-                badge.setMinHeight(dp(32));
+                // фон не плашкой, а мягким пятном: тёмное в центре, к краям растворяется
+                GradientDrawable fade = new GradientDrawable();
+                fade.setGradientType(GradientDrawable.RADIAL_GRADIENT);
+                fade.setGradientRadius(dp(34));
+                fade.setGradientCenter(0.5f, 0.5f);
+                fade.setColors(new int[] { 0xB3000000, 0x99000000, 0x00000000 });
+                badge.setBackground(fade);
+                badge.setPadding(dp(12), dp(4), dp(12), dp(4));
+                badge.setMinWidth(dp(68));
+                badge.setMinHeight(dp(68));
+                badge.setShadowLayer(dp(3), 0, 0, 0xFF000000);
                 FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START);
-                blp.setMargins(dp(8), dp(8), 0, 0);
+                blp.setMargins(0, 0, 0, 0);
                 box.addView(badge, blp);
             }
             return box;
@@ -4816,6 +4838,22 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         private GradientDrawable dropHint() { return round(0x334FC3F7, 12, C_ACCENT, 4); }
 
+        /** Подсветка вставки у левого/правого края карточки: «встанет сюда». */
+        private GradientDrawable edgeHint(boolean left) {
+            GradientDrawable g = new GradientDrawable(left ? GradientDrawable.Orientation.LEFT_RIGHT : GradientDrawable.Orientation.RIGHT_LEFT,
+                    new int[] { 0xCC4FC3F7, 0x004FC3F7 });
+            g.setCornerRadius(dp(12));
+            return g;
+        }
+
+        /** -1: левый край (поставить перед), 1: правый (после), 0: середина (в группу). */
+        private int dropZone(View v, DragEvent e) {
+            float w = v.getWidth();
+            if (w <= 0) return 0;
+            float f = e.getX() / w;
+            return f < 0.28f ? -1 : (f > 0.72f ? 1 : 0);
+        }
+
         private void attachDrop(final FrameLayout box, final Object item, final Runnable menu) {
             box.setOnDragListener(new View.OnDragListener() {
                 @Override public boolean onDrag(View v, DragEvent e) {
@@ -4825,19 +4863,23 @@ public class Browser implements IPlugin, ISettingsProvider {
                             if (d == item) v.setAlpha(0.35f);
                             return d != null;
                         case DragEvent.ACTION_DRAG_ENTERED:
-                            if (d != item) box.setForeground(dropHint());
+                        case DragEvent.ACTION_DRAG_LOCATION: {
+                            if (d != item) {
+                                int z = dropZone(v, e);
+                                box.setForeground(z == 0 ? dropHint() : edgeHint(z < 0));
+                            }
+                            if (e.getAction() == DragEvent.ACTION_DRAG_LOCATION) dragAutoScroll(v, e);
                             return true;
+                        }
                         case DragEvent.ACTION_DRAG_EXITED:
                             box.setForeground(null);
-                            return true;
-                        case DragEvent.ACTION_DRAG_LOCATION:
-                            dragAutoScroll(v, e);
                             return true;
                         case DragEvent.ACTION_DROP: {
                             box.setForeground(null);
                             final Object dropped = d;
+                            final int zone = dropZone(v, e);
                             h.post(new Runnable() {
-                                @Override public void run() { handleDrop(dropped, item, menu); }
+                                @Override public void run() { handleDrop(dropped, item, zone, menu); }
                             });
                             return true;
                         }
@@ -4854,43 +4896,53 @@ public class Browser implements IPlugin, ISettingsProvider {
             });
         }
 
-        /** Зона «вынуть из группы»: появляется в открытой группе только пока тянут вкладку. */
-        private View outOfGroupZone(final Group g) {
-            final TextView z = label("↩  Перетащите сюда, чтобы вынуть из группы", 15, C_TEXT, true);
+        /**
+         * Зона внизу списка. В общем списке принимает группу и расформировывает её (вкладки остаются на месте),
+         * внутри группы принимает вкладку и вынимает её из группы. Всегда «видима», просто прозрачна, пока ничего не тянут.
+         */
+        private View dragZone(final Group og) {
+            final boolean inGroup = og != null;
+            final TextView z = label(inGroup ? "↩  Вынуть из группы" : "⊟  Расформировать группу", 16, C_TEXT, true);
             z.setGravity(Gravity.CENTER);
             z.setPadding(dp(12), dp(14), dp(12), dp(14));
-            z.setBackground(round(C_SURFACE2, 10, C_ACCENT, 2));
-            z.setVisibility(View.GONE);
+            z.setBackground(round(0xE61E2430, 14, C_ACCENT, 2));
+            z.setAlpha(0f);
             z.setOnDragListener(new View.OnDragListener() {
                 @Override public boolean onDrag(View v, DragEvent e) {
                     Object d = e.getLocalState();
+                    boolean ok = inGroup ? d instanceof Tab : d instanceof Group;
                     switch (e.getAction()) {
                         case DragEvent.ACTION_DRAG_STARTED:
-                            if (!(d instanceof Tab)) return false;
-                            z.setVisibility(View.VISIBLE);
+                            if (!ok) return false;
+                            z.setAlpha(0.92f);
                             return true;
                         case DragEvent.ACTION_DRAG_ENTERED:
-                            z.setBackground(round(0x554FC3F7, 10, C_ACCENT, 3));
+                            z.setBackground(round(0xFF2B4A63, 14, C_ACCENT, 3));
                             return true;
                         case DragEvent.ACTION_DRAG_EXITED:
-                            z.setBackground(round(C_SURFACE2, 10, C_ACCENT, 2));
+                            z.setBackground(round(0xE61E2430, 14, C_ACCENT, 2));
                             return true;
                         case DragEvent.ACTION_DROP: {
                             final Object dropped = d;
                             h.post(new Runnable() {
                                 @Override public void run() {
-                                    if (!(dropped instanceof Tab)) return;
-                                    Tab dt = (Tab) dropped;
-                                    Tab anchor = lastOfGroup(g.id, dt);
-                                    dt.group = 0;
-                                    if (anchor != null) moveAfter(dt, anchor);
-                                    finishDrop();
+                                    if (inGroup && dropped instanceof Tab) {
+                                        Tab dt = (Tab) dropped;
+                                        Tab anchor = lastOfGroup(og.id, dt);
+                                        dt.group = 0;
+                                        if (anchor != null) moveAfter(dt, anchor);
+                                        finishDrop();
+                                    } else if (!inGroup && dropped instanceof Group) {
+                                        for (Tab x : tabsOf((Group) dropped)) x.group = 0;
+                                        finishDrop();
+                                    }
                                 }
                             });
                             return true;
                         }
                         case DragEvent.ACTION_DRAG_ENDED:
-                            z.setVisibility(View.GONE);
+                            z.setAlpha(0f);
+                            z.setBackground(round(0xE61E2430, 14, C_ACCENT, 2));
                             return true;
                         default:
                             return true;
@@ -4930,6 +4982,38 @@ public class Browser implements IPlugin, ISettingsProvider {
             h.removeCallbacks(dragScroller);
         }
 
+        /** Вкладки каждой группы идут подряд на месте своей первой вкладки — так их и рисует панель. */
+        private void compactGroups() {
+            List<Tab> out = new ArrayList<Tab>();
+            Set<Integer> done = new HashSet<Integer>();
+            for (Tab t : tabs) {
+                if (t.group == 0) out.add(t);
+                else if (done.add(Integer.valueOf(t.group))) {
+                    for (Tab m : tabs) if (m.group == t.group) out.add(m);
+                }
+            }
+            tabs.clear();
+            tabs.addAll(out);
+        }
+
+        private List<Tab> unitTabs(Object o) {
+            if (o instanceof Group) return tabsOf((Group) o);
+            List<Tab> l = new ArrayList<Tab>();
+            if (o instanceof Tab) l.add((Tab) o);
+            return l;
+        }
+
+        /** Переставить вкладку или группу целиком перед/после другой вкладки или группы. */
+        private void moveUnit(Object d, Object target, boolean after) {
+            List<Tab> moving = unitTabs(d);
+            List<Tab> tt = unitTabs(target);
+            if (moving.isEmpty() || tt.isEmpty()) return;
+            tabs.removeAll(moving);
+            int idx = after ? tabs.indexOf(tt.get(tt.size() - 1)) + 1 : tabs.indexOf(tt.get(0));
+            if (idx < 0) idx = tabs.size();
+            tabs.addAll(idx, moving);
+        }
+
         private Tab lastOfGroup(int gid, Tab exclude) {
             Tab last = null;
             for (Tab t : tabs) if (t.group == gid && t != exclude) last = t;
@@ -4953,18 +5037,24 @@ public class Browser implements IPlugin, ISettingsProvider {
          * группа на группу сливается. Внутри группы: вкладка встаёт на место той, на которую её бросили; бросить на первую
          * значит сделать её обложкой группы (по первой вкладке рисуется карточка группы).
          */
-        private void handleDrop(Object d, Object target, Runnable menu) {
+        private void handleDrop(Object d, Object target, int zone, Runnable menu) {
             if (closed || d == null) return;
             if (d == target) { menu.run(); return; }
             if (openGroup != null) {
                 if (d instanceof Tab && target instanceof Tab) {
                     Tab dt = (Tab) d, tt = (Tab) target;
-                    boolean after = tabs.indexOf(dt) < tabs.indexOf(tt);
+                    boolean after = zone > 0 || (zone == 0 && tabs.indexOf(dt) < tabs.indexOf(tt));
                     tabs.remove(dt);
                     int ti = tabs.indexOf(tt);
                     tabs.add(after ? ti + 1 : ti, dt);
                     finishDrop();
                 }
+                return;
+            }
+            if (zone != 0) {            // край карточки: поменять местами / переставить вкладку или группу целиком
+                compactGroups();
+                moveUnit(d, target, zone > 0);
+                finishDrop();
                 return;
             }
             if (d instanceof Tab) {
