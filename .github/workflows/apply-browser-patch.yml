@@ -1,76 +1,105 @@
 name: Apply browser patch
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "ci/patches/**"
   workflow_dispatch:
 
 permissions:
   contents: write
   actions: write
 
+concurrency:
+  group: apply-browser-patch-main
+  cancel-in-progress: false
+
 jobs:
   patch:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up JDK 17
-      uses: actions/setup-java@v4
-      with:
-        java-version: "17"
-        distribution: "temurin"
-        cache: gradle
-    - name: Apply patches
-      shell: bash
-      run: |
-        set -o pipefail
-        : > /tmp/patch.log
-        python3 ci/patches/browser_hub.py modules/Browser.java 2>&1 | tee -a /tmp/patch.log
-        python3 ci/patches/browser_scripts.py modules/Browser.java 2>&1 | tee -a /tmp/patch.log
-    - name: Install persistent debug signing key
-      shell: bash
-      run: |
-        set -euo pipefail
-        mkdir -p ~/.android
-        base64 -d ci/debug.keystore.b64 > ~/.android/debug.keystore
-    - name: Build host
-      shell: bash
-      run: |
-        set -o pipefail
-        chmod +x gradlew
-        ./gradlew assembleDebug 2>&1 | tail -n 120 | tee -a /tmp/patch.log
-    - name: Compile patched Browser.java
-      shell: bash
-      run: |
-        set -o pipefail
-        ANDROID_JAR="$(find "$ANDROID_SDK_ROOT/platforms" -name android.jar | sort | tail -n 1)"
-        APP_CLASSES="app/build/tmp/kotlin-classes/debug:app/build/intermediates/javac/debug/compileDebugJavaWithJavac/classes:app/build/intermediates/javac/debug/classes"
-        test -f "$ANDROID_JAR"
-        mkdir -p /tmp/classes
-        javac -encoding UTF-8 -source 8 -target 8 -d /tmp/classes -cp "$ANDROID_JAR:$APP_CLASSES" modules/Browser.java 2>&1 | tee -a /tmp/patch.log
-    - name: Commit to main and start the normal build
-      shell: bash
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: |
-        set -euo pipefail
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git add modules/Browser.java
-        git rm -q ci/patches/browser_hub.py ci/patches/browser_scripts.py
-        git commit -m "Браузер: кнопка в центре, кольцо значков, стартовая страница, экран скриптов и их настроек"
-        git pull --rebase origin main
-        git push origin HEAD:main
-        gh workflow run android.yml --ref main
-    - name: Save log to branch patch-log on failure
-      if: failure()
-      shell: bash
-      run: |
-        touch /tmp/patch.log
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git checkout -- . || true
-        git checkout -B patch-log
-        mkdir -p ci
-        cp /tmp/patch.log ci/patch-log.txt
-        git add -f ci/patch-log.txt
-        git commit -m "Browser patch failed: log"
-        git push -f origin patch-log
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: gradle
+      - name: Apply queued patches
+        id: apply
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > /tmp/patch.log
+          mapfile -t patches < <(find ci/patches -maxdepth 1 -type f -name '*.patch' -print | sort)
+          if [ "${#patches[@]}" -eq 0 ]; then
+            echo "No pending .patch files; nothing to apply." | tee -a /tmp/patch.log
+            echo "has_patches=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "has_patches=true" >> "$GITHUB_OUTPUT"
+          for patch in "${patches[@]}"; do
+            echo "Checking $patch" | tee -a /tmp/patch.log
+            git apply --check "$patch" 2>&1 | tee -a /tmp/patch.log
+            echo "Applying $patch" | tee -a /tmp/patch.log
+            git apply "$patch" 2>&1 | tee -a /tmp/patch.log
+          done
+          printf '%s\n' "${patches[@]}" > /tmp/applied-patches.txt
+      - name: Install persistent debug signing key
+        if: steps.apply.outputs.has_patches == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.android
+          base64 -d ci/debug.keystore.b64 > ~/.android/debug.keystore
+      - name: Build host
+        if: steps.apply.outputs.has_patches == 'true'
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x gradlew
+          ./gradlew assembleDebug 2>&1 | tee -a /tmp/patch.log
+      - name: Compile patched Browser.java
+        if: steps.apply.outputs.has_patches == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ANDROID_JAR="$(find "$ANDROID_SDK_ROOT/platforms" -name android.jar | sort | tail -n 1)"
+          APP_CLASSES="app/build/tmp/kotlin-classes/debug:app/build/intermediates/javac/debug/compileDebugJavaWithJavac/classes:app/build/intermediates/javac/debug/classes"
+          test -f "$ANDROID_JAR"
+          mkdir -p /tmp/classes
+          javac -encoding UTF-8 -source 8 -target 8 -d /tmp/classes -cp "$ANDROID_JAR:$APP_CLASSES" modules/Browser.java 2>&1 | tee -a /tmp/patch.log
+      - name: Commit patched browser and start normal build
+        if: steps.apply.outputs.has_patches == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add modules/Browser.java
+          while IFS= read -r patch; do
+            [ -n "$patch" ] && git rm -q -- "$patch"
+          done < /tmp/applied-patches.txt
+          git commit -m "Браузер: применить подготовленные патчи"
+          git pull --rebase origin main
+          git push origin HEAD:main
+          gh workflow run android.yml --ref main
+      - name: Save log to branch patch-log on failure
+        if: failure()
+        shell: bash
+        run: |
+          touch /tmp/patch.log
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -- . || true
+          git checkout -B patch-log
+          mkdir -p ci
+          cp /tmp/patch.log ci/patch-log.txt
+          git add -f ci/patch-log.txt
+          git commit -m "Browser patch failed: log"
+          git push -f origin patch-log
