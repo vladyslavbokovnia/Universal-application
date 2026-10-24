@@ -1947,13 +1947,15 @@ public class Browser implements IPlugin, ISettingsProvider {
             private final Paint bp = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
             private final Paint tint = new Paint(Paint.ANTI_ALIAS_FLAG);
             private final Paint edge = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint frost = new Paint(Paint.ANTI_ALIAS_FLAG);
             private final Path clip = new Path();
             private final android.graphics.Rect src = new android.graphics.Rect();
 
             GlassDrawable(View v, Bitmap bmp) {
                 this.v = v;
                 this.bmp = bmp;
-                tint.setColor(0x33101216);
+                tint.setColor(0x12000000);
+                frost.setColor(0x22FFFFFF);          // лёгкий иней: стекло светлее подложки
                 edge.setStyle(Paint.Style.STROKE);
                 edge.setStrokeWidth(dp(1) * 1.5f);
                 edge.setColor(0x80FFFFFF);
@@ -1974,6 +1976,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 c.clipPath(clip);
                 c.drawBitmap(bmp, src, b, bp);
                 c.drawCircle(b.exactCenterX(), b.exactCenterY(), rad, tint);
+                c.drawCircle(b.exactCenterX(), b.exactCenterY(), rad, frost);
                 c.restore();
                 c.drawCircle(b.exactCenterX(), b.exactCenterY(), rad - edge.getStrokeWidth() / 2f, edge);
             }
@@ -4963,6 +4966,8 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         /** Обозначение группы: по контуру снимка столько чёрточек, сколько вкладок; чёрточка показанной вкладки крупнее и светлее. */
+        private static final int GROUP_BAND = 11;
+
         private final class TickRing extends View {
             private final int count, active;
             private final Paint under = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -4984,11 +4989,11 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
 
             @Override protected void onDraw(Canvas c) {
-                float inset = dp(5);
+                float inset = dp(GROUP_BAND) / 2f;
                 rect.set(inset, inset, getWidth() - inset, getHeight() - inset);
                 if (rect.width() <= 0 || rect.height() <= 0) return;
                 outline.reset();
-                outline.addRoundRect(rect, dp(10), dp(10), Path.Direction.CW);
+                outline.addRoundRect(rect, dp(8), dp(8), Path.Direction.CW);
                 android.graphics.PathMeasure pm = new android.graphics.PathMeasure(outline, true);
                 float len = pm.getLength();
                 float gap = count == 1 ? 0f : Math.min(dp(7), len / count * 0.4f);
@@ -5030,8 +5035,16 @@ public class Browser implements IPlugin, ISettingsProvider {
         /** Содержимое карточки; у группы его можно перерисовать на другую вкладку (pos — номер показанной вкладки с единицы, 0: без номера). */
         private void fillCard(FrameLayout box, Tab t, boolean isGroup, int count, int pos) {
             box.removeAllViews();
+            // у группы по краям полоса под чёрточки: снимок внутри, рамка вокруг него, поэтому группа крупнее обычной вкладки
+            int band = isGroup ? dp(GROUP_BAND) : 0;
+            box.setPadding(band, band, band, band);
             FrameLayout thumbBox = new FrameLayout(act);
-            thumbBox.setBackgroundColor(C_SURFACE2);
+            if (isGroup) {
+                thumbBox.setBackground(round(C_SURFACE2, 6, 0, 0));
+                thumbBox.setClipToOutline(true);
+            } else {
+                thumbBox.setBackgroundColor(C_SURFACE2);
+            }
             thumbBox.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
             Bitmap tb = thumbOf(t);
             if (tb != null) {
@@ -5053,7 +5066,11 @@ public class Browser implements IPlugin, ISettingsProvider {
             plp.setMargins(0, 0, dp(8), dp(8));
             box.addView(profileBadge(t.profile, 48), plp);
 
-            if (isGroup) box.addView(new TickRing(act, count, pos - 1), new FrameLayout.LayoutParams(-1, -1));
+            if (isGroup) {
+                FrameLayout.LayoutParams rlp = new FrameLayout.LayoutParams(-1, -1);
+                rlp.setMargins(-band, -band, -band, -band);      // кольцо занимает всю карточку, включая полосу
+                box.addView(new TickRing(act, count, pos - 1), rlp);
+            }
         }
 
         private View tabCard(final Tab t, int index, int total) {
