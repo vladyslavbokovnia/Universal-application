@@ -2,8 +2,6 @@ package im.manus.plugins;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
-import android.app.usage.NetworkStats;
-import android.app.usage.NetworkStatsManager;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
@@ -14,14 +12,11 @@ import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.RectF;
-import android.graphics.Typeface;
-import android.net.ConnectivityManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
-import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -37,7 +32,6 @@ import im.manus.universalhost.SettingItem;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Calendar;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -52,8 +46,7 @@ import java.util.Set;
  *
  * - полоса-сенсор: фон, полоса прогресса; тап — старт/пауза, горизонтальный свайп — к соседнему блоку.
  *   Ширина, высота и положение полосы настраиваются;
- * - цифры месячного мобильного трафика (ГБ) — отдельное окно: не зависят от ширины полосы, прогресса и
- *   зоны касания, не перехватывают касания, обведены тёмным контуром, поэтому видны и на светлом фоне;
+ * - цифры мобильного трафика вынесены в отдельный модуль Traffic (TrafficModule);
  * - озвучка страницы блок за блоком; блоки идут в порядке дерева приложения (как у TalkBack);
  *   режим «весь текст экрана» читает всё, что видно;
  * - во время чтения страница постоянно и медленно прокручивается (скорость в настройках);
@@ -64,7 +57,6 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
 
     private static final String PREFS = "module_AnTTS";            // настройки, которые пишет хост
     private static final long REFRESH_DEBOUNCE_MS = 200L;
-    private static final long TRAFFIC_REFRESH_MS = 2000L;
     private static final long CHUNK_MS = 1000L;                     // длина одного отрезка непрерывного жеста
     private static final int MAX_INVISIBLE_RETRIES = 20;
     private static final int SCROLL_SMOOTH = 0;
@@ -77,9 +69,6 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
     private int barWidthPercent = 100;
     private int backgroundAlpha = 82;
     private int progressAlpha = 90;
-    private int trafficStartDay = 1;
-    private int digitsCorner;
-    private int digitsSizeSp = 27;
     private boolean speakInput = true;
     private boolean extractAll;
     private boolean orderByTree = true;
@@ -92,8 +81,6 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
     private TextToSpeech tts;
     private boolean ttsReady;
     private Bar bar;
-    private Digits digits;
-    private String trafficText = "";
     private volatile boolean active;
 
     private final List<Block> blocks = new ArrayList<Block>();
@@ -127,9 +114,9 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
     // ---------------------------------------------------------------- IPlugin
 
     @Override public String getName() { return "AnTTS"; }
-    @Override public int getVersion() { return 3; }
+    @Override public int getVersion() { return 4; }
     @Override public String getDescription() {
-        return "Озвучка страницы и поля ввода, полоса прогресса, учёт мобильного трафика";
+        return "Озвучка страницы и поля ввода, полоса прогресса";
     }
     @Override public String getIconName() { return "ic_launcher"; }
 
@@ -157,11 +144,6 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
             createTts();
             bar = new Bar();
             bar.show();
-            digits = new Digits();
-            digits.show();
-            trafficText = monthlyText();
-            digits.setText(trafficText);
-            main.postDelayed(trafficTask, TRAFFIC_REFRESH_MS);
             refreshBlocks();
             main.postDelayed(raiseTask, 2000L);     // другие модули добавляют окна позже и могут оказаться поверх
         } catch (Throwable t) {
@@ -181,7 +163,6 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
         activeUtteranceId = null;
         pendingInputNode = null;
         if (bar != null) { bar.hide(); bar = null; }
-        if (digits != null) { digits.hide(); digits = null; }
         if (tts != null) {
             try { tts.stop(); } catch (Throwable ignored) { }
             try { tts.shutdown(); } catch (Throwable ignored) { }
@@ -261,19 +242,6 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
         @Override public void run() {
             if (!active) return;
             if (bar != null) bar.raise();
-            if (digits != null) digits.raise();       // цифры всегда над полосой
-        }
-    };
-
-    private final Runnable trafficTask = new Runnable() {
-        @Override public void run() {
-            if (!active || digits == null) return;
-            String t = monthlyText();
-            if (!t.equals(trafficText)) {            // не перерисовываем, если цифра не изменилась
-                trafficText = t;
-                digits.setText(t);
-            }
-            main.postDelayed(this, TRAFFIC_REFRESH_MS);
         }
     };
 
@@ -286,9 +254,6 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
         barWidthPercent = clamp(cfg.getInt("bar_width_percent", 100), 10, 100);
         backgroundAlpha = clamp(cfg.getInt("background_alpha", 82), 0, 100);
         progressAlpha = clamp(cfg.getInt("progress_alpha", 90), 10, 100);
-        trafficStartDay = clamp(cfg.getInt("traffic_start_day", 1), 1, 31);
-        digitsCorner = clamp(cfg.getInt("digits_corner", 0), 0, 5);
-        digitsSizeSp = clamp(cfg.getInt("digits_size", 27), 12, 48);
         speakInput = cfg.getBoolean("speak_input", true);
         extractAll = cfg.getInt("extract_mode", 0) == 1;
         orderByTree = cfg.getInt("order_mode", 0) == 0;
@@ -306,12 +271,6 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
         l.add(SettingItem.slider("bar_width_percent", "Ширина полосы", "%", 10, 100, 5, 100));
         l.add(SettingItem.slider("background_alpha", "Непрозрачность фона", "%", 0, 100, 5, 82));
         l.add(SettingItem.slider("progress_alpha", "Непрозрачность полосы прогресса", "%", 10, 100, 5, 90));
-        l.add(SettingItem.section("Цифры мобильного трафика"));
-        l.add(SettingItem.choice("digits_corner", "Где показывать", "",
-                Arrays.asList("Сверху по центру", "Сверху слева", "Сверху справа",
-                        "Снизу по центру", "Снизу слева", "Снизу справа"), 0));
-        l.add(SettingItem.slider("digits_size", "Размер цифр", "sp", 12, 48, 2, 27));
-        l.add(SettingItem.slider("traffic_start_day", "День начала учётного периода", "", 1, 31, 1, 1));
         l.add(SettingItem.section("Чтение"));
         l.add(SettingItem.choice("extract_mode", "Какой текст читать", "",
                 Arrays.asList("Основной текст страницы", "Весь текст экрана (как TalkBack)"), 0));
@@ -934,34 +893,6 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
         for (int i = 0; i < node.getChildCount(); i++) collectScrollables(node.getChild(i), out, depth + 1);
     }
 
-    // ---------------------------------------------------------------- мобильный трафик
-
-    private long periodStartMillis() {
-        long now = System.currentTimeMillis();
-        Calendar cycle = Calendar.getInstance();
-        cycle.setTimeInMillis(now);
-        cycle.set(Calendar.DAY_OF_MONTH, Math.min(trafficStartDay, cycle.getActualMaximum(Calendar.DAY_OF_MONTH)));
-        cycle.set(Calendar.HOUR_OF_DAY, 0);
-        cycle.set(Calendar.MINUTE, 0);
-        cycle.set(Calendar.SECOND, 0);
-        cycle.set(Calendar.MILLISECOND, 0);
-        if (now < cycle.getTimeInMillis()) cycle.add(Calendar.MONTH, -1);
-        return cycle.getTimeInMillis();
-    }
-
-    /** Мобильный трафик (приём + передача) за учётный период, ГБ; «—», если нет доступа к статистике. */
-    private String monthlyText() {
-        try {
-            NetworkStatsManager m = (NetworkStatsManager) svc.getSystemService(Context.NETWORK_STATS_SERVICE);
-            NetworkStats.Bucket b = m.querySummaryForDevice(
-                    ConnectivityManager.TYPE_MOBILE, null, periodStartMillis(), System.currentTimeMillis());
-            long bytes = Math.max(0L, b.getRxBytes()) + Math.max(0L, b.getTxBytes());
-            return String.format(Locale.getDefault(), "%.2f", bytes / 1e9);
-        } catch (Throwable t) {
-            return "\u2014";
-        }
-    }
-
     // ---------------------------------------------------------------- полоса
 
     private final class Bar {
@@ -1046,103 +977,6 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
             if (!shown) return;
             shown = false;
             try { wm.removeView(root); } catch (Throwable ignored) { }
-        }
-    }
-
-    /**
-     * Цифры трафика — отдельное окно: не зависят от ширины, высоты и положения полосы, не перехватывают
-     * касания (касания проходят в полосу или в приложение под ними).
-     */
-    private final class Digits {
-        private final WindowManager wm = (WindowManager) svc.getSystemService(Context.WINDOW_SERVICE);
-        private final OutlinedText view = new OutlinedText(svc, digitsSizeSp);
-        private WindowManager.LayoutParams lp;
-        private boolean shown;
-
-        void show() {
-            if (shown) return;
-            lp = new WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
-                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                    PixelFormat.TRANSLUCENT);
-            int vertical = digitsCorner >= 3 ? Gravity.BOTTOM : Gravity.TOP;
-            int horizontal;
-            switch (digitsCorner % 3) {
-                case 1: horizontal = Gravity.START; break;
-                case 2: horizontal = Gravity.END; break;
-                default: horizontal = Gravity.CENTER_HORIZONTAL; break;
-            }
-            lp.gravity = vertical | horizontal;
-            lp.x = (digitsCorner % 3 == 0) ? 0 : dp(8);
-            lp.y = dp(2);
-            wm.addView(view, lp);
-            shown = true;
-        }
-
-        void setText(String t) { view.setText(t); }
-
-        void raise() {
-            if (!shown || lp == null) return;
-            try {
-                wm.removeView(view);
-                wm.addView(view, lp);
-            } catch (Throwable ignored) { }
-        }
-
-        void hide() {
-            if (!shown) return;
-            shown = false;
-            try { wm.removeView(view); } catch (Throwable ignored) { }
-        }
-    }
-
-    /** Белые цифры с тёмным контуром: читаются и на светлом, и на тёмном фоне. */
-    private static final class OutlinedText extends View {
-        private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final float pad;
-        private String text = "";
-
-        OutlinedText(Context c, float sizeSp) {
-            super(c);
-            float px = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, sizeSp, c.getResources().getDisplayMetrics());
-            Typeface tf = Typeface.create("sans-serif-medium", Typeface.NORMAL);
-            fill.setTypeface(tf);
-            fill.setTextSize(px);
-            fill.setColor(Color.WHITE);
-            stroke.setTypeface(tf);
-            stroke.setTextSize(px);
-            stroke.setColor(Color.BLACK);
-            stroke.setStyle(Paint.Style.STROKE);
-            stroke.setStrokeWidth(Math.max(2f, px * 0.16f));
-            stroke.setStrokeJoin(Paint.Join.ROUND);
-            pad = stroke.getStrokeWidth();
-        }
-
-        void setText(String t) {
-            if (t == null) t = "";
-            if (t.equals(text)) return;
-            text = t;
-            requestLayout();
-            invalidate();
-        }
-
-        @Override protected void onMeasure(int widthSpec, int heightSpec) {
-            Paint.FontMetrics fm = fill.getFontMetrics();
-            int w = (int) Math.ceil(fill.measureText(text) + 2 * pad);
-            int h = (int) Math.ceil(fm.descent - fm.ascent + 2 * pad);
-            setMeasuredDimension(Math.max(w, 1), Math.max(h, 1));
-        }
-
-        @Override protected void onDraw(Canvas canvas) {
-            Paint.FontMetrics fm = fill.getFontMetrics();
-            float y = pad - fm.ascent;
-            canvas.drawText(text, pad, y, stroke);
-            canvas.drawText(text, pad, y, fill);
         }
     }
 
