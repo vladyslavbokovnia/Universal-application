@@ -1,6 +1,7 @@
 package im.manus.plugins;
 
 import android.accessibilityservice.AccessibilityService;
+import android.annotation.TargetApi;
 import android.app.usage.UsageStats;
 import android.app.usage.UsageStatsManager;
 import android.content.BroadcastReceiver;
@@ -25,6 +26,9 @@ import android.graphics.PorterDuffXfermode;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.Typeface;
+import android.graphics.ColorFilter;
+import android.graphics.Rect;
+import android.graphics.drawable.AdaptiveIconDrawable;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.net.Uri;
@@ -631,7 +635,208 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
                 throw new PackageManager.NameNotFoundException(pkg);
             }
         }
-        return ctx.getPackageManager().getApplicationIcon(pkg);
+        return NoBg.strip(ctx.getPackageManager().getApplicationIcon(pkg), ctx.getResources());
+    }
+
+    /**
+     * Прозрачный фон у значков приложений. Адаптивный значок: рисуем только передний слой, без подложки и маски.
+     * Обычный (старый) значок: фон заливается прозрачностью от краёв, пока цвет близок к цвету фона у краёв;
+     * если фон неоднородный или заливка съела бы почти весь значок, значок остаётся как есть.
+     */
+    private static final class NoBg {
+        private static final int SIZE = 192;      // размер, в котором обрабатываем обычные значки
+        private static final int TOL = 36;        // допуск по цвету фона (расстояние в RGB)
+
+        static Drawable strip(Drawable d, android.content.res.Resources res) {
+            try {
+                if (Build.VERSION.SDK_INT >= 26) {
+                    Drawable r = Adaptive26.strip(d);
+                    if (r != null) return r;
+                }
+                Bitmap src = render(d, SIZE);
+                Bitmap out = clearEdgeBackground(src);
+                src.recycle();
+                return out == null ? d : new BitmapDrawable(res, out);
+            } catch (Throwable t) {
+                return d;
+            }
+        }
+
+        static Bitmap render(Drawable d, int size) {
+            Drawable.ConstantState cs = d.getConstantState();
+            Drawable c = cs != null ? cs.newDrawable().mutate() : d;
+            Bitmap b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+            c.setBounds(0, 0, size, size);
+            c.draw(new Canvas(b));
+            return b;
+        }
+
+        private static int d2(int a, int b) {
+            int dr = Color.red(a) - Color.red(b), dg = Color.green(a) - Color.green(b), db = Color.blue(a) - Color.blue(b);
+            return dr * dr + dg * dg + db * db;
+        }
+
+        /** Заливка фона прозрачностью от краёв. null — значок менять не нужно или нельзя. */
+        static Bitmap clearEdgeBackground(Bitmap src) {
+            final int n = src.getWidth(), m = src.getHeight();
+            int[] px = new int[n * m];
+            src.getPixels(px, 0, n, 0, 0, n, m);
+
+            // 1. цвет фона: от середины каждой стороны идём внутрь до первого непрозрачного пикселя; фон прилегает к краю
+            //    (у значка без фона, только с рисунком, до рисунка обычно далеко: такой значок не трогаем)
+            int[] refs = new int[4];
+            int rc = 0;
+            int[][] starts = {{n / 2, 0, 0, 1}, {n / 2, m - 1, 0, -1}, {0, m / 2, 1, 0}, {n - 1, m / 2, -1, 0}};
+            for (int[] st : starts) {
+                int x = st[0], y = st[1];
+                for (int step = 0; step < n * 8 / 100 && x >= 0 && x < n && y >= 0 && y < m; step++) {
+                    int c = px[y * n + x];
+                    if (Color.alpha(c) > 200) { refs[rc++] = c; break; }
+                    x += st[2];
+                    y += st[3];
+                }
+            }
+            if (rc < 2) return null;
+            int ref = 0, votes = 0;
+            for (int i = 0; i < rc; i++) {
+                int v = 0;
+                for (int j = 0; j < rc; j++) if (d2(refs[i], refs[j]) <= 30 * 30) v++;
+                if (v > votes) { votes = v; ref = refs[i]; }
+            }
+            if (votes < Math.min(rc, 3)) return null;            // фон у краёв разный (картинка, градиент): не трогаем
+
+            // 2. заливка от краёв: проходим прозрачные пиксели и пиксели цвета фона
+            final int tol2 = TOL * TOL;
+            boolean[] gone = new boolean[n * m];
+            int[] queue = new int[n * m];
+            int qh = 0, qt = 0;
+            for (int i = 0; i < n * m; i++) {
+                int x = i % n, y = i / n;
+                if (x != 0 && y != 0 && x != n - 1 && y != m - 1) continue;
+                int c = px[i];
+                if (Color.alpha(c) < 24 || d2(c, ref) <= tol2) { gone[i] = true; queue[qt++] = i; }
+            }
+            while (qh < qt) {
+                int i = queue[qh++];
+                int x = i % n, y = i / n;
+                for (int k = 0; k < 4; k++) {
+                    int nx = x + (k == 0 ? 1 : k == 1 ? -1 : 0), ny = y + (k == 2 ? 1 : k == 3 ? -1 : 0);
+                    if (nx < 0 || ny < 0 || nx >= n || ny >= m) continue;
+                    int j = ny * n + nx;
+                    if (gone[j]) continue;
+                    int c = px[j];
+                    if (Color.alpha(c) < 24 || d2(c, ref) <= tol2) { gone[j] = true; queue[qt++] = j; }
+                }
+            }
+
+            // 3. проверка: убрали заметную часть и оставили значимую
+            int opaque = 0, removed = 0;
+            for (int i = 0; i < n * m; i++) {
+                if (Color.alpha(px[i]) < 24) continue;
+                opaque++;
+                if (gone[i]) removed++;
+            }
+            if (opaque == 0 || removed < opaque * 0.02 || opaque - removed < opaque * 0.06) return null;
+
+            // 4. результат; на границе смягчаем кайму: чем ближе цвет к фону, тем прозрачнее
+            int[] out = new int[n * m];
+            for (int i = 0; i < n * m; i++) {
+                if (gone[i]) continue;
+                int c = px[i];
+                int x = i % n, y = i / n;
+                boolean edge = (x > 0 && gone[i - 1]) || (x < n - 1 && gone[i + 1]) || (y > 0 && gone[i - n]) || (y < m - 1 && gone[i + n]);
+                if (edge) {
+                    float dd = (float) Math.sqrt(d2(c, ref));
+                    if (dd < 2f * TOL) {
+                        float f = Math.max(0f, Math.min(1f, (dd - TOL) / TOL));
+                        c = (c & 0x00FFFFFF) | (Math.round(Color.alpha(c) * f) << 24);
+                    }
+                }
+                out[i] = c;
+            }
+            return Bitmap.createBitmap(out, n, m, Bitmap.Config.ARGB_8888);
+        }
+    }
+
+    @TargetApi(26)
+    private static final class Adaptive26 {
+        /** null: значок не адаптивный. Иначе значок без подложки (или он сам, если без подложки останется пусто). */
+        static Drawable strip(Drawable d) {
+            if (!(d instanceof AdaptiveIconDrawable)) return null;
+            try {
+                Drawable fg = ((AdaptiveIconDrawable) d).getForeground();
+                if (fg == null || !hasContent(fg)) return d;
+                return new ForegroundOnlyIcon(fg, d.getIntrinsicWidth(), d.getIntrinsicHeight());
+            } catch (Throwable t) {
+                return d;
+            }
+        }
+
+        /** В видимой части переднего слоя (центральные 2/3) есть хоть какое-то изображение. */
+        static boolean hasContent(Drawable fg) {
+            Bitmap b = null;
+            try {
+                Drawable.ConstantState cs = fg.getConstantState();
+                Drawable c = cs != null ? cs.newDrawable().mutate() : fg;
+                b = Bitmap.createBitmap(48, 48, Bitmap.Config.ARGB_8888);
+                c.setBounds(0, 0, 48, 48);
+                c.draw(new Canvas(b));
+                int cnt = 0;
+                for (int y = 8; y < 40; y++) {
+                    for (int x = 8; x < 40; x++) if (Color.alpha(b.getPixel(x, y)) > 40) cnt++;
+                }
+                return cnt >= 40;                              // от 1024 точек видимой части
+            } catch (Throwable t) {
+                return true;
+            } finally {
+                if (b != null) b.recycle();
+            }
+        }
+    }
+
+    /** Передний слой адаптивного значка без подложки: слои шире значка на 25% с каждой стороны, поэтому рисуем так же. */
+    private static final class ForegroundOnlyIcon extends Drawable {
+        private final Drawable fg;
+        private final int iw, ih;
+
+        ForegroundOnlyIcon(Drawable fg, int iw, int ih) {
+            this.fg = fg;
+            this.iw = iw;
+            this.ih = ih;
+        }
+
+        @Override public void draw(Canvas c) {
+            Rect b = getBounds();
+            int dx = b.width() / 4, dy = b.height() / 4;
+            fg.setBounds(b.left - dx, b.top - dy, b.right + dx, b.bottom + dy);
+            fg.draw(c);
+        }
+
+        @Override public void setAlpha(int a) { fg.setAlpha(a); }
+
+        @Override public void setColorFilter(ColorFilter f) { fg.setColorFilter(f); }
+
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+
+        @Override public int getIntrinsicWidth() { return iw; }
+
+        @Override public int getIntrinsicHeight() { return ih; }
+
+        @Override public Drawable.ConstantState getConstantState() {
+            final Drawable.ConstantState cs = fg.getConstantState();
+            if (cs == null) return null;
+            return new Drawable.ConstantState() {
+                @Override public Drawable newDrawable() {
+                    return new ForegroundOnlyIcon(cs.newDrawable().mutate(), iw, ih);
+                }
+
+                @Override public Drawable newDrawable(android.content.res.Resources r) {
+                    return new ForegroundOnlyIcon(cs.newDrawable(r).mutate(), iw, ih);
+                }
+
+                @Override public int getChangingConfigurations() { return 0; }
+            };
+        }
     }
 
     private void launch(Entry entry) {
@@ -1218,13 +1423,10 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         @Override protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
             if (geo == null) return;
-            // центр: иконка выбранного приложения
+            // центр: иконка выбранного приложения, без белой подложки (раньше под ней был белый круг)
             float cr = 30f * density;
-            fill.setStyle(Paint.Style.FILL);
-            fill.setColor(Color.WHITE);
-            canvas.drawCircle(geo.cx, geo.cy, cr, fill);
             if (centerIcon != null) {
-                float in = cr * 0.72f;
+                float in = cr * 0.9f;
                 centerIcon.setBounds((int) (geo.cx - in), (int) (geo.cy - in), (int) (geo.cx + in), (int) (geo.cy + in));
                 centerIcon.draw(canvas);
             }
