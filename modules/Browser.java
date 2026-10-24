@@ -1009,6 +1009,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         int bar;                // цвет строки состояния для этой страницы, 0: не определён
         int group;              // 0: вне группы
         long lastUsed;
+        boolean keepFiles;      // файлы снимка и значка нужны истории закрытых
         Tab opener;
         JsResult pendingJs;
         final String bridgeName = "ub" + randHex(6);
@@ -2536,10 +2537,12 @@ public class Browser implements IPlugin, ISettingsProvider {
             tabs.remove(t);
             t.thumb = null;
             t.icon = null;
-            try {
-                new File(thumbDir(), t.uid + ".jpg").delete();
-                new File(thumbDir(), t.uid + "_i.png").delete();
-            } catch (Throwable ignored) { }
+            if (!t.keepFiles) {
+                try {
+                    new File(thumbDir(), t.uid + ".jpg").delete();
+                    new File(thumbDir(), t.uid + "_i.png").delete();
+                } catch (Throwable ignored) { }
+            }
             cleanGroups();
             for (Tab o : tabs) if (o.opener == t) o.opener = t.opener;
             if (tabs.isEmpty()) {
@@ -4197,6 +4200,203 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
         }
 
+        /** Список карточек: быстрый рывок вверх по закрываемой карточке достаётся ей, а не прокрутке списка. */
+        private ScrollView swipeScroll() {
+            final float closeSlop = ViewConfiguration.get(act).getScaledTouchSlop();
+            return new ScrollView(act) {
+                private android.view.VelocityTracker ivt;
+                private float ix, iy;
+                private boolean cardOwns;
+                @Override public boolean onInterceptTouchEvent(MotionEvent e) {
+                    int a = e.getActionMasked();
+                    if (a == MotionEvent.ACTION_DOWN) {
+                        cardOwns = false;
+                        ix = e.getX();
+                        iy = e.getY();
+                        if (ivt != null) ivt.recycle();
+                        ivt = android.view.VelocityTracker.obtain();
+                    }
+                    if (ivt != null) ivt.addMovement(e);
+                    if (cardOwns) return false;               // быстрый рывок вверх по карточке: список не перехватывает
+                    if (a == MotionEvent.ACTION_MOVE && closableDown && ivt != null) {
+                        float dx = e.getX() - ix, dy = e.getY() - iy;
+                        if (dy < -closeSlop && Math.abs(dy) > Math.abs(dx)) {
+                            ivt.computeCurrentVelocity(1000);
+                            if (-ivt.getYVelocity() > closeFlingV()) {
+                                cardOwns = true;
+                                return false;
+                            }
+                        }
+                    }
+                    return super.onInterceptTouchEvent(e);
+                }
+            };
+        }
+
+        // ------------------------------------------------------------ история закрытых вкладок
+
+        private final class Closed {
+            String url = "", title = "", uid = "";
+            int profile;
+            long ts;
+        }
+
+        private final List<Closed> closedList = new ArrayList<Closed>();
+        private boolean closedLoaded;
+
+        private void loadClosed() {
+            if (closedLoaded) return;
+            closedLoaded = true;
+            closedList.clear();
+            try {
+                JSONArray a = new JSONArray(sp.getString("closed_json", "[]"));
+                for (int i = 0; i < a.length(); i++) {
+                    JSONObject o = a.getJSONObject(i);
+                    Closed c = new Closed();
+                    c.url = o.optString("u", "");
+                    c.title = o.optString("t", "");
+                    c.uid = o.optString("i", "");
+                    c.profile = o.optInt("p", 0);
+                    c.ts = o.optLong("s", 0L);
+                    if (c.url.length() > 0 && c.uid.length() > 0) closedList.add(c);
+                }
+            } catch (JSONException ignored) { }
+        }
+
+        private void saveClosed() {
+            try {
+                JSONArray a = new JSONArray();
+                for (Closed c : closedList) {
+                    JSONObject o = new JSONObject();
+                    o.put("u", c.url);
+                    o.put("t", c.title);
+                    o.put("i", c.uid);
+                    o.put("p", c.profile);
+                    o.put("s", c.ts);
+                    a.put(o);
+                }
+                sp.edit().putString("closed_json", a.toString()).apply();
+            } catch (JSONException ignored) { }
+        }
+
+        private void deleteClosedFiles(String uid) {
+            try {
+                new File(thumbDir(), uid + ".jpg").delete();
+                new File(thumbDir(), uid + "_i.png").delete();
+            } catch (Throwable ignored) { }
+        }
+
+        /** Закрыть вкладку и запомнить её в истории: адрес, название, профиль, снимок и значок. */
+        private void closeTabKeep(Tab t) {
+            loadClosed();
+            String u = t.url;
+            if (u != null && (u.startsWith("http://") || u.startsWith("https://"))) {
+                if (t.thumb != null && !new File(thumbDir(), t.uid + ".jpg").exists()) saveBitmapAsync(t.thumb, new File(thumbDir(), t.uid + ".jpg"), false);
+                Closed c = new Closed();
+                c.url = u;
+                c.title = t.title == null ? "" : t.title;
+                c.uid = t.uid;
+                c.profile = t.profile;
+                c.ts = System.currentTimeMillis();
+                closedList.add(0, c);
+                t.keepFiles = true;
+                while (closedList.size() > 40) deleteClosedFiles(closedList.remove(closedList.size() - 1).uid);
+                saveClosed();
+            }
+            closeTab(t);
+        }
+
+        private void restoreClosed(Closed c) {
+            if (c.profile != 0 && !Profiles.supported()) { toast(Profiles.status()); return; }
+            closedList.remove(c);
+            saveClosed();
+            closeLayer(false);
+            Tab nt = newTab(c.url, c.profile, null, true);
+            nt.title = c.title;
+            try {
+                File a = new File(thumbDir(), c.uid + ".jpg"), b = new File(thumbDir(), nt.uid + ".jpg");
+                if (a.exists()) a.renameTo(b);
+                File ai = new File(thumbDir(), c.uid + "_i.png"), bi = new File(thumbDir(), nt.uid + "_i.png");
+                if (ai.exists()) ai.renameTo(bi);
+            } catch (Throwable ignored) { }
+            saveTabs();
+        }
+
+        /** Закрытые вкладки в том же виде, что и панель вкладок: нажатие возвращает вкладку, рывок вверх убирает из истории. */
+        private void showClosed() {
+            closeLayer(false);                  // слой с отменой не пересоздаём поверх себя: иначе отмена вернёт панель вкладок под него
+            loadClosed();
+            if (closedList.isEmpty()) {
+                toast("История закрытых вкладок пуста");
+                showTabs();
+                return;
+            }
+            LinearLayout root = new LinearLayout(act);
+            root.setOrientation(LinearLayout.VERTICAL);
+
+            LinearLayout head = new LinearLayout(act);
+            head.setOrientation(LinearLayout.HORIZONTAL);
+            head.setGravity(Gravity.CENTER_VERTICAL);
+            head.setPadding(dp(14), dp(10), dp(10), dp(6));
+            TextView ht = label("Закрытые вкладки: " + closedList.size(), 17, C_TEXT, true);
+            head.addView(ht, new LinearLayout.LayoutParams(0, -2, 1f));
+            TextView clear = label("Очистить", 15, C_TEXT, true);
+            clear.setBackground(round(C_SURFACE2, 16, 0, 0));
+            clear.setPadding(dp(14), dp(8), dp(14), dp(8));
+            clear.setClickable(true);
+            clear.setFocusable(true);
+            clear.setContentDescription("Очистить историю закрытых вкладок");
+            clear.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    closeLayer(false);
+                    for (Closed c : closedList) deleteClosedFiles(c.uid);
+                    closedList.clear();
+                    saveClosed();
+                    showTabs();
+                }
+            });
+            head.addView(clear, new LinearLayout.LayoutParams(-2, -2));
+            root.addView(head, new LinearLayout.LayoutParams(-1, -2));
+
+            ScrollView sv = swipeScroll();
+            LinearLayout grid = new LinearLayout(act);
+            grid.setOrientation(LinearLayout.VERTICAL);
+            grid.setPadding(0, 0, 0, dp(24));
+            sv.addView(grid, new ViewGroup.LayoutParams(-1, -2));
+            root.addView(sv, new LinearLayout.LayoutParams(-1, 0, 1f));
+
+            LinearLayout rowL = null;
+            for (int i = 0; i < closedList.size(); i++) {
+                final Closed c = closedList.get(i);
+                if (i % 2 == 0) {
+                    rowL = new LinearLayout(act);
+                    rowL.setOrientation(LinearLayout.HORIZONTAL);
+                    grid.addView(rowL, new LinearLayout.LayoutParams(-1, -2));
+                }
+                Tab g = new Tab(-1, c.url, c.profile);
+                g.uid = c.uid;
+                g.title = c.title;
+                FrameLayout box = cardBody(g, false, false, 0);
+                box.setContentDescription("Закрытая вкладка: " + tabTitle(g) + ", " + displayUrl(g)
+                        + ". Нажмите, чтобы вернуть. Смахните вверх, чтобы убрать из истории");
+                cardGestures(box, new Runnable() {
+                    @Override public void run() { restoreClosed(c); }
+                }, null, new Runnable() {
+                    @Override public void run() {
+                        closedList.remove(c);
+                        deleteClosedFiles(c.uid);
+                        saveClosed();
+                        showClosed();
+                    }
+                }, null);
+                rowL.addView(box, new LinearLayout.LayoutParams(0, -2, 1f));
+            }
+            if (closedList.size() % 2 == 1 && rowL != null) rowL.addView(new View(act), new LinearLayout.LayoutParams(0, 1, 1f));
+            showLayer(root, true, new Runnable() {
+                @Override public void run() { showTabs(); }
+            }, "Закрытые вкладки: " + closedList.size());
+        }
+
         private int closeLevel() { return Math.max(0, Math.min(CLOSE_MULT.length - 1, sp.getInt("close_speed", 2))); }
 
         /** Скорость рывка вверх, с которой карточка закрывается: настраивается в меню вкладки. */
@@ -4324,7 +4524,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 addG(items, "next", "›", "Следующая вкладка", new Runnable() { @Override public void run() { switchTab(1); } });
                 addG(items, "prev", "‹", "Предыдущая вкладка", new Runnable() { @Override public void run() { switchTab(-1); } });
             }
-            addG(items, "closetab", "✕", "Закрыть эту вкладку", new Runnable() { @Override public void run() { closeTab(t); } });
+            addG(items, "closetab", "✕", "Закрыть эту вкладку", new Runnable() { @Override public void run() { closeTabKeep(t); } });
             if (t.wv != null && t.wv.canGoForward()) {
                 addG(items, "fwd", "→", "Вперёд", new Runnable() { @Override public void run() { t.wv.goForward(); } });
             }
@@ -5064,35 +5264,7 @@ public class Browser implements IPlugin, ISettingsProvider {
 
             int shown = og != null ? tabsOf(og).size() : tabs.size();
 
-            final float closeSlop = ViewConfiguration.get(act).getScaledTouchSlop();
-            ScrollView sv = new ScrollView(act) {
-                private android.view.VelocityTracker ivt;
-                private float ix, iy;
-                private boolean cardOwns;
-                @Override public boolean onInterceptTouchEvent(MotionEvent e) {
-                    int a = e.getActionMasked();
-                    if (a == MotionEvent.ACTION_DOWN) {
-                        cardOwns = false;
-                        ix = e.getX();
-                        iy = e.getY();
-                        if (ivt != null) ivt.recycle();
-                        ivt = android.view.VelocityTracker.obtain();
-                    }
-                    if (ivt != null) ivt.addMovement(e);
-                    if (cardOwns) return false;               // быстрый рывок вверх по карточке: список не перехватывает
-                    if (a == MotionEvent.ACTION_MOVE && closableDown && ivt != null) {
-                        float dx = e.getX() - ix, dy = e.getY() - iy;
-                        if (dy < -closeSlop && Math.abs(dy) > Math.abs(dx)) {
-                            ivt.computeCurrentVelocity(1000);
-                            if (-ivt.getYVelocity() > closeFlingV()) {
-                                cardOwns = true;
-                                return false;
-                            }
-                        }
-                    }
-                    return super.onInterceptTouchEvent(e);
-                }
-            };
+            ScrollView sv = swipeScroll();
             tabScroll = sv;
             LinearLayout grid = new LinearLayout(act);
             grid.setOrientation(LinearLayout.VERTICAL);
@@ -5305,7 +5477,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 @Override public void run() { startItemDrag(box, t, menu); }
             }, new Runnable() {
                 @Override public void run() {
-                    closeTab(t);                     // смахнули карточку вверх: закрыть вкладку
+                    closeTabKeep(t);                 // смахнули карточку вверх: закрыть вкладку
                     showTabs();
                 }
             }, null);
@@ -5363,7 +5535,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 @Override public void run() { startItemDrag(box, g, menu); }
             }, new Runnable() {
                 @Override public void run() {
-                    for (Tab x : new ArrayList<Tab>(gt)) closeTab(x);      // смахнули группу вверх: закрыть все её вкладки
+                    for (Tab x : new ArrayList<Tab>(gt)) closeTabKeep(x);      // смахнули группу вверх: закрыть все её вкладки
                     showTabs();
                 }
             }, page);
@@ -5761,6 +5933,8 @@ public class Browser implements IPlugin, ISettingsProvider {
                     showTabs();
                 } });
             }
+            loadClosed();
+            addG(items, "closed", "🕘", "Закрытые вкладки: " + closedList.size(), new Runnable() { @Override public void run() { showClosed(); } });
             addG(items, "closespeed", "⚡", "Скорость закрытия смахиванием: " + CLOSE_NAMES[closeLevel()] + ". Нажмите, чтобы сменить", new Runnable() { @Override public void run() {
                 int n = (closeLevel() + 1) % CLOSE_MULT.length;
                 sp.edit().putInt("close_speed", n).apply();
@@ -5774,7 +5948,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 } });
             }
             addG(items, "close", "✕", "Закрыть вкладку", new Runnable() { @Override public void run() {
-                closeTab(t);
+                closeTabKeep(t);
                 showTabs();
             } });
             showIconGrid("tab", displayUrl(t), items, true);
@@ -5801,7 +5975,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 showTabs();
             } });
             add(icons, labels, actions, "✕", "Закрыть всю группу", new Runnable() { @Override public void run() {
-                for (Tab x : tabsOf(g)) closeTab(x);
+                for (Tab x : tabsOf(g)) closeTabKeep(x);
                 showTabs();
             } });
             showList(g.name, icons, labels, actions);
