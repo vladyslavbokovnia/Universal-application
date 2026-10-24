@@ -1123,6 +1123,8 @@ public class Browser implements IPlugin, ISettingsProvider {
         private String defaultUa;
         private boolean fullscreen, dockHidden, started, wantPanel, tabsPanel, lightBar;
         private ScrollView tabScroll;
+        private boolean closableDown;         // касание началось на карточке, которую можно закрыть смахиванием вверх
+        private View underLayer;              // панель вкладок под меню вкладки
         private Object dragItem;
         private int dragScrollDir;
         private int pendingProfile = -1;
@@ -1816,6 +1818,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             final Tab t = cur;
             if (t == null || hub == null) return;
             final boolean fromTabs = tabsPanel && layer != null;
+            dropUnder();
             closeLayer(true);
             ringViews.clear();
             ringActions.clear();
@@ -1861,7 +1864,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 TextView v = glyph(it.glyph, C_TEXT);
                 v.setTextSize(30);
                 v.setBackground(glassBmp != null && SystemClock.uptimeMillis() - glassAt < 5000
-                        ? (Drawable) new GlassDrawable(v, glassBmp) : round(0x1F202124, 37, 0x88FFFFFF, 1));
+                        ? (Drawable) new GlassDrawable(v, glassBmp) : round(0x12202124, 37, 0x80FFFFFF, 1));
                 v.setContentDescription(it.desc);
                 v.setAlpha(it.on ? 1f : 0.4f);
                 v.setClickable(true);
@@ -1899,8 +1902,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                     @Override public void onPixelCopyFinished(int result) {
                         if (closed || result != android.view.PixelCopy.SUCCESS) return;
                         try {
-                            boxBlur(b, 3);
-                            boxBlur(b, 3);
+                            boxBlur(b, 1);          // слабое размытие: за кнопкой угадывается страница
                             glassBmp = b;
                             glassAt = SystemClock.uptimeMillis();
                         } catch (Throwable ignored) { }
@@ -1954,8 +1956,8 @@ public class Browser implements IPlugin, ISettingsProvider {
             GlassDrawable(View v, Bitmap bmp) {
                 this.v = v;
                 this.bmp = bmp;
-                tint.setColor(0x12000000);
-                frost.setColor(0x22FFFFFF);          // лёгкий иней: стекло светлее подложки
+                tint.setColor(0x08000000);
+                frost.setColor(0x14FFFFFF);          // лёгкий иней: стекло светлее подложки
                 edge.setStyle(Paint.Style.STROKE);
                 edge.setStrokeWidth(dp(1) * 1.5f);
                 edge.setColor(0x80FFFFFF);
@@ -4084,6 +4086,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         // ------------------------------------------------------------ панели поверх страницы (не всплывающие окна)
 
         private void showLayer(View body, boolean full, Runnable cancel, String announce) {
+            dropUnder();
             closeLayer(true);
             setDockHidden(false, false);
             FrameLayout l = new FrameLayout(act);
@@ -4124,8 +4127,16 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
         }
 
+        private void dropUnder() {
+            if (underLayer != null) {
+                removeView(underLayer);
+                underLayer = null;
+            }
+        }
+
         private void closeLayer(boolean runCancel) {
             if (layer == null) return;
+            if (!runCancel) dropUnder();            // меню закрыто выбором пункта: панель под ним больше не нужна
             removeView(layer);
             layer = null;
             tabsPanel = false;
@@ -4313,8 +4324,21 @@ public class Browser implements IPlugin, ISettingsProvider {
          * удержание и движение перетаскивает значок на новое место. Значок «настроить» включает режим, где нажатие
          * скрывает пункт или возвращает его. Порядок и скрытые пункты хранятся отдельно для каждого меню (scope).
          */
-        private void showIconGrid(String scope, String title, List<GridItem> items) {
-            closeLayer(true);
+        private void showIconGrid(String scope, String title, List<GridItem> items) { showIconGrid(scope, title, items, false); }
+
+        /** overTabs: меню ложится поверх панели вкладок, а не вместо неё; закрыли меню, ничего не выбрав: остаёмся на панели. */
+        private void showIconGrid(String scope, String title, List<GridItem> items, boolean overTabs) {
+            final View under;
+            if (overTabs && tabsPanel && layer != null) {
+                under = layer;
+                layer = null;
+                layerCancel = null;
+            } else {
+                dropUnder();
+                closeLayer(true);
+                under = null;
+            }
+            underLayer = under;
             setDockHidden(false, false);
             final GridPanel gp = new GridPanel(scope, title, items);
             FrameLayout l = new FrameLayout(act);
@@ -4329,7 +4353,16 @@ public class Browser implements IPlugin, ISettingsProvider {
             lp.setMargins(dp(10), dp(8), dp(10), dp(18));
             l.addView(gp.box, lp);
             layer = l;
-            layerCancel = null;
+            layerCancel = under == null ? null : new Runnable() {
+                @Override public void run() {
+                    if (underLayer == under && under.getParent() == BrowserView.this) {
+                        underLayer = null;
+                        layer = under;
+                        tabsPanel = true;
+                        column.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+                    }
+                }
+            };
             addView(l, new FrameLayout.LayoutParams(-1, -1));
             column.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
             l.announceForAccessibility(title);
@@ -4418,7 +4451,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 FrameLayout cell = new FrameLayout(act);
                 cell.setClipChildren(false);
                 cell.setBackground(glassBmp != null && SystemClock.uptimeMillis() - glassAt < 30000
-                        ? (Drawable) new GlassDrawable(cell, glassBmp) : round(0x1F202124, 30, 0x88FFFFFF, 1));
+                        ? (Drawable) new GlassDrawable(cell, glassBmp) : round(0x12202124, 30, 0x80FFFFFF, 1));
                 TextView g = glyph(glyph);
                 g.setTextSize(26);
                 g.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
@@ -4950,7 +4983,36 @@ public class Browser implements IPlugin, ISettingsProvider {
 
             int shown = og != null ? tabsOf(og).size() : tabs.size();
 
-            ScrollView sv = new ScrollView(act);
+            final float closeV = ViewConfiguration.get(act).getScaledMinimumFlingVelocity() * 12f;
+            final float closeSlop = ViewConfiguration.get(act).getScaledTouchSlop();
+            ScrollView sv = new ScrollView(act) {
+                private android.view.VelocityTracker ivt;
+                private float ix, iy;
+                private boolean cardOwns;
+                @Override public boolean onInterceptTouchEvent(MotionEvent e) {
+                    int a = e.getActionMasked();
+                    if (a == MotionEvent.ACTION_DOWN) {
+                        cardOwns = false;
+                        ix = e.getX();
+                        iy = e.getY();
+                        if (ivt != null) ivt.recycle();
+                        ivt = android.view.VelocityTracker.obtain();
+                    }
+                    if (ivt != null) ivt.addMovement(e);
+                    if (cardOwns) return false;               // быстрый рывок вверх по карточке: список не перехватывает
+                    if (a == MotionEvent.ACTION_MOVE && closableDown && ivt != null) {
+                        float dx = e.getX() - ix, dy = e.getY() - iy;
+                        if (dy < -closeSlop && Math.abs(dy) > Math.abs(dx)) {
+                            ivt.computeCurrentVelocity(1000);
+                            if (-ivt.getYVelocity() > closeV) {
+                                cardOwns = true;
+                                return false;
+                            }
+                        }
+                    }
+                    return super.onInterceptTouchEvent(e);
+                }
+            };
             tabScroll = sv;
             LinearLayout grid = new LinearLayout(act);
             grid.setOrientation(LinearLayout.VERTICAL);
@@ -5022,7 +5084,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 if (w <= 0 || h <= 0) return;
                 float cx = w / 2f, cy = h / 2f, r = Math.min(w, h) / 2f;
                 glow.setShader(new android.graphics.RadialGradient(cx, cy, r,
-                        new int[] { 0xB3000000, 0x8C000000, 0x00000000 }, new float[] { 0f, 0.5f, 1f },
+                        new int[] { 0x66000000, 0x38000000, 0x00000000 }, new float[] { 0f, 0.5f, 1f },
                         android.graphics.Shader.TileMode.CLAMP));
                 c.drawCircle(cx, cy, r, glow);
                 check.reset();
@@ -5233,6 +5295,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         private void cardGestures(final View box, final Runnable onClick, final Runnable onLong, final Runnable onSwipeUp, final IntAction onPage) {
             final float slop = ViewConfiguration.get(act).getScaledTouchSlop();
             final float flingV = ViewConfiguration.get(act).getScaledMinimumFlingVelocity() * 6f;
+            final float closeV = ViewConfiguration.get(act).getScaledMinimumFlingVelocity() * 12f;
             box.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) { onClick.run(); }
             });
@@ -5260,6 +5323,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                             up = false;
                             side = false;
                             longFired = false;
+                            closableDown = onSwipeUp != null;
                             if (onLong != null) v.postDelayed(longRun, ViewConfiguration.getLongPressTimeout());
                             return true;
                         case MotionEvent.ACTION_MOVE: {
@@ -5273,7 +5337,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                             }
                             if (onSwipeUp != null && !up && !side && dy < -slop && Math.abs(dy) > Math.abs(dx)) {
                                 vt.computeCurrentVelocity(1000);
-                                if (-vt.getYVelocity() > flingV * 2f) {
+                                if (-vt.getYVelocity() > closeV) {
                                     up = true;                    // быстрый рывок вверх: список не прокручиваем, карточка идёт за пальцем
                                     v.getParent().requestDisallowInterceptTouchEvent(true);
                                 }
@@ -5287,11 +5351,12 @@ public class Browser implements IPlugin, ISettingsProvider {
                         }
                         case MotionEvent.ACTION_UP: {
                             v.removeCallbacks(longRun);
+                            closableDown = false;
                             if (longFired) { recycle(); return true; }
                             if (up) {
                                 vt.computeCurrentVelocity(1000);
                                 boolean far = -v.getTranslationY() > v.getHeight() * 0.3f;
-                                boolean fast = -vt.getYVelocity() > flingV * 2f;
+                                boolean fast = -vt.getYVelocity() > closeV;
                                 recycle();
                                 if (far || fast) {
                                     if (onSwipeUp != null) onSwipeUp.run();
@@ -5313,6 +5378,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                         }
                         case MotionEvent.ACTION_CANCEL:
                             v.removeCallbacks(longRun);
+                            closableDown = false;
                             recycle();
                             v.animate().translationY(0).alpha(1f).setDuration(120).start();
                             return true;
@@ -5603,21 +5669,6 @@ public class Browser implements IPlugin, ISettingsProvider {
         /** Долгое нажатие на вкладку: группы и закрытие. */
         private void showTabMenu(final Tab t) {
             List<GridItem> items = new ArrayList<GridItem>();
-            addG(items, "grp_new", "📁", "В новую группу", new Runnable() { @Override public void run() {
-                Group g = newGroup();
-                t.group = g.id;
-                saveTabs();
-                showTabs();
-            } });
-            for (final Group g : new ArrayList<Group>(groups)) {
-                if (g.id == t.group) continue;
-                addG(items, "grp_" + g.id, "📂", "В группу «" + g.name + "»", new Runnable() { @Override public void run() {
-                    t.group = g.id;
-                    cleanGroups();
-                    saveTabs();
-                    showTabs();
-                } });
-            }
             if (t.group != 0) {
                 addG(items, "ungroup", "↩", "Убрать из группы", new Runnable() { @Override public void run() {
                     t.group = 0;
@@ -5636,7 +5687,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 closeTab(t);
                 showTabs();
             } });
-            showIconGrid("tab", displayUrl(t), items);
+            showIconGrid("tab", displayUrl(t), items, true);
         }
 
         /** Долгое нажатие на группу. */
