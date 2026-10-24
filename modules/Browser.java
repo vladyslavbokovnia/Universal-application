@@ -4284,13 +4284,14 @@ public class Browser implements IPlugin, ISettingsProvider {
             final GridPanel gp = new GridPanel(scope, title, items);
             FrameLayout l = new FrameLayout(act);
             l.setClickable(true);
-            l.setBackgroundColor(0x1A000000);
+            l.setBackgroundColor(0x33000000);
             l.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) { closeLayer(true); }
             });
             l.setClipChildren(false);
-            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-            lp.setMargins(dp(8), dp(8), dp(8), dp(28));
+            // сетка во всю ширину с небольшими полями: колонки делят её поровну
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM);
+            lp.setMargins(dp(10), dp(8), dp(10), dp(18));
             l.addView(gp.box, lp);
             layer = l;
             layerCancel = null;
@@ -4300,7 +4301,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         private final class GridPanel {
-            static final int COLS = 4;
+            static final int COLS = 5;
             final String scope;
             final String title;
             final Map<String, GridItem> byKey = new HashMap<String, GridItem>();
@@ -4327,7 +4328,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 box.setClipChildren(false);
                 tip = label("", 15, C_TEXT, false);
                 tip.setGravity(Gravity.CENTER);
-                tip.setBackground(round(0xE6202124, 14, C_SURFACE2, 1));
+                tip.setBackground(round(0xCC202124, 16, 0x55FFFFFF, 1));
                 tip.setPadding(dp(14), dp(8), dp(14), dp(8));
                 tip.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
                 LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-2, -2);
@@ -4338,8 +4339,8 @@ public class Browser implements IPlugin, ISettingsProvider {
                 cells = new LinearLayout(act);
                 cells.setOrientation(LinearLayout.VERTICAL);
                 cells.setClipChildren(false);
-                sv.addView(cells, new ViewGroup.LayoutParams(-2, -2));
-                box.addView(sv, new LinearLayout.LayoutParams(-2, -2));
+                sv.addView(cells, new ViewGroup.LayoutParams(-1, -2));
+                box.addView(sv, new LinearLayout.LayoutParams(-1, -2));
                 redraw();
             }
 
@@ -4367,18 +4368,22 @@ public class Browser implements IPlugin, ISettingsProvider {
                         row = new LinearLayout(act);
                         row.setOrientation(LinearLayout.HORIZONTAL);
                         row.setClipChildren(false);
-                        cells.addView(row, new LinearLayout.LayoutParams(-2, -2));
+                        cells.addView(row, new LinearLayout.LayoutParams(-1, -2));
                     }
-                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(64), dp(64));
-                    lp.setMargins(dp(8), dp(8), dp(8), dp(8));
-                    row.addView(all.get(i), lp);
+                    FrameLayout slot = new FrameLayout(act);
+                    slot.setClipChildren(false);
+                    slot.addView(all.get(i), new FrameLayout.LayoutParams(dp(60), dp(60), Gravity.CENTER));
+                    row.addView(slot, new LinearLayout.LayoutParams(0, dp(72), 1f));
                 }
+                // последняя строка неполная: пустые места, чтобы колонки не расползались
+                while (row != null && row.getChildCount() < COLS) row.addView(new View(act), new LinearLayout.LayoutParams(0, dp(72), 1f));
             }
 
             private FrameLayout disc(String glyph, String desc) {
                 FrameLayout cell = new FrameLayout(act);
                 cell.setClipChildren(false);
-                cell.setBackground(round(0xE6202124, 32, C_SURFACE2, 1));
+                cell.setBackground(glassBmp != null && SystemClock.uptimeMillis() - glassAt < 30000
+                        ? (Drawable) new GlassDrawable(cell, glassBmp) : round(0xE6202124, 30, C_SURFACE2, 1));
                 TextView g = glyph(glyph);
                 g.setTextSize(26);
                 g.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
