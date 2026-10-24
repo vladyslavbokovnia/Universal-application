@@ -14,6 +14,9 @@ import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.PixelFormat;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
@@ -1139,6 +1142,8 @@ public class Browser implements IPlugin, ISettingsProvider {
         private final List<View> ringViews = new ArrayList<View>();
         private final List<Runnable> ringActions = new ArrayList<Runnable>();
         private int ringHot = -1;
+        private Bitmap glassBmp;          // размытый снимок окна для стеклянных кнопок кольца
+        private long glassAt;
         private final Runnable hubReturn = new Runnable() {
             @Override public void run() {
                 scrollAccum = 0;
@@ -1703,6 +1708,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                             v.animate().cancel();
                             v.setAlpha(1f);
                             v.postDelayed(longRun, ViewConfiguration.getLongPressTimeout());
+                            prepareGlass();
                             if (v.getParent() != null) v.getParent().requestDisallowInterceptTouchEvent(true);
                             return true;
                         case MotionEvent.ACTION_MOVE: {
@@ -1809,6 +1815,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         private void showRing() {
             final Tab t = cur;
             if (t == null || hub == null) return;
+            final boolean fromTabs = tabsPanel && layer != null;
             closeLayer(true);
             ringViews.clear();
             ringActions.clear();
@@ -1853,7 +1860,8 @@ public class Browser implements IPlugin, ISettingsProvider {
                 double ang = -Math.PI / 2 + 2 * Math.PI * i / items.size();
                 TextView v = glyph(it.glyph, C_TEXT);
                 v.setTextSize(30);
-                v.setBackground(round(0xEE202124, 37, C_TEXT2, 1));
+                v.setBackground(glassBmp != null && SystemClock.uptimeMillis() - glassAt < 5000
+                        ? (Drawable) new GlassDrawable(v, glassBmp) : round(0xEE202124, 37, C_TEXT2, 1));
                 v.setContentDescription(it.desc);
                 v.setAlpha(it.on ? 1f : 0.4f);
                 v.setClickable(true);
@@ -1873,10 +1881,105 @@ public class Browser implements IPlugin, ISettingsProvider {
                 ringActions.add(it.on ? it.run : null);
             }
             layer = l;
-            layerCancel = null;
+            // вызвали с панели вкладок и ничего не выбрали: возвращаемся на панель, а не на страницу
+            layerCancel = fromTabs ? new Runnable() { @Override public void run() { showTabs(); } } : null;
             addView(l, new FrameLayout.LayoutParams(-1, -1));
             column.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
             l.announceForAccessibility("Кнопки управления браузером");
+        }
+
+        /** Снимок окна в малом размере и размытие: фон стеклянных кнопок. Снимок делается заранее, при касании кнопки, пока кольца ещё нет. */
+        private void prepareGlass() {
+            if (Build.VERSION.SDK_INT < 26 || act.getWindow() == null) return;
+            try {
+                View dv = act.getWindow().getDecorView();
+                if (dv.getWidth() <= 0 || dv.getHeight() <= 0) return;
+                final Bitmap b = Bitmap.createBitmap(Math.max(8, dv.getWidth() / 8), Math.max(8, dv.getHeight() / 8), Bitmap.Config.ARGB_8888);
+                android.view.PixelCopy.request(act.getWindow(), b, new android.view.PixelCopy.OnPixelCopyFinishedListener() {
+                    @Override public void onPixelCopyFinished(int result) {
+                        if (closed || result != android.view.PixelCopy.SUCCESS) return;
+                        try {
+                            boxBlur(b, 3);
+                            boxBlur(b, 3);
+                            glassBmp = b;
+                            glassAt = SystemClock.uptimeMillis();
+                        } catch (Throwable ignored) { }
+                    }
+                }, h);
+            } catch (Throwable ignored) { }
+        }
+
+        private void boxBlur(Bitmap b, int r) {
+            int w = b.getWidth(), hh = b.getHeight();
+            int[] px = new int[w * hh];
+            int[] tmp = new int[w * hh];
+            b.getPixels(px, 0, w, 0, 0, w, hh);
+            for (int pass = 0; pass < 2; pass++) {
+                int[] src = pass == 0 ? px : tmp;
+                int[] dst = pass == 0 ? tmp : px;
+                int lw = pass == 0 ? w : hh;           // длина линии
+                int lc = pass == 0 ? hh : w;           // число линий
+                int step = pass == 0 ? 1 : w;          // шаг внутри линии
+                int lstep = pass == 0 ? w : 1;         // шаг между линиями
+                int div = 2 * r + 1;
+                for (int l = 0; l < lc; l++) {
+                    int base = l * lstep;
+                    for (int x = 0; x < lw; x++) {
+                        int sr = 0, sg = 0, sb = 0;
+                        for (int k = -r; k <= r; k++) {
+                            int xx = Math.max(0, Math.min(lw - 1, x + k));
+                            int c = src[base + xx * step];
+                            sr += (c >> 16) & 0xFF;
+                            sg += (c >> 8) & 0xFF;
+                            sb += c & 0xFF;
+                        }
+                        dst[base + x * step] = 0xFF000000 | ((sr / div) << 16) | ((sg / div) << 8) | (sb / div);
+                    }
+                }
+            }
+            b.setPixels(px, 0, w, 0, 0, w, hh);
+        }
+
+        /** Круглая кнопка из стекла: размытый кусок того, что лежит под ней, тёмная вуаль и тонкая светлая кромка. */
+        private final class GlassDrawable extends Drawable {
+            private final View v;
+            private final Bitmap bmp;
+            private final Paint bp = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+            private final Paint tint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint edge = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Path clip = new Path();
+            private final android.graphics.Rect src = new android.graphics.Rect();
+
+            GlassDrawable(View v, Bitmap bmp) {
+                this.v = v;
+                this.bmp = bmp;
+                tint.setColor(0x70101216);
+                edge.setStyle(Paint.Style.STROKE);
+                edge.setStrokeWidth(dp(1) * 1.5f);
+                edge.setColor(0x80FFFFFF);
+            }
+
+            @Override public void draw(Canvas c) {
+                android.graphics.Rect b = getBounds();
+                float rad = Math.min(b.width(), b.height()) / 2f;
+                clip.reset();
+                clip.addCircle(b.exactCenterX(), b.exactCenterY(), rad, Path.Direction.CW);
+                View dv = act.getWindow().getDecorView();
+                int[] loc = new int[2];
+                v.getLocationInWindow(loc);
+                float sx = bmp.getWidth() / (float) Math.max(1, dv.getWidth());
+                float sy = bmp.getHeight() / (float) Math.max(1, dv.getHeight());
+                src.set(Math.round(loc[0] * sx), Math.round(loc[1] * sy), Math.round((loc[0] + v.getWidth()) * sx), Math.round((loc[1] + v.getHeight()) * sy));
+                c.save();
+                c.clipPath(clip);
+                c.drawBitmap(bmp, src, b, bp);
+                c.drawCircle(b.exactCenterX(), b.exactCenterY(), rad, tint);
+                c.restore();
+                c.drawCircle(b.exactCenterX(), b.exactCenterY(), rad - edge.getStrokeWidth() / 2f, edge);
+            }
+            @Override public void setAlpha(int a) { }
+            @Override public void setColorFilter(android.graphics.ColorFilter cf) { }
+            @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
         }
 
         private int ringIndexAt(float rx, float ry) {
@@ -4847,6 +4950,11 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
             showLayer(root, true, null, og != null ? "Группа " + og.name + ": вкладок " + shown : "Вкладки: " + shown);
             tabsPanel = true;
+            if (hub != null) {
+                hub.setVisibility(View.VISIBLE);
+                hub.bringToFront();             // кнопка управления остаётся над панелью вкладок
+                hub.setAlpha(HUB_ALPHA);
+            }
         }
 
         /** Карточка: снимок страницы, поверх него крупные значки сайта (слева внизу) и профиля (справа внизу). */
@@ -4958,11 +5066,18 @@ public class Browser implements IPlugin, ISettingsProvider {
             final FrameLayout box = cardBody(gt.get(start), current, true, gt.size());
             if (gt.size() > 1) fillCard(box, gt.get(start), true, gt.size(), start + 1);
             box.setContentDescription("Группа " + g.name + ", вкладок " + gt.size() + (current ? ", в ней текущая вкладка" : "")
+                    + ". Нажатие открывает показанную вкладку, долгое нажатие открывает группу"
                     + (gt.size() > 1 ? ". Смахивание вправо или влево листает вкладки группы" : ""));
             FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(-1, -2);
             clp.setMargins(0, 0, dp(7), dp(7));
             outer.addView(box, clp);
-            final Runnable menu = new Runnable() { @Override public void run() { showGroupMenu(g); } };
+            // долгое нажатие поднимает группу для перетаскивания; если отпустить на месте, откроется сама группа
+            final Runnable menu = new Runnable() {
+                @Override public void run() {
+                    openGroup = g;
+                    showTabs();
+                }
+            };
             attachDrop(box, g, menu);
             IntAction page = gt.size() < 2 ? null : new IntAction() {
                 @Override void run(int dir) {
@@ -4982,8 +5097,9 @@ public class Browser implements IPlugin, ISettingsProvider {
             };
             cardGestures(box, new Runnable() {
                 @Override public void run() {
-                    openGroup = g;
-                    showTabs();
+                    Tab pick = gt.get(Math.max(0, Math.min(gt.size() - 1, shown[0])));
+                    closeLayer(false);
+                    selectTab(pick);                 // нажатие открывает вкладку, показанную на обложке
                 }
             }, new Runnable() {
                 @Override public void run() { startItemDrag(box, g, menu); }
