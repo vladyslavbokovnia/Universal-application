@@ -5000,6 +5000,39 @@ public class Browser implements IPlugin, ISettingsProvider {
         /** Обозначение группы: по контуру снимка столько чёрточек, сколько вкладок; чёрточка показанной вкладки крупнее и светлее. */
         private static final int GROUP_BAND = 11;
 
+        /** Метка текущей вкладки: тонкая белая галочка, под ней мягкое тёмное пятно, к краям уходящее в прозрачность. */
+        private final class CurrentMark extends View {
+            private final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Path check = new Path();
+
+            CurrentMark(Context c) {
+                super(c);
+                line.setStyle(Paint.Style.STROKE);
+                line.setStrokeCap(Paint.Cap.ROUND);
+                line.setStrokeJoin(Paint.Join.ROUND);
+                line.setColor(0xFFFFFFFF);
+                line.setStrokeWidth(dp(3));
+                setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                setClickable(false);
+            }
+
+            @Override protected void onDraw(Canvas c) {
+                float w = getWidth(), h = getHeight();
+                if (w <= 0 || h <= 0) return;
+                float cx = w / 2f, cy = h / 2f, r = Math.min(w, h) / 2f;
+                glow.setShader(new android.graphics.RadialGradient(cx, cy, r,
+                        new int[] { 0xB3000000, 0x8C000000, 0x00000000 }, new float[] { 0f, 0.5f, 1f },
+                        android.graphics.Shader.TileMode.CLAMP));
+                c.drawCircle(cx, cy, r, glow);
+                check.reset();
+                check.moveTo(cx - r * 0.34f, cy + r * 0.02f);
+                check.lineTo(cx - r * 0.10f, cy + r * 0.27f);
+                check.lineTo(cx + r * 0.36f, cy - r * 0.24f);
+                c.drawPath(check, line);
+            }
+        }
+
         private final class TickRing extends View {
             private final int count, active;
             private final Paint under = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -5100,6 +5133,11 @@ public class Browser implements IPlugin, ISettingsProvider {
             plp.setMargins(0, 0, dp(8), dp(8));
             box.addView(profileBadge(t.profile, 48), plp);
 
+            if (t == cur) {
+                // страница, с которой открыли панель: крупная тонкая белая галочка по центру на тёмном пятне, растворяющемся в прозрачность
+                FrameLayout.LayoutParams klp = new FrameLayout.LayoutParams(dp(120), dp(120), Gravity.CENTER);
+                box.addView(new CurrentMark(act), klp);
+            }
             if (isGroup) {
                 FrameLayout.LayoutParams rlp = new FrameLayout.LayoutParams(-1, -1);
                 rlp.setMargins(-band, -band, -band, -band);      // кольцо занимает всю карточку, включая полосу
