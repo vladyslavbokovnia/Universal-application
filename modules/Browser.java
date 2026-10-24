@@ -1861,7 +1861,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 TextView v = glyph(it.glyph, C_TEXT);
                 v.setTextSize(30);
                 v.setBackground(glassBmp != null && SystemClock.uptimeMillis() - glassAt < 5000
-                        ? (Drawable) new GlassDrawable(v, glassBmp) : round(0x55202124, 37, 0x99FFFFFF, 1));
+                        ? (Drawable) new GlassDrawable(v, glassBmp) : round(0x1F202124, 37, 0x88FFFFFF, 1));
                 v.setContentDescription(it.desc);
                 v.setAlpha(it.on ? 1f : 0.4f);
                 v.setClickable(true);
@@ -1953,7 +1953,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             GlassDrawable(View v, Bitmap bmp) {
                 this.v = v;
                 this.bmp = bmp;
-                tint.setColor(0x70101216);
+                tint.setColor(0x33101216);
                 edge.setStyle(Paint.Style.STROKE);
                 edge.setStrokeWidth(dp(1) * 1.5f);
                 edge.setColor(0x80FFFFFF);
@@ -4383,7 +4383,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 FrameLayout cell = new FrameLayout(act);
                 cell.setClipChildren(false);
                 cell.setBackground(glassBmp != null && SystemClock.uptimeMillis() - glassAt < 30000
-                        ? (Drawable) new GlassDrawable(cell, glassBmp) : round(0x55202124, 30, 0x99FFFFFF, 1));
+                        ? (Drawable) new GlassDrawable(cell, glassBmp) : round(0x1F202124, 30, 0x88FFFFFF, 1));
                 TextView g = glyph(glyph);
                 g.setTextSize(26);
                 g.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
