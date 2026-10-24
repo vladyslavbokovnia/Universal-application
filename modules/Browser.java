@@ -5038,6 +5038,8 @@ public class Browser implements IPlugin, ISettingsProvider {
             // у группы по краям полоса под чёрточки: снимок внутри, рамка вокруг него, поэтому группа крупнее обычной вкладки
             int band = isGroup ? dp(GROUP_BAND) : 0;
             box.setPadding(band, band, band, band);
+            box.setClipToPadding(false);       // иначе полоса с чёрточками обрезается по отступу
+            box.setClipChildren(false);
             FrameLayout thumbBox = new FrameLayout(act);
             if (isGroup) {
                 thumbBox.setBackground(round(C_SURFACE2, 6, 0, 0));
