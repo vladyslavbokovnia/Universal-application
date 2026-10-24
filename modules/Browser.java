@@ -1045,6 +1045,7 @@ public class Browser implements IPlugin, ISettingsProvider {
     private static final class Group {
         final int id;
         String name;
+        int lastTabId;          // вкладка группы, из которой вышли в последний раз: её снимок на обложке группы
         Group(int id, String name) { this.id = id; this.name = name; }
     }
 
@@ -2128,7 +2129,9 @@ public class Browser implements IPlugin, ISettingsProvider {
                     JSONObject o = a.getJSONObject(i);
                     int id = o.optInt("i", 0);
                     if (id <= 0) continue;
-                    groups.add(new Group(id, o.optString("n", "Группа")));
+                    Group lg = new Group(id, o.optString("n", "Группа"));
+                    lg.lastTabId = o.optInt("l", 0);
+                    groups.add(lg);
                     if (id >= nextGroup) nextGroup = id + 1;
                 }
             } catch (JSONException ignored) { }
@@ -2141,6 +2144,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                     JSONObject o = new JSONObject();
                     o.put("i", g.id);
                     o.put("n", g.name);
+                    o.put("l", g.lastTabId);
                     a.put(o);
                 }
                 sp.edit().putString("groups_json", a.toString()).putInt("groups_next", nextGroup).apply();
@@ -2325,6 +2329,8 @@ public class Browser implements IPlugin, ISettingsProvider {
             applyBar(t);
             setDockHidden(false, false);
             t.lastUsed = SystemClock.uptimeMillis();
+            Group sg = t.group != 0 ? groupById(t.group) : null;
+            if (sg != null && sg.lastTabId != t.id) { sg.lastTabId = t.id; saveGroups(); }
             ensureWebView(t, true);
             if (t.wv != null && t.wv.getParent() == null) content.addView(t.wv, new FrameLayout.LayoutParams(-1, -1));
             if (t.wv != null) t.wv.requestFocus();
@@ -4850,7 +4856,13 @@ public class Browser implements IPlugin, ISettingsProvider {
             box.setClickable(true);
             box.setFocusable(true);
             box.setClipToOutline(true);
+            fillCard(box, t, isGroup, count, 0);
+            return box;
+        }
 
+        /** Содержимое карточки; у группы его можно перерисовать на другую вкладку (pos — номер показанной вкладки с единицы, 0: без номера). */
+        private void fillCard(FrameLayout box, Tab t, boolean isGroup, int count, int pos) {
+            box.removeAllViews();
             FrameLayout thumbBox = new FrameLayout(act);
             thumbBox.setBackgroundColor(C_SURFACE2);
             thumbBox.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
@@ -4891,8 +4903,15 @@ public class Browser implements IPlugin, ISettingsProvider {
                 FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START);
                 blp.setMargins(0, 0, 0, 0);
                 box.addView(badge, blp);
+                if (pos > 0 && count > 1) {
+                    TextView at = label(pos + " / " + count, 13, C_TEXT, true);
+                    at.setBackground(round(0x99000000, 10, 0x00000000, 0));
+                    at.setPadding(dp(8), dp(2), dp(8), dp(2));
+                    FrameLayout.LayoutParams alp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
+                    alp.setMargins(0, dp(8), dp(8), 0);
+                    box.addView(at, alp);
+                }
             }
-            return box;
         }
 
         private View tabCard(final Tab t, int index, int total) {
@@ -4913,16 +4932,22 @@ public class Browser implements IPlugin, ISettingsProvider {
                 @Override public void run() { startItemDrag(box, t, menu); }
             }, new Runnable() {
                 @Override public void run() {
-                    closeTab(t);                     // смахнули карточку: закрыть вкладку
+                    closeTab(t);                     // смахнули карточку вверх: закрыть вкладку
                     showTabs();
                 }
-            });
+            }, null);
             return box;
         }
 
         private View groupCard(final Group g) {
-            List<Tab> gt = tabsOf(g);
-            Tab first = gt.get(0);
+            final List<Tab> gt = tabsOf(g);
+            // обложка: вкладка, из которой вышли в последний раз; нет такой: текущая вкладка группы, иначе первая
+            int start = 0;
+            for (int k = 0; k < gt.size(); k++) if (gt.get(k).id == g.lastTabId) { start = k; break; }
+            if (g.lastTabId == 0 || gt.get(start).id != g.lastTabId) {
+                for (int k = 0; k < gt.size(); k++) if (gt.get(k) == cur) { start = k; break; }
+            }
+            final int[] shown = { start };
             boolean current = cur != null && cur.group == g.id;
             FrameLayout outer = new FrameLayout(act);
             View back = new View(act);
@@ -4930,13 +4955,31 @@ public class Browser implements IPlugin, ISettingsProvider {
             FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(-1, -1);
             blp.setMargins(dp(7), dp(7), 0, 0);
             outer.addView(back, blp);
-            final FrameLayout box = cardBody(first, current, true, gt.size());
-            box.setContentDescription("Группа " + g.name + ", вкладок " + gt.size() + (current ? ", в ней текущая вкладка" : ""));
+            final FrameLayout box = cardBody(gt.get(start), current, true, gt.size());
+            if (gt.size() > 1) fillCard(box, gt.get(start), true, gt.size(), start + 1);
+            box.setContentDescription("Группа " + g.name + ", вкладок " + gt.size() + (current ? ", в ней текущая вкладка" : "")
+                    + (gt.size() > 1 ? ". Смахивание вправо или влево листает вкладки группы" : ""));
             FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(-1, -2);
             clp.setMargins(0, 0, dp(7), dp(7));
             outer.addView(box, clp);
             final Runnable menu = new Runnable() { @Override public void run() { showGroupMenu(g); } };
             attachDrop(box, g, menu);
+            IntAction page = gt.size() < 2 ? null : new IntAction() {
+                @Override void run(int dir) {
+                    int n = gt.size();
+                    shown[0] = ((shown[0] + dir) % n + n) % n;       // по кругу
+                    Tab t = gt.get(shown[0]);
+                    fillCard(box, t, true, n, shown[0] + 1);
+                    box.announceForAccessibility("Вкладка " + (shown[0] + 1) + " из " + n + ": " + tabTitle(t));
+                    // новый снимок въезжает с той стороны, куда смахнули
+                    View inner = box.getChildCount() > 0 ? box.getChildAt(0) : null;
+                    if (inner != null) {
+                        inner.setTranslationX(dir > 0 ? box.getWidth() * 0.35f : -box.getWidth() * 0.35f);
+                        inner.setAlpha(0.2f);
+                        inner.animate().translationX(0).alpha(1f).setDuration(160).start();
+                    }
+                }
+            };
             cardGestures(box, new Runnable() {
                 @Override public void run() {
                     openGroup = g;
@@ -4944,19 +4987,27 @@ public class Browser implements IPlugin, ISettingsProvider {
                 }
             }, new Runnable() {
                 @Override public void run() { startItemDrag(box, g, menu); }
-            }, null);
+            }, null, page);
             return outer;
         }
 
-        /** Нажатие, долгое нажатие и (если задано) смахивание карточки в сторону. Вертикальную прокрутку списка не перехватывает. */
-        private void cardGestures(final View box, final Runnable onClick, final Runnable onLong, final Runnable onSwipe) {
+        private abstract class IntAction { abstract void run(int v); }
+
+        /**
+         * Нажатие, долгое нажатие и два вида смахивания.
+         * onSwipeUp: быстрое смахивание карточки вверх (медленное движение вверх по-прежнему прокручивает список).
+         * onPage: смахивание вправо или влево; получает +1 (к следующей) или -1 (к предыдущей).
+         */
+        private void cardGestures(final View box, final Runnable onClick, final Runnable onLong, final Runnable onSwipeUp, final IntAction onPage) {
             final float slop = ViewConfiguration.get(act).getScaledTouchSlop();
+            final float flingV = ViewConfiguration.get(act).getScaledMinimumFlingVelocity() * 6f;
             box.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) { onClick.run(); }
             });
             box.setOnTouchListener(new View.OnTouchListener() {
                 private float downX, downY;
-                private boolean dragging, longFired;
+                private boolean up, side, longFired;
+                private android.view.VelocityTracker vt;
                 private final Runnable longRun = new Runnable() {
                     @Override public void run() {
                         longFired = true;
@@ -4964,12 +5015,18 @@ public class Browser implements IPlugin, ISettingsProvider {
                         if (onLong != null) onLong.run();
                     }
                 };
+                private void recycle() {
+                    if (vt != null) { vt.recycle(); vt = null; }
+                }
                 @Override public boolean onTouch(View v, MotionEvent e) {
+                    if (vt == null) vt = android.view.VelocityTracker.obtain();
+                    vt.addMovement(e);
                     switch (e.getActionMasked()) {
                         case MotionEvent.ACTION_DOWN:
                             downX = e.getRawX();
                             downY = e.getRawY();
-                            dragging = false;
+                            up = false;
+                            side = false;
                             longFired = false;
                             if (onLong != null) v.postDelayed(longRun, ViewConfiguration.getLongPressTimeout());
                             return true;
@@ -4977,32 +5034,55 @@ public class Browser implements IPlugin, ISettingsProvider {
                             float dx = e.getRawX() - downX;
                             float dy = e.getRawY() - downY;
                             if (Math.abs(dx) > slop || Math.abs(dy) > slop) v.removeCallbacks(longRun);
-                            if (onSwipe != null && !dragging && Math.abs(dx) > slop && Math.abs(dx) > Math.abs(dy)) {
-                                dragging = true;
+                            if (longFired) return true;
+                            if (onPage != null && !side && !up && Math.abs(dx) > slop && Math.abs(dx) > Math.abs(dy)) {
+                                side = true;
                                 v.getParent().requestDisallowInterceptTouchEvent(true);
                             }
-                            if (dragging) {
-                                v.setTranslationX(dx);
-                                v.setAlpha(Math.max(0.3f, 1f - Math.abs(dx) / (v.getWidth() * 1.2f)));
+                            if (onSwipeUp != null && !up && !side && dy < -slop && Math.abs(dy) > Math.abs(dx)) {
+                                vt.computeCurrentVelocity(1000);
+                                if (-vt.getYVelocity() > flingV * 2f) {
+                                    up = true;                    // быстрый рывок вверх: список не прокручиваем, карточка идёт за пальцем
+                                    v.getParent().requestDisallowInterceptTouchEvent(true);
+                                }
+                            }
+                            if (up) {
+                                float ty = Math.min(0f, dy);
+                                v.setTranslationY(ty);
+                                v.setAlpha(Math.max(0.3f, 1f + ty / (v.getHeight() * 1.2f)));
                             }
                             return true;
                         }
-                        case MotionEvent.ACTION_UP:
+                        case MotionEvent.ACTION_UP: {
                             v.removeCallbacks(longRun);
-                            if (longFired) return true;
-                            if (dragging) {
-                                if (Math.abs(v.getTranslationX()) > v.getWidth() * 0.4f) {
-                                    if (onSwipe != null) onSwipe.run();
+                            if (longFired) { recycle(); return true; }
+                            if (up) {
+                                vt.computeCurrentVelocity(1000);
+                                boolean far = -v.getTranslationY() > v.getHeight() * 0.3f;
+                                boolean fast = -vt.getYVelocity() > flingV * 2f;
+                                recycle();
+                                if (far || fast) {
+                                    if (onSwipeUp != null) onSwipeUp.run();
                                 } else {
-                                    v.animate().translationX(0).alpha(1f).setDuration(120).start();
+                                    v.animate().translationY(0).alpha(1f).setDuration(120).start();
                                 }
+                            } else if (side) {
+                                float dx = e.getRawX() - downX;
+                                vt.computeCurrentVelocity(1000);
+                                boolean far = Math.abs(dx) > v.getWidth() * 0.18f;
+                                boolean fast = Math.abs(vt.getXVelocity()) > flingV;
+                                recycle();
+                                if (far || fast) onPage.run(dx < 0 ? 1 : -1);      // влево: следующая вкладка, вправо: предыдущая
                             } else {
+                                recycle();
                                 v.performClick();
                             }
                             return true;
+                        }
                         case MotionEvent.ACTION_CANCEL:
                             v.removeCallbacks(longRun);
-                            v.animate().translationX(0).alpha(1f).setDuration(120).start();
+                            recycle();
+                            v.animate().translationY(0).alpha(1f).setDuration(120).start();
                             return true;
                         default:
                             return true;
