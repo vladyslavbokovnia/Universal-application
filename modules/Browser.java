@@ -1122,6 +1122,9 @@ public class Browser implements IPlugin, ISettingsProvider {
         private ValueCallback<Uri[]> fileCb;
         private String defaultUa;
         private boolean fullscreen, dockHidden, started, wantPanel, tabsPanel, lightBar;
+        private Tab pendingNew, pendingFrom;      // пустая вкладка, открытая из «поиск и новая вкладка», и вкладка, с которой её открыли
+        private static final float[] CLOSE_MULT = { 8f, 12f, 18f, 26f };
+        private static final String[] CLOSE_NAMES = { "лёгкий рывок", "средний", "быстрый", "очень быстрый" };
         private ScrollView tabScroll;
         private boolean closableDown;         // касание началось на карточке, которую можно закрыть смахиванием вверх
         private FrameLayout underLayer;              // панель вкладок под меню вкладки
@@ -1835,8 +1838,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                     if (t.loading) t.wv.stopLoading(); else t.wv.reload();
                 }
             }));
-            items.add(new RingItem("＋", "Новая вкладка", true, new Runnable() { @Override public void run() { newTabWithStart(); } }));
-            items.add(new RingItem("⌕", "Поиск, адрес и закладки", true, new Runnable() { @Override public void run() { showStart(false, true); } }));
+            items.add(new RingItem("⌕", "Поиск, адрес, закладки и новая вкладка", true, new Runnable() { @Override public void run() { showStart(false, true); } }));
             items.add(new RingItem("⋮", "Меню", true, new Runnable() { @Override public void run() { showMenu(); } }));
 
             int[] hp = new int[2];
@@ -2032,12 +2034,62 @@ public class Browser implements IPlugin, ISettingsProvider {
         private void newTabWithStart() {
             if (cur == null) return;
             final Tab from = cur;
+            final int prof = bookmarkTargetProfile();
+            if (prof != 0 && !Profiles.supported()) { toast(Profiles.status()); return; }
             captureThumbThen(from, new Runnable() {
                 @Override public void run() {
-                    newTab(home(), from.profile, null, true);
+                    // пустая вкладка: домашняя страница не грузится; назад из этого экрана вернёт на прежнюю вкладку
+                    Tab nt = newTab("about:blank", prof, null, true);
+                    pendingNew = nt;
+                    pendingFrom = from;
                     showStart(true, true);
                 }
             });
+        }
+
+        /** Выбрали другой профиль на стартовом экране: текущая вкладка остаётся с тем же адресом, но открывается в новом профиле. */
+        private void applyStartProfile() {
+            if (cur != null && bmProfile >= 0 && bmProfile != cur.profile) switchProfile(cur, bmProfile);
+            bmProfile = -1;
+        }
+
+        private void switchProfile(Tab t, int profile) {
+            if (t == null || t.profile == profile) return;
+            if (profile != 0 && !Profiles.supported()) { toast(Profiles.status()); return; }
+            boolean isCur = t == cur;
+            if (t.wv != null) {
+                try {
+                    Bundle b = new Bundle();
+                    t.wv.saveState(b);              // адрес и история сохраняются, меняется только хранилище сессии
+                    t.saved = b;
+                } catch (Throwable ignored) { }
+                destroyWebView(t);
+            }
+            t.profile = profile;
+            t.blocked = false;
+            if (isCur) {
+                ensureWebView(t, true);
+                if (t.wv != null && t.wv.getParent() == null) content.addView(t.wv, new FrameLayout.LayoutParams(-1, -1));
+                if (t.wv != null) t.wv.requestFocus();
+            }
+            refreshUi();
+            saveTabs();
+            toast("Профиль вкладки: " + profileName(profile));
+        }
+
+        /** Назад из слоя: пустую вкладку из «новая вкладка» убираем и возвращаемся на прежнюю; выбранный профиль применяется к текущей странице. */
+        private void leaveLayer() {
+            final boolean wasStart = startOpen, wasForNew = startForNew;
+            closeLayer(true);
+            if (pendingNew != null && cur == pendingNew) {
+                Tab nt = pendingNew, from = pendingFrom;
+                pendingNew = null;
+                pendingFrom = null;
+                closeTab(nt);
+                if (from != null && tabs.contains(from) && cur != from) selectTab(from);
+            } else if (wasStart && !wasForNew && cur != null && bmProfile >= 0 && bmProfile != cur.profile) {
+                applyStartProfile();
+            }
         }
 
         /** Обновить стартовую страницу после смены закладки. */
@@ -2072,7 +2124,10 @@ public class Browser implements IPlugin, ISettingsProvider {
                     if (!go) return false;
                     String text = box.getText().toString();
                     closeLayer(false);
-                    if (cur != null) navigate(cur, text);
+                    if (cur != null) {
+                        applyStartProfile();
+                        navigate(cur, text);
+                    }
                     return true;
                 }
             });
@@ -2084,10 +2139,11 @@ public class Browser implements IPlugin, ISettingsProvider {
             View pb = profileBadge(sel, 56);
             pb.setClickable(true);
             pb.setFocusable(true);
-            pb.setContentDescription("Профиль для закладок: " + profileName(sel) + ". Нажмите, чтобы выбрать другой");
+            pb.setContentDescription("Профиль: " + profileName(sel) + ". Нажмите, чтобы выбрать другой"
+                    + (forNew ? "" : ". Адрес страницы останется, сменится профиль"));
             pb.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) {
-                    chooseProfile("Открывать закладки в профиле", new Pick() {
+                    chooseProfile(forNew ? "Профиль новой вкладки" : "Профиль этой страницы и закладок", new Pick() {
                         @Override public void on(int idx) {
                             bmProfile = idx;
                             showStart(forNew, false);
@@ -2104,8 +2160,9 @@ public class Browser implements IPlugin, ISettingsProvider {
                 ic.setContentDescription("Закладка: " + b.title + ", " + hostOf(b.url) + ", профиль " + profileName(sel));
                 ic.setOnClickListener(new View.OnClickListener() {
                     @Override public void onClick(View v) {
-                        if (forNew && cur != null && bookmarkTargetProfile() == cur.profile) {
+                        if (forNew && cur != null) {
                             closeLayer(false);
+                            applyStartProfile();
                             navigate(cur, b.url);         // новая вкладка сразу открывает закладку, пустой вкладки не остаётся
                         } else {
                             openBookmark(b, bookmarkTargetProfile(), true);
@@ -2134,6 +2191,18 @@ public class Browser implements IPlugin, ISettingsProvider {
                 }
             });
             cells.add(plus);
+
+            if (!forNew) {
+                TextView np = glyph("＋", C_TEXT);
+                np.setBackground(round(C_SURFACE2, 28, 0, 0));
+                np.setClickable(true);
+                np.setFocusable(true);
+                np.setContentDescription("Новая вкладка");
+                np.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) { newTabWithStart(); }
+                });
+                cells.add(np);
+            }
 
             ScrollView sv = new ScrollView(act);
             LinearLayout grid = new LinearLayout(act);
@@ -2399,7 +2468,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             if (customView != null) hideCustomView();
             else if (layer != null) {
                 if (tabsPanel && openGroup != null) openTabsRoot();      // из группы назад к общему списку, а не сразу к странице
-                else closeLayer(true);
+                else leaveLayer();
             }
             else if (urlField.hasFocus()) { urlField.clearFocus(); requestFocus(); }
             else goBackOrClose();
@@ -2429,6 +2498,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         private void selectTab(Tab t) {
+            if (pendingNew != null && t != pendingNew) { pendingNew = null; pendingFrom = null; }
             if (cur != null && cur != t) {
                 if (layer == null) captureThumb(cur);       // снимок при открытии панели вкладок уже есть: captureThumb его не затрёт
                 if (cur.wv != null) content.removeView(cur.wv);
@@ -4127,6 +4197,13 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
         }
 
+        private int closeLevel() { return Math.max(0, Math.min(CLOSE_MULT.length - 1, sp.getInt("close_speed", 2))); }
+
+        /** Скорость рывка вверх, с которой карточка закрывается: настраивается в меню вкладки. */
+        private float closeFlingV() {
+            return ViewConfiguration.get(act).getScaledMinimumFlingVelocity() * CLOSE_MULT[closeLevel()];
+        }
+
         private void dropUnder() {
             if (underLayer != null) {
                 removeView(underLayer);
@@ -4136,7 +4213,11 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         private void closeLayer(boolean runCancel) {
             if (layer == null) return;
-            if (!runCancel) dropUnder();            // меню закрыто выбором пункта: панель под ним больше не нужна
+            if (!runCancel) {
+                dropUnder();
+                pendingNew = null;
+                pendingFrom = null;
+            }            // меню закрыто выбором пункта: панель под ним больше не нужна
             removeView(layer);
             layer = null;
             tabsPanel = false;
@@ -4983,7 +5064,6 @@ public class Browser implements IPlugin, ISettingsProvider {
 
             int shown = og != null ? tabsOf(og).size() : tabs.size();
 
-            final float closeV = ViewConfiguration.get(act).getScaledMinimumFlingVelocity() * 12f;
             final float closeSlop = ViewConfiguration.get(act).getScaledTouchSlop();
             ScrollView sv = new ScrollView(act) {
                 private android.view.VelocityTracker ivt;
@@ -5004,7 +5084,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                         float dx = e.getX() - ix, dy = e.getY() - iy;
                         if (dy < -closeSlop && Math.abs(dy) > Math.abs(dx)) {
                             ivt.computeCurrentVelocity(1000);
-                            if (-ivt.getYVelocity() > closeV) {
+                            if (-ivt.getYVelocity() > closeFlingV()) {
                                 cardOwns = true;
                                 return false;
                             }
@@ -5281,7 +5361,12 @@ public class Browser implements IPlugin, ISettingsProvider {
                 }
             }, new Runnable() {
                 @Override public void run() { startItemDrag(box, g, menu); }
-            }, null, page);
+            }, new Runnable() {
+                @Override public void run() {
+                    for (Tab x : new ArrayList<Tab>(gt)) closeTab(x);      // смахнули группу вверх: закрыть все её вкладки
+                    showTabs();
+                }
+            }, page);
             return outer;
         }
 
@@ -5295,7 +5380,6 @@ public class Browser implements IPlugin, ISettingsProvider {
         private void cardGestures(final View box, final Runnable onClick, final Runnable onLong, final Runnable onSwipeUp, final IntAction onPage) {
             final float slop = ViewConfiguration.get(act).getScaledTouchSlop();
             final float flingV = ViewConfiguration.get(act).getScaledMinimumFlingVelocity() * 6f;
-            final float closeV = ViewConfiguration.get(act).getScaledMinimumFlingVelocity() * 12f;
             box.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) { onClick.run(); }
             });
@@ -5337,7 +5421,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                             }
                             if (onSwipeUp != null && !up && !side && dy < -slop && Math.abs(dy) > Math.abs(dx)) {
                                 vt.computeCurrentVelocity(1000);
-                                if (-vt.getYVelocity() > closeV) {
+                                if (-vt.getYVelocity() > closeFlingV()) {
                                     up = true;                    // быстрый рывок вверх: список не прокручиваем, карточка идёт за пальцем
                                     v.getParent().requestDisallowInterceptTouchEvent(true);
                                 }
@@ -5356,7 +5440,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                             if (up) {
                                 vt.computeCurrentVelocity(1000);
                                 boolean far = -v.getTranslationY() > v.getHeight() * 0.3f;
-                                boolean fast = -vt.getYVelocity() > closeV;
+                                boolean fast = -vt.getYVelocity() > closeFlingV();
                                 recycle();
                                 if (far || fast) {
                                     if (onSwipeUp != null) onSwipeUp.run();
@@ -5677,6 +5761,12 @@ public class Browser implements IPlugin, ISettingsProvider {
                     showTabs();
                 } });
             }
+            addG(items, "closespeed", "⚡", "Скорость закрытия смахиванием: " + CLOSE_NAMES[closeLevel()] + ". Нажмите, чтобы сменить", new Runnable() { @Override public void run() {
+                int n = (closeLevel() + 1) % CLOSE_MULT.length;
+                sp.edit().putInt("close_speed", n).apply();
+                toast("Закрытие смахиванием вверх: " + CLOSE_NAMES[n]);
+                showTabs();
+            } });
             if (t.wv != null && t != cur) {
                 addG(items, "unload", "⏏", "Выгрузить из памяти", new Runnable() { @Override public void run() {
                     unloadTab(t);
