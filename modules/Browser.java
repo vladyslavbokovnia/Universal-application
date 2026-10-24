@@ -5019,7 +5019,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         /** Карточка: снимок страницы, поверх него крупные значки сайта (слева внизу) и профиля (справа внизу). */
         private FrameLayout cardBody(Tab t, boolean current, boolean isGroup, int count) {
             FrameLayout box = new FrameLayout(act);
-            box.setBackground(round(C_SURFACE, 12, current ? C_ACCENT : (isGroup ? C_TEXT2 : C_SURFACE2), current ? 3 : (isGroup ? 2 : 1)));
+            box.setBackground(round(C_SURFACE, 12, current ? C_ACCENT : C_SURFACE2, current ? 3 : 1));
             box.setClickable(true);
             box.setFocusable(true);
             box.setClipToOutline(true);
@@ -5092,19 +5092,12 @@ public class Browser implements IPlugin, ISettingsProvider {
             final int[] shown = { start };
             boolean current = cur != null && cur.group == g.id;
             FrameLayout outer = new FrameLayout(act);
-            View back = new View(act);
-            back.setBackground(round(C_SURFACE2, 12, C_TEXT2, 1));
-            FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(-1, -1);
-            blp.setMargins(dp(7), dp(7), 0, 0);
-            outer.addView(back, blp);
             final FrameLayout box = cardBody(gt.get(start), current, true, gt.size());
             fillCard(box, gt.get(start), true, gt.size(), start + 1);
             box.setContentDescription("Группа " + g.name + ", вкладок " + gt.size() + (current ? ", в ней текущая вкладка" : "")
                     + ". Нажатие открывает показанную вкладку, долгое нажатие открывает группу"
                     + (gt.size() > 1 ? ". Смахивание вправо или влево листает вкладки группы" : ""));
-            FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(-1, -2);
-            clp.setMargins(0, 0, dp(7), dp(7));
-            outer.addView(box, clp);
+            outer.addView(box, new FrameLayout.LayoutParams(-1, -2));
             // долгое нажатие поднимает группу для перетаскивания; если отпустить на месте, откроется сама группа
             final Runnable menu = new Runnable() {
                 @Override public void run() {
