@@ -1124,7 +1124,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         private boolean fullscreen, dockHidden, started, wantPanel, tabsPanel, lightBar;
         private ScrollView tabScroll;
         private boolean closableDown;         // касание началось на карточке, которую можно закрыть смахиванием вверх
-        private View underLayer;              // панель вкладок под меню вкладки
+        private FrameLayout underLayer;              // панель вкладок под меню вкладки
         private Object dragItem;
         private int dragScrollDir;
         private int pendingProfile = -1;
@@ -4328,7 +4328,7 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         /** overTabs: меню ложится поверх панели вкладок, а не вместо неё; закрыли меню, ничего не выбрав: остаёмся на панели. */
         private void showIconGrid(String scope, String title, List<GridItem> items, boolean overTabs) {
-            final View under;
+            final FrameLayout under;
             if (overTabs && tabsPanel && layer != null) {
                 under = layer;
                 layer = null;
