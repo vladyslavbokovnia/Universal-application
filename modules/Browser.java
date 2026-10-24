@@ -5089,7 +5089,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         /** Карточка: снимок страницы, поверх него крупные значки сайта (слева внизу) и профиля (справа внизу). */
         private FrameLayout cardBody(Tab t, boolean current, boolean isGroup, int count) {
             FrameLayout box = new FrameLayout(act);
-            box.setBackground(round(C_SURFACE, 12, current ? C_ACCENT : C_SURFACE2, current ? 3 : 1));
+            box.setBackground(round(C_SURFACE, 12, 0, 0));      // без рамок: текущую вкладку показывает галочка
             box.setClickable(true);
             box.setFocusable(true);
             box.setClipToOutline(true);
