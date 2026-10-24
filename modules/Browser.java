@@ -1861,7 +1861,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 TextView v = glyph(it.glyph, C_TEXT);
                 v.setTextSize(30);
                 v.setBackground(glassBmp != null && SystemClock.uptimeMillis() - glassAt < 5000
-                        ? (Drawable) new GlassDrawable(v, glassBmp) : round(0xEE202124, 37, C_TEXT2, 1));
+                        ? (Drawable) new GlassDrawable(v, glassBmp) : round(0x55202124, 37, 0x99FFFFFF, 1));
                 v.setContentDescription(it.desc);
                 v.setAlpha(it.on ? 1f : 0.4f);
                 v.setClickable(true);
@@ -4383,7 +4383,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 FrameLayout cell = new FrameLayout(act);
                 cell.setClipChildren(false);
                 cell.setBackground(glassBmp != null && SystemClock.uptimeMillis() - glassAt < 30000
-                        ? (Drawable) new GlassDrawable(cell, glassBmp) : round(0xE6202124, 30, C_SURFACE2, 1));
+                        ? (Drawable) new GlassDrawable(cell, glassBmp) : round(0x55202124, 30, 0x99FFFFFF, 1));
                 TextView g = glyph(glyph);
                 g.setTextSize(26);
                 g.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
@@ -4962,6 +4962,60 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
         }
 
+        /** Обозначение группы: по контуру снимка столько чёрточек, сколько вкладок; чёрточка показанной вкладки крупнее и светлее. */
+        private final class TickRing extends View {
+            private final int count, active;
+            private final Paint under = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint tick = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Path outline = new Path();
+            private final Path seg = new Path();
+            private final android.graphics.RectF rect = new android.graphics.RectF();
+
+            TickRing(Context c, int count, int active) {
+                super(c);
+                this.count = Math.max(1, count);
+                this.active = active;
+                under.setStyle(Paint.Style.STROKE);
+                under.setStrokeCap(Paint.Cap.ROUND);
+                under.setColor(0x66000000);
+                tick.setStyle(Paint.Style.STROKE);
+                tick.setStrokeCap(Paint.Cap.ROUND);
+                setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            }
+
+            @Override protected void onDraw(Canvas c) {
+                float inset = dp(5);
+                rect.set(inset, inset, getWidth() - inset, getHeight() - inset);
+                if (rect.width() <= 0 || rect.height() <= 0) return;
+                outline.reset();
+                outline.addRoundRect(rect, dp(10), dp(10), Path.Direction.CW);
+                android.graphics.PathMeasure pm = new android.graphics.PathMeasure(outline, true);
+                float len = pm.getLength();
+                float gap = count == 1 ? 0f : Math.min(dp(7), len / count * 0.4f);
+                float each = len / count;
+                for (int i = 0; i < count; i++) {
+                    boolean on = i == active;
+                    float a = i * each + gap / 2f;
+                    float b = (i + 1) * each - gap / 2f;
+                    if (count > 1) {
+                        // концы с круглым колпачком выступают на половину толщины: сокращаем отрезок
+                        float w = on ? dp(6) : (dp(7) / 2f);
+                        a += w / 2f;
+                        b -= w / 2f;
+                        if (b < a + 1f) b = a + 1f;
+                    }
+                    seg.reset();
+                    pm.getSegment(a, b, seg, true);
+                    float w = on ? dp(6) : (dp(7) / 2f);
+                    under.setStrokeWidth(w + dp(2));
+                    c.drawPath(seg, under);
+                    tick.setStrokeWidth(w);
+                    tick.setColor(on ? 0xFFFFFFFF : 0x80FFFFFF);
+                    c.drawPath(seg, tick);
+                }
+            }
+        }
+
         /** Карточка: снимок страницы, поверх него крупные значки сайта (слева внизу) и профиля (справа внизу). */
         private FrameLayout cardBody(Tab t, boolean current, boolean isGroup, int count) {
             FrameLayout box = new FrameLayout(act);
@@ -4999,32 +5053,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             plp.setMargins(0, 0, dp(8), dp(8));
             box.addView(profileBadge(t.profile, 48), plp);
 
-            if (isGroup) {
-                TextView badge = label(String.valueOf(count), 24, C_TEXT, true);
-                badge.setGravity(Gravity.CENTER);
-                // фон не плашкой, а мягким пятном: тёмное в центре, к краям растворяется
-                GradientDrawable fade = new GradientDrawable();
-                fade.setGradientType(GradientDrawable.RADIAL_GRADIENT);
-                fade.setGradientRadius(dp(34));
-                fade.setGradientCenter(0.5f, 0.5f);
-                fade.setColors(new int[] { 0xB3000000, 0x99000000, 0x00000000 });
-                badge.setBackground(fade);
-                badge.setPadding(dp(12), dp(4), dp(12), dp(4));
-                badge.setMinWidth(dp(68));
-                badge.setMinHeight(dp(68));
-                badge.setShadowLayer(dp(3), 0, 0, 0xFF000000);
-                FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START);
-                blp.setMargins(0, 0, 0, 0);
-                box.addView(badge, blp);
-                if (pos > 0 && count > 1) {
-                    TextView at = label(pos + " / " + count, 13, C_TEXT, true);
-                    at.setBackground(round(0x99000000, 10, 0x00000000, 0));
-                    at.setPadding(dp(8), dp(2), dp(8), dp(2));
-                    FrameLayout.LayoutParams alp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
-                    alp.setMargins(0, dp(8), dp(8), 0);
-                    box.addView(at, alp);
-                }
-            }
+            if (isGroup) box.addView(new TickRing(act, count, pos - 1), new FrameLayout.LayoutParams(-1, -1));
         }
 
         private View tabCard(final Tab t, int index, int total) {
@@ -5069,7 +5098,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             blp.setMargins(dp(7), dp(7), 0, 0);
             outer.addView(back, blp);
             final FrameLayout box = cardBody(gt.get(start), current, true, gt.size());
-            if (gt.size() > 1) fillCard(box, gt.get(start), true, gt.size(), start + 1);
+            fillCard(box, gt.get(start), true, gt.size(), start + 1);
             box.setContentDescription("Группа " + g.name + ", вкладок " + gt.size() + (current ? ", в ней текущая вкладка" : "")
                     + ". Нажатие открывает показанную вкладку, долгое нажатие открывает группу"
                     + (gt.size() > 1 ? ". Смахивание вправо или влево листает вкладки группы" : ""));
