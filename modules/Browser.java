@@ -4954,7 +4954,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             tabScroll = sv;
             LinearLayout grid = new LinearLayout(act);
             grid.setOrientation(LinearLayout.VERTICAL);
-            grid.setPadding(dp(6), dp(14), dp(6), dp(16));
+            grid.setPadding(0, 0, 0, dp(80));        // карточки вплотную; снизу запас под зону сброса
             sv.addView(grid, new ViewGroup.LayoutParams(-1, -2));
             // Зона сброса лежит поверх списка внизу: всегда видима (прозрачна), иначе скрытый вид не получает события перетаскивания
             FrameLayout listBox = new FrameLayout(act);
@@ -4982,7 +4982,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 Object it = items.get(i);
                 View card = it instanceof Group ? groupCard((Group) it) : tabCard((Tab) it, i, items.size());
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1f);
-                lp.setMargins(dp(5), dp(5), dp(5), dp(5));
+                lp.setMargins(0, 0, 0, 0);
                 rowL.addView(card, lp);
             }
             if (items.size() % 2 == 1 && rowL != null) {
