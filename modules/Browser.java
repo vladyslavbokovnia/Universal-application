@@ -1123,8 +1123,8 @@ public class Browser implements IPlugin, ISettingsProvider {
         private String defaultUa;
         private boolean fullscreen, dockHidden, started, wantPanel, tabsPanel, lightBar;
         private Tab pendingNew, pendingFrom;      // пустая вкладка, открытая из «поиск и новая вкладка», и вкладка, с которой её открыли
-        private static final float[] CLOSE_MULT = { 8f, 12f, 18f, 26f };
-        private static final String[] CLOSE_NAMES = { "лёгкий рывок", "средний", "быстрый", "очень быстрый" };
+        private final float[] CLOSE_MULT = { 8f, 12f, 18f, 26f };
+        private final String[] CLOSE_NAMES = { "лёгкий рывок", "средний", "быстрый", "очень быстрый" };
         private ScrollView tabScroll;
         private boolean closableDown;         // касание началось на карточке, которую можно закрыть смахиванием вверх
         private FrameLayout underLayer;              // панель вкладок под меню вкладки
