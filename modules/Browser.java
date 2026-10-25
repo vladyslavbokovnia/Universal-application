@@ -5404,7 +5404,9 @@ public class Browser implements IPlugin, ISettingsProvider {
             box.addView(siteIcon(t, 48), slp);
             FrameLayout.LayoutParams plp = new FrameLayout.LayoutParams(dp(48), dp(48), Gravity.BOTTOM | Gravity.END);
             plp.setMargins(0, 0, dp(8), dp(8));
-            box.addView(profileBadge(t.profile, 48), plp);
+            View pbadge = profileBadge(t.profile, 48);
+            pbadge.setAlpha(0.5f);                  // значок профиля полупрозрачный: снимок страницы виден сквозь него
+            box.addView(pbadge, plp);
 
             if (t == cur) {
                 // страница, с которой открыли панель: крупная тонкая белая галочка по центру на тёмном пятне, растворяющемся в прозрачность
