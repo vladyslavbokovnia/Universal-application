@@ -366,6 +366,11 @@ public class Browser implements IPlugin, ISettingsProvider {
         l.add(SettingItem.toggle("links_by_scripts", "Ссылки только через скрипты",
                 "Браузер сам не обрабатывает нажатие и долгое нажатие на ссылках: не переходит по ним и не показывает свои меню, всё делают пользовательские скрипты. Применяется к новым вкладкам и при загрузке страницы", true));
         l.add(SettingItem.toggle("open_tabs_first", "Открывать с панели вкладок", "При запуске браузера сначала показывать панель вкладок", true));
+        l.add(SettingItem.choice("close_mode", "Закрытие вкладок на панели", "Как закрыть карточку вкладки или группы",
+                java.util.Arrays.asList("Двойное нажатие на карточку", "Двойное нажатие на карточку или нажатие на значок сайта",
+                        "Только нажатие на значок сайта", "Двойное нажатие на значок сайта"), 0));
+        l.add(SettingItem.choice("badge_style", "Значки на карточках вкладок", "Вид значков сайта и профиля поверх снимка",
+                java.util.Arrays.asList("Непрозрачные", "Полупрозрачные", "На тёмном градиенте"), 1));
         l.add(SettingItem.action("pin_shortcut", "Ярлык на рабочий стол",
                 "Отдельный значок «Браузер»: окно открывается как самостоятельное приложение со своей карточкой в недавних"));
         l.add(SettingItem.toggle("tts_bridge", "Озвучка для скриптов",
@@ -1126,6 +1131,11 @@ public class Browser implements IPlugin, ISettingsProvider {
         private ValueCallback<Uri[]> fileCb;
         private String defaultUa;
         private boolean fullscreen, dockHidden, started, wantPanel, tabsPanel, lightBar;
+        private final String[] BADGE_NAMES = { "непрозрачные", "полупрозрачные", "на тёмном градиенте" };
+        private int savedScrollY;                 // положение списка панели вкладок, чтобы после перетаскивания и закрытия он не прыгал в начало
+        private Group savedScrollGroup, panelGroup;
+        private long savedScrollAt;
+        private final List<Object[]> loadDots = new ArrayList<Object[]>();      // {точка загрузки, список вкладок}
         private Tab pendingNew, pendingFrom;      // пустая вкладка, открытая из «поиск и новая вкладка», и вкладка, с которой её открыли
         private ScrollView tabScroll;
         private FrameLayout underLayer;              // панель вкладок под меню вкладки
@@ -2492,10 +2502,28 @@ public class Browser implements IPlugin, ISettingsProvider {
             Tab t = new Tab(nextId++, url == null ? "" : url, Math.max(0, Math.min(PROFILES - 1, profile)));
             t.opener = opener;
             t.group = group;
-            tabs.add(t);
+            int at = tabs.size();
+            if (opener != null) {
+                // вкладка от скрипта или ссылки встаёт сразу за той, что её открыла (и за её прежними дочерними), а не в конец списка
+                int oi = tabs.indexOf(opener);
+                if (oi >= 0) {
+                    at = oi + 1;
+                    while (at < tabs.size() && descendsFrom(tabs.get(at), opener)) at++;
+                }
+            }
+            tabs.add(at, t);
             if (select) selectTab(t); else refreshUi();
             saveTabs();
             return t;
+        }
+
+        private boolean descendsFrom(Tab t, Tab ancestor) {
+            Tab x = t.opener;
+            for (int i = 0; x != null && i < 50; i++) {
+                if (x == ancestor) return true;
+                x = x.opener;
+            }
+            return false;
         }
 
         private void selectTab(Tab t) {
@@ -2976,6 +3004,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 if (t == cur) setDockHidden(false, true);
                 t.loading = true;
                 t.progress = 5;
+                updateLoadDots();
                 injectScripts(t, url, true);
                 refreshDark(t, url);
                 if (t == cur) refreshUi();
@@ -2985,6 +3014,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 t.url = url;
                 t.loading = false;
                 t.progress = 100;
+                updateLoadDots();
                 injectScripts(t, url, false);
                 syncDocStart(t);
                 if (sp.getBoolean("force_zoom", true)) v.evaluateJavascript(FORCE_ZOOM_JS, null);
@@ -4338,6 +4368,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             sv.addView(grid, new ViewGroup.LayoutParams(-1, -2));
             root.addView(sv, new LinearLayout.LayoutParams(-1, 0, 1f));
 
+            loadDots.clear();
             LinearLayout rowL = null;
             for (int i = 0; i < closedList.size(); i++) {
                 final Closed c = closedList.get(i);
@@ -4349,19 +4380,20 @@ public class Browser implements IPlugin, ISettingsProvider {
                 Tab g = new Tab(-1, c.url, c.profile);
                 g.uid = c.uid;
                 g.title = c.title;
-                FrameLayout box = cardBody(g, false, false, 0);
-                box.setContentDescription("Закрытая вкладка: " + tabTitle(g) + ", " + displayUrl(g)
-                        + ". Нажмите, чтобы вернуть. Двойное нажатие убирает из истории");
-                cardGestures(box, new Runnable() {
-                    @Override public void run() { restoreClosed(c); }
-                }, null, new Runnable() {
+                final Runnable removeRun = new Runnable() {
                     @Override public void run() {
                         closedList.remove(c);
                         deleteClosedFiles(c.uid);
                         saveClosed();
                         showClosed();
                     }
-                }, null);
+                };
+                FrameLayout box = cardBody(g, false, false, 0, removeRun);
+                box.setContentDescription("Закрытая вкладка: " + tabTitle(g) + ", " + displayUrl(g)
+                        + ". Нажмите, чтобы вернуть. Двойное нажатие убирает из истории");
+                cardGestures(box, new Runnable() {
+                    @Override public void run() { restoreClosed(c); }
+                }, null, removeRun, null);
                 rowL.addView(box, new LinearLayout.LayoutParams(0, -2, 1f));
             }
             if (closedList.size() % 2 == 1 && rowL != null) rowL.addView(new View(act), new LinearLayout.LayoutParams(0, 1, 1f));
@@ -4370,8 +4402,20 @@ public class Browser implements IPlugin, ISettingsProvider {
             }, "Закрытые вкладки: " + closedList.size());
         }
 
+        private int closeMode() { return sp.getInt("close_mode", 0); }
+        private int badgeStyle() { return Math.max(0, Math.min(BADGE_NAMES.length - 1, sp.getInt("badge_style", 1))); }
+
+        private void rememberScroll() {
+            if (tabScroll != null && tabScroll.isAttachedToWindow()) {
+                savedScrollY = tabScroll.getScrollY();
+                savedScrollGroup = panelGroup;
+                savedScrollAt = SystemClock.uptimeMillis();
+            }
+        }
+
         private void dropUnder() {
             if (underLayer != null) {
+                rememberScroll();
                 removeView(underLayer);
                 underLayer = null;
             }
@@ -4379,6 +4423,7 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         private void closeLayer(boolean runCancel) {
             if (layer == null) return;
+            if (tabsPanel) rememberScroll();
             if (!runCancel) {
                 dropUnder();
                 pendingNew = null;
@@ -5223,6 +5268,8 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         private void showTabs() {
+            if (tabsPanel) rememberScroll();       // перерисовка после перетаскивания или закрытия не должна сбрасывать прокрутку
+            loadDots.clear();
             cleanGroups();
             final Group og = openGroup;
             LinearLayout root = new LinearLayout(act);
@@ -5270,6 +5317,15 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
             showLayer(root, true, null, og != null ? "Группа " + og.name + ": вкладок " + shown : "Вкладки: " + shown);
             tabsPanel = true;
+            if (savedScrollAt != 0 && SystemClock.uptimeMillis() - savedScrollAt < 3000 && savedScrollGroup == og && savedScrollY > 0) {
+                final int keepY = savedScrollY;
+                final ScrollView svKeep = sv;
+                sv.post(new Runnable() {
+                    @Override public void run() { svKeep.scrollTo(0, keepY); }
+                });
+            }
+            savedScrollAt = 0;
+            panelGroup = og;
             if (hub != null) {
                 hub.setVisibility(View.VISIBLE);
                 hub.bringToFront();             // кнопка управления остаётся над панелью вкладок
@@ -5279,6 +5335,26 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         /** Обозначение группы: по контуру снимка столько чёрточек, сколько вкладок; чёрточка показанной вкладки крупнее и светлее. */
         private static final int GROUP_BAND = 11;
+
+        /** Тёмное пятно под значком: в центре плотнее, к краям уходит в прозрачность (как под галочкой текущей вкладки). */
+        private final class GlowView extends View {
+            private final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+            GlowView(Context c) {
+                super(c);
+                setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            }
+
+            @Override protected void onDraw(Canvas c) {
+                float w = getWidth(), h = getHeight();
+                if (w <= 0 || h <= 0) return;
+                float r = Math.min(w, h) / 2f;
+                glow.setShader(new android.graphics.RadialGradient(w / 2f, h / 2f, r,
+                        new int[] { 0x66000000, 0x38000000, 0x00000000 }, new float[] { 0f, 0.5f, 1f },
+                        android.graphics.Shader.TileMode.CLAMP));
+                c.drawCircle(w / 2f, h / 2f, r, glow);
+            }
+        }
 
         /** Метка текущей вкладки: тонкая белая галочка, под ней мягкое тёмное пятно, к краям уходящее в прозрачность. */
         private final class CurrentMark extends View {
@@ -5367,8 +5443,9 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         /** Карточка: снимок страницы, поверх него крупные значки сайта (слева внизу) и профиля (справа внизу). */
-        private FrameLayout cardBody(Tab t, boolean current, boolean isGroup, int count) {
+        private FrameLayout cardBody(Tab t, boolean current, boolean isGroup, int count, Runnable closer) {
             FrameLayout box = new FrameLayout(act);
+            box.setTag(closer);
             box.setBackground(round(C_SURFACE, 12, 0, 0));      // без рамок: текущую вкладку показывает галочка
             box.setClickable(true);
             box.setFocusable(true);
@@ -5406,14 +5483,42 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
             box.addView(thumbBox, new FrameLayout.LayoutParams(-1, dp(190)));
 
-            FrameLayout.LayoutParams slp = new FrameLayout.LayoutParams(dp(48), dp(48), Gravity.BOTTOM | Gravity.START);
-            slp.setMargins(dp(8), 0, 0, dp(8));
-            box.addView(siteIcon(t, 48), slp);
-            FrameLayout.LayoutParams plp = new FrameLayout.LayoutParams(dp(48), dp(48), Gravity.BOTTOM | Gravity.END);
-            plp.setMargins(0, 0, dp(8), dp(8));
-            View pbadge = profileBadge(t.profile, 48);
-            pbadge.setAlpha(0.5f);                  // значок профиля полупрозрачный: снимок страницы виден сквозь него
-            box.addView(pbadge, plp);
+            View si = siteIcon(t, 48);
+            final Runnable closer = box.getTag() instanceof Runnable ? (Runnable) box.getTag() : null;
+            final int cm = closeMode();
+            if (closer != null && cm >= 1) {
+                // закрытие нажатием на значок сайта
+                si.setClickable(true);
+                si.setFocusable(true);
+                si.setContentDescription("Закрыть " + (isGroup ? "группу" : "вкладку") + (cm == 3 ? ": двойное нажатие на значок" : ": нажмите на значок"));
+                final long[] lastTap = new long[1];
+                si.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        if (cm == 3) {
+                            long now = SystemClock.uptimeMillis();
+                            if (now - lastTap[0] < 320) closer.run(); else lastTap[0] = now;
+                        } else {
+                            closer.run();
+                        }
+                    }
+                });
+            }
+            addBadge(box, si, Gravity.BOTTOM | Gravity.START);
+            addBadge(box, profileBadge(t.profile, 48), Gravity.BOTTOM | Gravity.END);
+
+            if (t.id >= 0) {
+                // точка в углу снимка: страница ещё грузится или работает; пропадает, когда загрузка закончилась
+                Group wg = isGroup ? groupById(t.group) : null;
+                List<Tab> watch = wg != null ? tabsOf(wg) : new ArrayList<Tab>(java.util.Collections.singletonList(t));
+                View dot = new View(act);
+                dot.setBackground(round(0xFFFFB300, 8, 0xCCFFFFFF, 2));
+                dot.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(dp(16), dp(16), Gravity.TOP | Gravity.START);
+                dlp.setMargins(dp(10), dp(10), 0, 0);
+                box.addView(dot, dlp);
+                loadDots.add(new Object[] { dot, watch });
+                updateLoadDots();
+            }
 
             if (t == cur) {
                 // страница, с которой открыли панель: крупная тонкая белая галочка по центру на тёмном пятне, растворяющемся в прозрачность
@@ -5427,9 +5532,55 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
         }
 
+        /** Значок на снимке в выбранном виде: непрозрачный, полупрозрачный или на тёмном пятне, растворяющемся в прозрачность. */
+        private void addBadge(FrameLayout box, View badge, int gravity) {
+            int style = badgeStyle();
+            boolean start = (gravity & Gravity.START) != 0;
+            if (style == 2) {
+                FrameLayout.LayoutParams glp = new FrameLayout.LayoutParams(dp(96), dp(96), gravity);
+                glp.setMargins(start ? -dp(16) : 0, 0, start ? 0 : -dp(16), -dp(16));
+                box.addView(new GlowView(act), glp);
+            } else if (style == 1) {
+                badge.setAlpha(0.5f);
+            }
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(48), dp(48), gravity);
+            lp.setMargins(start ? dp(8) : 0, 0, start ? 0 : dp(8), dp(8));
+            box.addView(badge, lp);
+        }
+
+        /** Точки загрузки на карточках: видны, пока хотя бы одна из вкладок карточки грузится. */
+        private void updateLoadDots() {
+            for (int i = loadDots.size() - 1; i >= 0; i--) {
+                View dot = (View) loadDots.get(i)[0];
+                @SuppressWarnings("unchecked") List<Tab> watch = (List<Tab>) loadDots.get(i)[1];
+                if (dot.getParent() == null) { loadDots.remove(i); continue; }
+                boolean any = false;
+                for (Tab w : watch) if (w.loading) { any = true; break; }
+                if (any) {
+                    dot.setVisibility(View.VISIBLE);
+                    if (dot.getAnimation() == null) {
+                        android.view.animation.AlphaAnimation pulse = new android.view.animation.AlphaAnimation(1f, 0.25f);
+                        pulse.setDuration(650);
+                        pulse.setRepeatCount(android.view.animation.Animation.INFINITE);
+                        pulse.setRepeatMode(android.view.animation.Animation.REVERSE);
+                        dot.startAnimation(pulse);
+                    }
+                } else {
+                    dot.clearAnimation();
+                    dot.setVisibility(View.GONE);
+                }
+            }
+        }
+
         private View tabCard(final Tab t, int index, int total) {
             boolean current = t == cur;
-            final FrameLayout box = cardBody(t, current, false, 0);
+            final Runnable closer = new Runnable() {
+                @Override public void run() {
+                    closeTabKeep(t);                 // закрыть вкладку (она остаётся в истории закрытых)
+                    showTabs();
+                }
+            };
+            final FrameLayout box = cardBody(t, current, false, 0, closer);
             box.setContentDescription("Вкладка " + (index + 1) + " из " + total + ": " + tabTitle(t) + ", " + displayUrl(t)
                     + ", профиль " + profileName(t.profile) + (current ? ", текущая" : "") + ". Двойное нажатие закрывает");
 
@@ -5443,12 +5594,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 }
             }, new Runnable() {
                 @Override public void run() { startItemDrag(box, t, menu); }
-            }, new Runnable() {
-                @Override public void run() {
-                    closeTabKeep(t);                 // двойное нажатие на карточке: закрыть вкладку
-                    showTabs();
-                }
-            }, null);
+            }, closeMode() <= 1 ? closer : null, null);
             return box;
         }
 
@@ -5463,7 +5609,13 @@ public class Browser implements IPlugin, ISettingsProvider {
             final int[] shown = { start };
             boolean current = cur != null && cur.group == g.id;
             FrameLayout outer = new FrameLayout(act);
-            final FrameLayout box = cardBody(gt.get(start), current, true, gt.size());
+            final Runnable closer = new Runnable() {
+                @Override public void run() {
+                    for (Tab x : new ArrayList<Tab>(gt)) closeTabKeep(x);      // закрыть все вкладки группы
+                    showTabs();
+                }
+            };
+            final FrameLayout box = cardBody(gt.get(start), current, true, gt.size(), closer);
             fillCard(box, gt.get(start), true, gt.size(), start + 1);
             box.setContentDescription("Группа " + g.name + ", вкладок " + gt.size() + (current ? ", в ней текущая вкладка" : "") + ". Двойное нажатие закрывает группу"
                     + ". Нажатие открывает показанную вкладку, долгое нажатие открывает группу"
@@ -5501,12 +5653,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 }
             }, new Runnable() {
                 @Override public void run() { startItemDrag(box, g, menu); }
-            }, new Runnable() {
-                @Override public void run() {
-                    for (Tab x : new ArrayList<Tab>(gt)) closeTabKeep(x);      // двойное нажатие на группе: закрыть все её вкладки
-                    showTabs();
-                }
-            }, page);
+            }, closeMode() <= 1 ? closer : null, page);
             return outer;
         }
 
@@ -5897,6 +6044,12 @@ public class Browser implements IPlugin, ISettingsProvider {
                     showTabs();
                 } });
             }
+            addG(items, "badges", "◐", "Значки на карточках: " + BADGE_NAMES[badgeStyle()] + ". Нажмите, чтобы сменить", new Runnable() { @Override public void run() {
+                int n = (badgeStyle() + 1) % BADGE_NAMES.length;
+                sp.edit().putInt("badge_style", n).apply();
+                toast("Значки: " + BADGE_NAMES[n]);
+                showTabs();
+            } });
             loadClosed();
             addG(items, "closed", "🕘", "Закрытые вкладки: " + closedList.size(), new Runnable() { @Override public void run() { showClosed(); } });
             if (t.wv != null && t != cur) {
