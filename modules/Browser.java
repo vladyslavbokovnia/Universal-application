@@ -1124,10 +1124,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         private String defaultUa;
         private boolean fullscreen, dockHidden, started, wantPanel, tabsPanel, lightBar;
         private Tab pendingNew, pendingFrom;      // пустая вкладка, открытая из «поиск и новая вкладка», и вкладка, с которой её открыли
-        private final float[] CLOSE_MULT = { 8f, 12f, 18f, 26f };
-        private final String[] CLOSE_NAMES = { "лёгкий рывок", "средний", "быстрый", "очень быстрый" };
         private ScrollView tabScroll;
-        private boolean closableDown;         // касание началось на карточке, которую можно закрыть смахиванием вверх
         private FrameLayout underLayer;              // панель вкладок под меню вкладки
         private Object dragItem;
         private int dragScrollDir;
@@ -4200,38 +4197,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
         }
 
-        /** Список карточек: быстрый рывок вверх по закрываемой карточке достаётся ей, а не прокрутке списка. */
-        private ScrollView swipeScroll() {
-            final float closeSlop = ViewConfiguration.get(act).getScaledTouchSlop();
-            return new ScrollView(act) {
-                private android.view.VelocityTracker ivt;
-                private float ix, iy;
-                private boolean cardOwns;
-                @Override public boolean onInterceptTouchEvent(MotionEvent e) {
-                    int a = e.getActionMasked();
-                    if (a == MotionEvent.ACTION_DOWN) {
-                        cardOwns = false;
-                        ix = e.getX();
-                        iy = e.getY();
-                        if (ivt != null) ivt.recycle();
-                        ivt = android.view.VelocityTracker.obtain();
-                    }
-                    if (ivt != null) ivt.addMovement(e);
-                    if (cardOwns) return false;               // быстрый рывок вверх по карточке: список не перехватывает
-                    if (a == MotionEvent.ACTION_MOVE && closableDown && ivt != null) {
-                        float dx = e.getX() - ix, dy = e.getY() - iy;
-                        if (dy < -closeSlop && Math.abs(dy) > Math.abs(dx)) {
-                            ivt.computeCurrentVelocity(1000);
-                            if (-ivt.getYVelocity() > closeFlingV()) {
-                                cardOwns = true;
-                                return false;
-                            }
-                        }
-                    }
-                    return super.onInterceptTouchEvent(e);
-                }
-            };
-        }
+        private ScrollView swipeScroll() { return new ScrollView(act); }
 
         // ------------------------------------------------------------ история закрытых вкладок
 
@@ -4322,7 +4288,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             saveTabs();
         }
 
-        /** Закрытые вкладки в том же виде, что и панель вкладок: нажатие возвращает вкладку, рывок вверх убирает из истории. */
+        /** Закрытые вкладки в том же виде, что и панель вкладок: нажатие возвращает вкладку, двойное нажатие убирает из истории. */
         private void showClosed() {
             closeLayer(false);                  // слой с отменой не пересоздаём поверх себя: иначе отмена вернёт панель вкладок под него
             loadClosed();
@@ -4378,7 +4344,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 g.title = c.title;
                 FrameLayout box = cardBody(g, false, false, 0);
                 box.setContentDescription("Закрытая вкладка: " + tabTitle(g) + ", " + displayUrl(g)
-                        + ". Нажмите, чтобы вернуть. Смахните вверх, чтобы убрать из истории");
+                        + ". Нажмите, чтобы вернуть. Двойное нажатие убирает из истории");
                 cardGestures(box, new Runnable() {
                     @Override public void run() { restoreClosed(c); }
                 }, null, new Runnable() {
@@ -4395,13 +4361,6 @@ public class Browser implements IPlugin, ISettingsProvider {
             showLayer(root, true, new Runnable() {
                 @Override public void run() { showTabs(); }
             }, "Закрытые вкладки: " + closedList.size());
-        }
-
-        private int closeLevel() { return Math.max(0, Math.min(CLOSE_MULT.length - 1, sp.getInt("close_speed", 2))); }
-
-        /** Скорость рывка вверх, с которой карточка закрывается: настраивается в меню вкладки. */
-        private float closeFlingV() {
-            return ViewConfiguration.get(act).getScaledMinimumFlingVelocity() * CLOSE_MULT[closeLevel()];
         }
 
         private void dropUnder() {
@@ -5463,7 +5422,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             boolean current = t == cur;
             final FrameLayout box = cardBody(t, current, false, 0);
             box.setContentDescription("Вкладка " + (index + 1) + " из " + total + ": " + tabTitle(t) + ", " + displayUrl(t)
-                    + ", профиль " + profileName(t.profile) + (current ? ", текущая" : ""));
+                    + ", профиль " + profileName(t.profile) + (current ? ", текущая" : "") + ". Двойное нажатие закрывает");
 
             // крестика на карточке нет: вкладка закрывается смахиванием или пунктом «Закрыть вкладку» в меню долгого нажатия
             final Runnable menu = new Runnable() { @Override public void run() { showTabMenu(t); } };
@@ -5477,7 +5436,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 @Override public void run() { startItemDrag(box, t, menu); }
             }, new Runnable() {
                 @Override public void run() {
-                    closeTabKeep(t);                 // смахнули карточку вверх: закрыть вкладку
+                    closeTabKeep(t);                 // двойное нажатие на карточке: закрыть вкладку
                     showTabs();
                 }
             }, null);
@@ -5497,7 +5456,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             FrameLayout outer = new FrameLayout(act);
             final FrameLayout box = cardBody(gt.get(start), current, true, gt.size());
             fillCard(box, gt.get(start), true, gt.size(), start + 1);
-            box.setContentDescription("Группа " + g.name + ", вкладок " + gt.size() + (current ? ", в ней текущая вкладка" : "")
+            box.setContentDescription("Группа " + g.name + ", вкладок " + gt.size() + (current ? ", в ней текущая вкладка" : "") + ". Двойное нажатие закрывает группу"
                     + ". Нажатие открывает показанную вкладку, долгое нажатие открывает группу"
                     + (gt.size() > 1 ? ". Смахивание вправо или влево листает вкладки группы" : ""));
             outer.addView(box, new FrameLayout.LayoutParams(-1, -2));
@@ -5535,7 +5494,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 @Override public void run() { startItemDrag(box, g, menu); }
             }, new Runnable() {
                 @Override public void run() {
-                    for (Tab x : new ArrayList<Tab>(gt)) closeTabKeep(x);      // смахнули группу вверх: закрыть все её вкладки
+                    for (Tab x : new ArrayList<Tab>(gt)) closeTabKeep(x);      // двойное нажатие на группе: закрыть все её вкладки
                     showTabs();
                 }
             }, page);
@@ -5545,25 +5504,33 @@ public class Browser implements IPlugin, ISettingsProvider {
         private abstract class IntAction { abstract void run(int v); }
 
         /**
-         * Нажатие, долгое нажатие и два вида смахивания.
-         * onSwipeUp: быстрое смахивание карточки вверх (медленное движение вверх по-прежнему прокручивает список).
+         * Нажатие, долгое нажатие, двойное нажатие и смахивание вбок.
+         * onDouble: двойное нажатие (если задано, одиночное выполняется с небольшой задержкой, чтобы отличить его от двойного).
          * onPage: смахивание вправо или влево; получает +1 (к следующей) или -1 (к предыдущей).
          */
-        private void cardGestures(final View box, final Runnable onClick, final Runnable onLong, final Runnable onSwipeUp, final IntAction onPage) {
+        private void cardGestures(final View box, final Runnable onClick, final Runnable onLong, final Runnable onDouble, final IntAction onPage) {
             final float slop = ViewConfiguration.get(act).getScaledTouchSlop();
             final float flingV = ViewConfiguration.get(act).getScaledMinimumFlingVelocity() * 6f;
+            final long dtTimeout = Math.min(ViewConfiguration.getDoubleTapTimeout(), 280);
             box.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) { onClick.run(); }
             });
             box.setOnTouchListener(new View.OnTouchListener() {
                 private float downX, downY;
-                private boolean up, side, longFired;
+                private boolean side, longFired, tapPending;
+                private long lastUp;
                 private android.view.VelocityTracker vt;
                 private final Runnable longRun = new Runnable() {
                     @Override public void run() {
                         longFired = true;
                         box.setPressed(false);
                         if (onLong != null) onLong.run();
+                    }
+                };
+                private final Runnable clickRun = new Runnable() {
+                    @Override public void run() {
+                        tapPending = false;
+                        box.performClick();
                     }
                 };
                 private void recycle() {
@@ -5576,10 +5543,8 @@ public class Browser implements IPlugin, ISettingsProvider {
                         case MotionEvent.ACTION_DOWN:
                             downX = e.getRawX();
                             downY = e.getRawY();
-                            up = false;
                             side = false;
                             longFired = false;
-                            closableDown = onSwipeUp != null;
                             if (onLong != null) v.postDelayed(longRun, ViewConfiguration.getLongPressTimeout());
                             return true;
                         case MotionEvent.ACTION_MOVE: {
@@ -5587,56 +5552,46 @@ public class Browser implements IPlugin, ISettingsProvider {
                             float dy = e.getRawY() - downY;
                             if (Math.abs(dx) > slop || Math.abs(dy) > slop) v.removeCallbacks(longRun);
                             if (longFired) return true;
-                            if (onPage != null && !side && !up && Math.abs(dx) > slop && Math.abs(dx) > Math.abs(dy)) {
+                            if (onPage != null && !side && Math.abs(dx) > slop && Math.abs(dx) > Math.abs(dy)) {
                                 side = true;
                                 v.getParent().requestDisallowInterceptTouchEvent(true);
-                            }
-                            if (onSwipeUp != null && !up && !side && dy < -slop && Math.abs(dy) > Math.abs(dx)) {
-                                vt.computeCurrentVelocity(1000);
-                                if (-vt.getYVelocity() > closeFlingV()) {
-                                    up = true;                    // быстрый рывок вверх: список не прокручиваем, карточка идёт за пальцем
-                                    v.getParent().requestDisallowInterceptTouchEvent(true);
-                                }
-                            }
-                            if (up) {
-                                float ty = Math.min(0f, dy);
-                                v.setTranslationY(ty);
-                                v.setAlpha(Math.max(0.3f, 1f + ty / (v.getHeight() * 1.2f)));
                             }
                             return true;
                         }
                         case MotionEvent.ACTION_UP: {
                             v.removeCallbacks(longRun);
-                            closableDown = false;
                             if (longFired) { recycle(); return true; }
-                            if (up) {
-                                vt.computeCurrentVelocity(1000);
-                                boolean far = -v.getTranslationY() > v.getHeight() * 0.3f;
-                                boolean fast = -vt.getYVelocity() > closeFlingV();
-                                recycle();
-                                if (far || fast) {
-                                    if (onSwipeUp != null) onSwipeUp.run();
-                                } else {
-                                    v.animate().translationY(0).alpha(1f).setDuration(120).start();
-                                }
-                            } else if (side) {
-                                float dx = e.getRawX() - downX;
+                            float dx = e.getRawX() - downX;
+                            float dy = e.getRawY() - downY;
+                            if (side) {
                                 vt.computeCurrentVelocity(1000);
                                 boolean far = Math.abs(dx) > v.getWidth() * 0.18f;
                                 boolean fast = Math.abs(vt.getXVelocity()) > flingV;
                                 recycle();
                                 if (far || fast) onPage.run(dx < 0 ? 1 : -1);      // влево: следующая вкладка, вправо: предыдущая
-                            } else {
-                                recycle();
+                                return true;
+                            }
+                            recycle();
+                            if (Math.abs(dx) > slop * 3 || Math.abs(dy) > slop * 3) return true;     // это не нажатие
+                            if (onDouble == null) {
                                 v.performClick();
+                            } else {
+                                long now = e.getEventTime();
+                                if (tapPending && now - lastUp <= dtTimeout) {
+                                    v.removeCallbacks(clickRun);
+                                    tapPending = false;
+                                    onDouble.run();
+                                } else {
+                                    tapPending = true;
+                                    lastUp = now;
+                                    v.postDelayed(clickRun, dtTimeout);
+                                }
                             }
                             return true;
                         }
                         case MotionEvent.ACTION_CANCEL:
                             v.removeCallbacks(longRun);
-                            closableDown = false;
                             recycle();
-                            v.animate().translationY(0).alpha(1f).setDuration(120).start();
                             return true;
                         default:
                             return true;
@@ -5935,12 +5890,6 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
             loadClosed();
             addG(items, "closed", "🕘", "Закрытые вкладки: " + closedList.size(), new Runnable() { @Override public void run() { showClosed(); } });
-            addG(items, "closespeed", "⚡", "Скорость закрытия смахиванием: " + CLOSE_NAMES[closeLevel()] + ". Нажмите, чтобы сменить", new Runnable() { @Override public void run() {
-                int n = (closeLevel() + 1) % CLOSE_MULT.length;
-                sp.edit().putInt("close_speed", n).apply();
-                toast("Закрытие смахиванием вверх: " + CLOSE_NAMES[n]);
-                showTabs();
-            } });
             if (t.wv != null && t != cur) {
                 addG(items, "unload", "⏏", "Выгрузить из памяти", new Runnable() { @Override public void run() {
                     unloadTab(t);
