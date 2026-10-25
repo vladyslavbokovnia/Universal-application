@@ -940,7 +940,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             "else{resp.responseText=r.text||'';resp.response=(d.responseType==='json')?jp(resp.responseText,null):resp.responseText;}\n" +
             "}\n" +
             "var cb=r.kind==='load'?d.onload:r.kind==='timeout'?d.ontimeout:r.kind==='abort'?d.onabort:d.onerror;\n" +
-            "if(r.kind==='error')resp.error=r.error||'error';\n" +
+            "if(r.kind==='error'){resp.error=r.error||'error';try{console.error('[UserScript] GM_xmlhttpRequest: '+d.url+' -> '+resp.error);}catch(e){}}\n" +
             "try{if(d.onreadystatechange)d.onreadystatechange(resp);if(cb)cb(resp);if(d.onloadend)d.onloadend(resp);}catch(e){console.error(e);}\n" +
             "}};\n" +
             "try{Object.defineProperty(window,DP,{value:D,configurable:true});}catch(e){}\n" +
@@ -949,6 +949,9 @@ public class Browser implements IPlugin, ISettingsProvider {
             "xmlHttpRequest:function(d){return new Promise(function(res,rej){var o={};for(var k in d)o[k]=d[k];var l=d.onload,e=d.onerror;o.onload=function(r){if(l)l(r);res(r);};o.onerror=function(r){if(e)e(r);rej(r);};GM_xmlhttpRequest(o);});}};\n" +
             "GM.xmlhttpRequest=GM.xmlHttpRequest;\n" +
             "GM.addValueChangeListener=GM_addValueChangeListener;GM.removeValueChangeListener=GM_removeValueChangeListener;GM.notification=GM_notification;GM.download=GM_download;GM.addElement=GM_addElement;GM.getResourceUrl=pr(GM_getResourceURL);GM.getResourceText=pr(GM_getResourceText);GM.getTab=pr(GM_getTab);GM.saveTab=GM_saveTab;GM.getTabs=pr(GM_getTabs);\n" +
+            "GM.getValues=pr(function(o){var r={},i,k;if(Array.isArray(o)){for(i=0;i<o.length;i++)r[o[i]]=GM_getValue(o[i]);}else if(o){for(k in o)r[k]=GM_getValue(k,o[k]);}return r;});\n" +
+            "GM.setValues=pr(function(o){for(var k in (o||{}))GM_setValue(k,o[k]);});\n" +
+            "GM.deleteValues=pr(function(a){for(var i=0;i<(a||[]).length;i++)GM_deleteValue(a[i]);});\n" +
             "var run=function(GM_info,GM_getValue,GM_setValue,GM_deleteValue,GM_listValues,GM_addValueChangeListener,GM_removeValueChangeListener,GM_addStyle,GM_registerMenuCommand,GM_unregisterMenuCommand,GM_openInTab,GM_setClipboard,GM_xmlhttpRequest,GM_log,GM,unsafeWindow,GM_notification,GM_download,GM_addElement,GM_getResourceText,GM_getResourceURL,GM_getResourceUrl,GM_getTab,GM_saveTab,GM_getTabs){\n" +
             "@@BODY@@\n" +
             "};\n" +
@@ -3418,6 +3421,10 @@ public class Browser implements IPlugin, ISettingsProvider {
             } catch (Throwable e) {
                 put(out, "kind", t.aborted.contains(key) ? "abort" : "error");
                 put(out, "error", String.valueOf(e.getMessage()));
+                if (e instanceof SecurityException) {
+                    final String why = inj.script.name + ": " + e.getMessage();
+                    h.post(new Runnable() { @Override public void run() { if (!closed) toast(why); } });
+                }
             } finally {
                 t.conns.remove(key);
                 t.aborted.remove(key);
