@@ -53,8 +53,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p ~/.android
-          base64 -d ci/debug.keystore.b64 > ~/.android/debug.keystore
+          base64 -d ci/debug.keystore.b64 > ci/debug.keystore
       - name: Build host
         if: steps.apply.outputs.has_patches == 'true'
         shell: bash

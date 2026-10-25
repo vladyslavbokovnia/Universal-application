@@ -19,16 +19,13 @@ jobs:
         java-version: "17"
         distribution: "temurin"
         cache: gradle
-    # Debug signing key lives in the repo (ci/debug.keystore.b64), so every build is signed
-    # with the same key regardless of runner or cache state, and APK updates install over
-    # the previous version without uninstalling it.
+    # Decode the persistent key to the exact path explicitly selected in app/build.gradle.
     - name: Install persistent debug signing key
       shell: bash
       run: |
         set -euo pipefail
-        mkdir -p ~/.android
-        base64 -d ci/debug.keystore.b64 > ~/.android/debug.keystore
-        keytool -list -keystore ~/.android/debug.keystore -storepass android | grep -i 'androiddebugkey'
+        base64 -d ci/debug.keystore.b64 > ci/debug.keystore
+        keytool -list -keystore ci/debug.keystore -storepass android | grep -i 'androiddebugkey'
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
     - name: Build APK
