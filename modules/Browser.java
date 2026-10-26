@@ -27,7 +27,9 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
 import android.util.Base64;
 import android.view.DragEvent;
 import android.view.GestureDetector;
@@ -1131,7 +1133,8 @@ public class Browser implements IPlugin, ISettingsProvider {
         private ValueCallback<Uri[]> fileCb;
         private String defaultUa;
         private boolean fullscreen, dockHidden, started, wantPanel, tabsPanel, lightBar;
-        private final String[] BADGE_NAMES = { "непрозрачные", "полупрозрачные", "на тёмном градиенте" };
+        private final String[] BADGE_NAMES = { "непрозрачные", "полупрозрачные", "растворяются по краям", "полупрозрачные и растворяются по краям" };
+        private static final int BADGE_DP = 64;       // размер значков сайта и профиля на карточках вкладок
         private int savedScrollY;                 // положение списка панели вкладок, чтобы после перетаскивания и закрытия он не прыгал в начало
         private Group savedScrollGroup, panelGroup;
         private long savedScrollAt;
@@ -2058,6 +2061,81 @@ public class Browser implements IPlugin, ISettingsProvider {
             });
         }
 
+        /**
+         * «＋» на экране поиска: сразу открыть новую вкладку с выбранным здесь профилем и введённым адресом или запросом,
+         * без второго экрана ввода. Текущая вкладка не меняется. Пустая строка даёт пустую вкладку.
+         */
+        private void openNewTabFromStart(String text) {
+            if (cur == null) return;
+            final Tab from = cur;
+            final int prof = bookmarkTargetProfile();
+            if (prof != 0 && !Profiles.supported()) { toast(Profiles.status()); return; }
+            String raw = text == null ? "" : text.trim();
+            final String url = raw.length() == 0 ? "about:blank" : normalize(raw);
+            if (url == null) return;
+            bmProfile = -1;
+            captureThumbThen(from, new Runnable() {
+                @Override public void run() {
+                    closeLayer(false);
+                    newTab(url, prof, null, true);
+                }
+            });
+        }
+
+        /** Адрес подсказок поиска для выбранной в настройках поисковой системы (ответ: [запрос, [подсказки…]]). */
+        private String suggestUrl(String q) throws java.io.UnsupportedEncodingException {
+            String tpl = sp.getString("search_url", DEF_SEARCH).toLowerCase(Locale.ROOT);
+            String e = URLEncoder.encode(q, "UTF-8");
+            if (tpl.contains("duckduckgo")) return "https://duckduckgo.com/ac/?type=list&q=" + e;
+            if (tpl.contains("yandex")) return "https://suggest.yandex.ru/suggest-ff.cgi?part=" + e;
+            if (tpl.contains("bing")) return "https://api.bing.com/osjson.aspx?query=" + e;
+            return "https://suggestqueries.google.com/complete/search?client=firefox&q=" + e;
+        }
+
+        /** Подсказки поиска под строкой ввода; устаревшие ответы (строка уже изменилась) отбрасываются. */
+        private void loadSuggestions(final String q, final int seq, final int[] current, final LinearLayout into) {
+            try {
+                pool.execute(new Runnable() {
+                    @Override public void run() {
+                        final List<String> found = new ArrayList<String>();
+                        try {
+                            JSONArray a = new JSONArray(Net.fetchText(suggestUrl(q), 64 * 1024, true));
+                            JSONArray s = a.getJSONArray(1);
+                            for (int i = 0; i < s.length() && found.size() < 8; i++) {
+                                String x = s.optString(i, "");
+                                if (x.length() > 0) found.add(x);
+                            }
+                        } catch (Throwable ignored) { }
+                        h.post(new Runnable() {
+                            @Override public void run() {
+                                if (closed || seq != current[0] || !into.isAttachedToWindow()) return;
+                                into.removeAllViews();
+                                for (final String x : found) {
+                                    TextView row = label("⌕   " + x, 16, C_TEXT, false);
+                                    row.setSingleLine(true);
+                                    row.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                                    row.setGravity(Gravity.CENTER_VERTICAL);
+                                    row.setPadding(dp(18), 0, dp(18), 0);
+                                    row.setClickable(true);
+                                    row.setFocusable(true);
+                                    row.setOnClickListener(new View.OnClickListener() {
+                                        @Override public void onClick(View v) {
+                                            closeLayer(false);
+                                            if (cur != null) {
+                                                applyStartProfile();
+                                                navigate(cur, x);
+                                            }
+                                        }
+                                    });
+                                    into.addView(row, new LinearLayout.LayoutParams(-1, dp(44)));
+                                }
+                            }
+                        });
+                    }
+                });
+            } catch (Throwable ignored) { }
+        }
+
         /** Выбрали другой профиль на стартовом экране: текущая вкладка остаётся с тем же адресом, но открывается в новом профиле. */
         private void applyStartProfile() {
             if (cur != null && bmProfile >= 0 && bmProfile != cur.profile) switchProfile(cur, bmProfile);
@@ -2144,6 +2222,27 @@ public class Browser implements IPlugin, ISettingsProvider {
             });
             root.addView(box, new LinearLayout.LayoutParams(-1, dp(52)));
 
+            // подсказки поиска под строкой: появляются по мере ввода
+            final LinearLayout sug = new LinearLayout(act);
+            sug.setOrientation(LinearLayout.VERTICAL);
+            root.addView(sug, new LinearLayout.LayoutParams(-1, -2));
+            final int[] sugSeq = new int[1];
+            final Runnable[] sugJob = new Runnable[1];
+            box.addTextChangedListener(new TextWatcher() {
+                @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
+                @Override public void onTextChanged(CharSequence s, int a, int b, int c) { }
+                @Override public void afterTextChanged(Editable s) {
+                    final String q = s.toString().trim();
+                    final int my = ++sugSeq[0];
+                    if (sugJob[0] != null) h.removeCallbacks(sugJob[0]);
+                    if (q.length() == 0 || q.indexOf("://") > 0) { sug.removeAllViews(); return; }
+                    sugJob[0] = new Runnable() {
+                        @Override public void run() { loadSuggestions(q, my, sugSeq, sug); }
+                    };
+                    h.postDelayed(sugJob[0], 220);
+                }
+            });
+
             final int sel = bookmarkTargetProfile();
             List<View> cells = new ArrayList<View>();
 
@@ -2208,9 +2307,9 @@ public class Browser implements IPlugin, ISettingsProvider {
                 np.setBackground(round(C_SURFACE2, 28, 0, 0));
                 np.setClickable(true);
                 np.setFocusable(true);
-                np.setContentDescription("Новая вкладка");
+                np.setContentDescription("Новая вкладка с выбранным профилем и введённым адресом или запросом");
                 np.setOnClickListener(new View.OnClickListener() {
-                    @Override public void onClick(View v) { newTabWithStart(); }
+                    @Override public void onClick(View v) { openNewTabFromStart(box.getText().toString()); }
                 });
                 cells.add(np);
             }
@@ -5336,26 +5435,6 @@ public class Browser implements IPlugin, ISettingsProvider {
         /** Обозначение группы: по контуру снимка столько чёрточек, сколько вкладок; чёрточка показанной вкладки крупнее и светлее. */
         private static final int GROUP_BAND = 11;
 
-        /** Тёмное пятно под значком: в центре плотнее, к краям уходит в прозрачность (как под галочкой текущей вкладки). */
-        private final class GlowView extends View {
-            private final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
-
-            GlowView(Context c) {
-                super(c);
-                setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-            }
-
-            @Override protected void onDraw(Canvas c) {
-                float w = getWidth(), h = getHeight();
-                if (w <= 0 || h <= 0) return;
-                float r = Math.min(w, h) / 2f;
-                glow.setShader(new android.graphics.RadialGradient(w / 2f, h / 2f, r,
-                        new int[] { 0x66000000, 0x38000000, 0x00000000 }, new float[] { 0f, 0.5f, 1f },
-                        android.graphics.Shader.TileMode.CLAMP));
-                c.drawCircle(w / 2f, h / 2f, r, glow);
-            }
-        }
-
         /** Метка текущей вкладки: тонкая белая галочка, под ней мягкое тёмное пятно, к краям уходящее в прозрачность. */
         private final class CurrentMark extends View {
             private final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -5483,7 +5562,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
             box.addView(thumbBox, new FrameLayout.LayoutParams(-1, dp(190)));
 
-            View si = siteIcon(t, 48);
+            View si = siteIcon(t, BADGE_DP);
             final Runnable closer = box.getTag() instanceof Runnable ? (Runnable) box.getTag() : null;
             final int cm = closeMode();
             if (closer != null && cm >= 1) {
@@ -5504,7 +5583,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 });
             }
             addBadge(box, si, Gravity.BOTTOM | Gravity.START);
-            addBadge(box, profileBadge(t.profile, 48), Gravity.BOTTOM | Gravity.END);
+            addBadge(box, profileBadge(t.profile, BADGE_DP), Gravity.BOTTOM | Gravity.END);
 
             if (t.id >= 0) {
                 // точка в углу снимка: страница ещё грузится или работает; пропадает, когда загрузка закончилась
@@ -5532,20 +5611,53 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
         }
 
-        /** Значок на снимке в выбранном виде: непрозрачный, полупрозрачный или на тёмном пятне, растворяющемся в прозрачность. */
+        /**
+         * Значок на снимке в выбранном виде: непрозрачный; полупрозрачный; сам значок растворяется к краям;
+         * или всё вместе (полупрозрачный и растворяющийся по краям).
+         */
         private void addBadge(FrameLayout box, View badge, int gravity) {
             int style = badgeStyle();
             boolean start = (gravity & Gravity.START) != 0;
-            if (style == 2) {
-                FrameLayout.LayoutParams glp = new FrameLayout.LayoutParams(dp(96), dp(96), gravity);
-                glp.setMargins(start ? -dp(16) : 0, 0, start ? 0 : -dp(16), -dp(16));
-                box.addView(new GlowView(act), glp);
-            } else if (style == 1) {
-                badge.setAlpha(0.5f);
+            boolean fade = style == 2 || style == 3;
+            if (style == 1 || style == 3) badge.setAlpha(0.5f);
+            if (fade) {
+                // рамка чуть больше значка: у края значок уже наполовину прозрачен и плавно сходит на нет
+                int host = dp(BADGE_DP) * 118 / 100;
+                FadeFrame ff = new FadeFrame(act);
+                ff.addView(badge, new FrameLayout.LayoutParams(dp(BADGE_DP), dp(BADGE_DP), Gravity.CENTER));
+                FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(host, host, gravity);
+                int out = (host - dp(BADGE_DP)) / 2;
+                flp.setMargins(start ? dp(8) - out : 0, 0, start ? 0 : dp(8) - out, dp(8) - out);
+                box.addView(ff, flp);
+                return;
             }
-            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(48), dp(48), gravity);
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(BADGE_DP), dp(BADGE_DP), gravity);
             lp.setMargins(start ? dp(8) : 0, 0, start ? 0 : dp(8), dp(8));
             box.addView(badge, lp);
+        }
+
+        /** Контейнер, у которого содержимое (значок) к краям круга плавно уходит в прозрачность. */
+        private final class FadeFrame extends FrameLayout {
+            private final Paint mask = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+            FadeFrame(Context c) {
+                super(c);
+                mask.setXfermode(new android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_IN));
+                setClipChildren(false);
+            }
+
+            @Override protected void dispatchDraw(Canvas c) {
+                float w = getWidth(), h = getHeight();
+                if (w <= 0 || h <= 0) { super.dispatchDraw(c); return; }
+                int save = c.saveLayer(0, 0, w, h, null);
+                super.dispatchDraw(c);
+                float r = Math.min(w, h) / 2f;
+                mask.setShader(new android.graphics.RadialGradient(w / 2f, h / 2f, r,
+                        new int[] { 0xFF000000, 0xFF000000, 0x00000000 }, new float[] { 0f, 0.5f, 1f },
+                        android.graphics.Shader.TileMode.CLAMP));
+                c.drawRect(0, 0, w, h, mask);
+                c.restoreToCount(save);
+            }
         }
 
         /** Точки загрузки на карточках: видны, пока хотя бы одна из вкладок карточки грузится. */
