@@ -1134,7 +1134,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         private String defaultUa;
         private boolean fullscreen, dockHidden, started, wantPanel, tabsPanel, lightBar;
         private final String[] BADGE_NAMES = { "непрозрачные", "полупрозрачные", "растворяются по краям", "полупрозрачные и растворяются по краям" };
-        private static final int BADGE_DP = 64;       // размер значков сайта и профиля на карточках вкладок
+        private static final int BADGE_DP = 48;       // размер значков сайта и профиля на карточках вкладок
         private int savedScrollY;                 // положение списка панели вкладок, чтобы после перетаскивания и закрытия он не прыгал в начало
         private Group savedScrollGroup, panelGroup;
         private long savedScrollAt;
@@ -4760,7 +4760,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         private final class GridPanel {
-            static final int COLS = 5;
+            static final int COLS = 4;
             final String scope;
             final String title;
             final Map<String, GridItem> byKey = new HashMap<String, GridItem>();
@@ -4831,20 +4831,20 @@ public class Browser implements IPlugin, ISettingsProvider {
                     }
                     FrameLayout slot = new FrameLayout(act);
                     slot.setClipChildren(false);
-                    slot.addView(all.get(i), new FrameLayout.LayoutParams(dp(60), dp(60), Gravity.CENTER));
-                    row.addView(slot, new LinearLayout.LayoutParams(0, dp(72), 1f));
+                    slot.addView(all.get(i), new FrameLayout.LayoutParams(dp(76), dp(76), Gravity.CENTER));
+                    row.addView(slot, new LinearLayout.LayoutParams(0, dp(92), 1f));
                 }
                 // последняя строка неполная: пустые места, чтобы колонки не расползались
-                while (row != null && row.getChildCount() < COLS) row.addView(new View(act), new LinearLayout.LayoutParams(0, dp(72), 1f));
+                while (row != null && row.getChildCount() < COLS) row.addView(new View(act), new LinearLayout.LayoutParams(0, dp(92), 1f));
             }
 
             private FrameLayout disc(String glyph, String desc) {
                 FrameLayout cell = new FrameLayout(act);
                 cell.setClipChildren(false);
                 cell.setBackground(glassBmp != null && SystemClock.uptimeMillis() - glassAt < 30000
-                        ? (Drawable) new GlassDrawable(cell, glassBmp) : round(0x12202124, 30, 0x80FFFFFF, 1));
+                        ? (Drawable) new GlassDrawable(cell, glassBmp) : round(0x12202124, 38, 0x80FFFFFF, 1));
                 TextView g = glyph(glyph);
-                g.setTextSize(26);
+                g.setTextSize(36);
                 g.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
                 cell.addView(g, new FrameLayout.LayoutParams(-1, -1));
                 cell.setClickable(true);
