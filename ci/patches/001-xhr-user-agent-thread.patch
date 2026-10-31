@@ -1,0 +1,13 @@
+diff --git a/modules/Browser.java b/modules/Browser.java
+index 08fd755..9941b8a 100644
+--- a/modules/Browser.java
++++ b/modules/Browser.java
+@@ -3491,7 +3491,7 @@ public class Browser implements IPlugin, ISettingsProvider {
+                     c.setConnectTimeout(timeout > 0 ? timeout : 20000);
+                     c.setReadTimeout(timeout > 0 ? timeout : 30000);
+                     c.setRequestMethod(method);
+-                    c.setRequestProperty("User-Agent", t.wv != null ? t.wv.getSettings().getUserAgentString() : "UniversalBrowser/1");
++                    c.setRequestProperty("User-Agent", userAgentFor(t));   // WebView.getSettings() нельзя звать из потока запроса: падало «method was called on thread pool-…»
+                     if (headers != null) {
+                         java.util.Iterator<String> it = headers.keys();
+                         while (it.hasNext()) {
