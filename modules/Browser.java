@@ -6197,6 +6197,15 @@ public class Browser implements IPlugin, ISettingsProvider {
                     showTabs();
                 } });
             }
+            addG(items, "share", "↗", "Поделиться ссылкой", new Runnable() { @Override public void run() {
+                String u = t.url == null ? "" : t.url;
+                if (!(u.startsWith("http://") || u.startsWith("https://"))) { toast("У этой вкладки нет ссылки"); showTabs(); return; }
+                Intent send = new Intent(Intent.ACTION_SEND).setType("text/plain")
+                        .putExtra(Intent.EXTRA_TEXT, u).putExtra(Intent.EXTRA_SUBJECT, tabTitle(t));
+                try { act.startActivity(Intent.createChooser(send, "Поделиться ссылкой").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); }
+                catch (Throwable ignored) { }
+                showTabs();
+            } });
             addG(items, "close", "✕", "Закрыть вкладку", new Runnable() { @Override public void run() {
                 closeTabKeep(t);
                 showTabs();
