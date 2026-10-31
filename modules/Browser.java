@@ -5533,6 +5533,33 @@ public class Browser implements IPlugin, ISettingsProvider {
             return box;
         }
 
+        /**
+         * Поле снимка. У группы по краям полоса под чёрточки, поэтому её снимок уже обычной вкладки; при одинаковой высоте
+         * CENTER_CROP у вкладки увеличивал снимок сильнее и срезал строки сверху и снизу. Высота вкладки подбирается так,
+         * чтобы пропорции поля совпали с полем группы: обе карточки показывают один и тот же кусок страницы.
+         */
+        private final class ThumbBox extends FrameLayout {
+            private final boolean plain;
+
+            ThumbBox(Context c, boolean plain) {
+                super(c);
+                this.plain = plain;
+            }
+
+            @Override protected void onMeasure(int wSpec, int hSpec) {
+                if (plain) {
+                    int w = MeasureSpec.getSize(wSpec);
+                    int inner = w - 2 * dp(GROUP_BAND);
+                    if (w > 0 && inner > 0) {
+                        int hh = Math.round(w * (float) dp(190) / inner);
+                        super.onMeasure(wSpec, MeasureSpec.makeMeasureSpec(hh, MeasureSpec.EXACTLY));
+                        return;
+                    }
+                }
+                super.onMeasure(wSpec, hSpec);
+            }
+        }
+
         /** Содержимое карточки; у группы его можно перерисовать на другую вкладку (pos — номер показанной вкладки с единицы, 0: без номера). */
         private void fillCard(FrameLayout box, Tab t, boolean isGroup, int count, int pos) {
             box.removeAllViews();
@@ -5541,7 +5568,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             box.setPadding(band, band, band, band);
             box.setClipToPadding(false);       // иначе полоса с чёрточками обрезается по отступу
             box.setClipChildren(false);
-            FrameLayout thumbBox = new FrameLayout(act);
+            FrameLayout thumbBox = new ThumbBox(act, !isGroup);
             if (isGroup) {
                 thumbBox.setBackground(round(C_SURFACE2, 6, 0, 0));
                 thumbBox.setClipToOutline(true);
