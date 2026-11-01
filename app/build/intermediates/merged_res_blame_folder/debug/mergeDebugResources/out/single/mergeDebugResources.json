@@ -1,0 +1,34 @@
+[
+    {
+        "merged": "im.manus.universalhost.app-debug-29:/mipmap-anydpi-v26_ic_launcher.xml.flat",
+        "source": "im.manus.universalhost.app-main-31:/mipmap-anydpi-v26/ic_launcher.xml"
+    },
+    {
+        "merged": "im.manus.universalhost.app-debug-29:/xml_accessibility_config.xml.flat",
+        "source": "im.manus.universalhost.app-main-31:/xml/accessibility_config.xml"
+    },
+    {
+        "merged": "im.manus.universalhost.app-debug-29:/xml_device_admin.xml.flat",
+        "source": "im.manus.universalhost.app-main-31:/xml/device_admin.xml"
+    },
+    {
+        "merged": "im.manus.universalhost.app-debug-29:/drawable_ic_browser_app.xml.flat",
+        "source": "im.manus.universalhost.app-main-31:/drawable/ic_browser_app.xml"
+    },
+    {
+        "merged": "im.manus.universalhost.app-debug-29:/mipmap-xxxhdpi_ic_launcher_foreground.png.flat",
+        "source": "im.manus.universalhost.app-main-31:/mipmap-xxxhdpi/ic_launcher_foreground.png"
+    },
+    {
+        "merged": "im.manus.universalhost.app-debug-29:/mipmap-anydpi-v26_ic_launcher_round.xml.flat",
+        "source": "im.manus.universalhost.app-main-31:/mipmap-anydpi-v26/ic_launcher_round.xml"
+    },
+    {
+        "merged": "im.manus.universalhost.app-debug-29:/xml_method.xml.flat",
+        "source": "im.manus.universalhost.app-main-31:/xml/method.xml"
+    },
+    {
+        "merged": "im.manus.universalhost.app-debug-29:/mipmap-xxxhdpi_ic_launcher_original.png.flat",
+        "source": "im.manus.universalhost.app-main-31:/mipmap-xxxhdpi/ic_launcher_original.png"
+    }
+]

@@ -19,7 +19,9 @@ import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraManager;
+import android.hardware.input.InputManager;
 import android.media.AudioManager;
+import android.media.MediaMetadata;
 import android.media.ToneGenerator;
 import android.media.session.MediaController;
 import android.media.session.MediaSessionManager;
@@ -520,8 +522,13 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
 
     /** Все оси в нормированном виде: стики -1..1, курки 0..1, крестовина -1..1. Только главный поток. */
     void feedAxes(int ch, float lx, float ly, float rx, float ry, float lt, float rt, float hx, float hy) {
-        stick(ch, V_LS_UP, V_LS_DOWN, V_LS_LEFT, V_LS_RIGHT, lx, ly);
-        stick(ch, V_RS_UP, V_RS_DOWN, V_RS_LEFT, V_RS_RIGHT, rx, ry);
+        SharedPreferences sp = prefs();
+        boolean dialOn = sp == null || sp.getBoolean("dial", true);
+        boolean dl = sp != null && sp.getBoolean("dial_left", false);
+        if (dialOn) dial(dl ? lx : rx, dl ? ly : ry);
+        // стик-циферблат не работает как четыре кнопки
+        stick(ch, V_LS_UP, V_LS_DOWN, V_LS_LEFT, V_LS_RIGHT, dialOn && dl ? 0f : lx, dialOn && dl ? 0f : ly);
+        stick(ch, V_RS_UP, V_RS_DOWN, V_RS_LEFT, V_RS_RIGHT, dialOn && !dl ? 0f : rx, dialOn && !dl ? 0f : ry);
         hyst(ch, KeyEvent.KEYCODE_BUTTON_L2, lt);
         hyst(ch, KeyEvent.KEYCODE_BUTTON_R2, rt);
         hyst(ch, KeyEvent.KEYCODE_DPAD_LEFT, -hx);
@@ -543,6 +550,60 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
 
     private static String fmt(float f) {
         return String.valueOf(Math.round(f * 100f) / 100f);
+    }
+
+    // ---------------------------------------------------------------- стик-циферблат: место в треке по кругу
+
+    private boolean dialActive;
+    private float dialPos = -1f;
+    private float dialSent = -1f;
+    private long dialSentAt;
+
+    /**
+     * Вверх = 0%, вправо = 25%, вниз = 50%, влево = 75%. Пока стик отклонён, плеер играет с места, на которое он
+     * указывает (перематывается по ходу движения, не чаще раза в 250 мс и не меньше чем на 1%). Вернул стик в центр:
+     * остаёмся там. Не то место: веди стик дальше по кругу. Угол берётся, пока стик отклонён сильно; на обратном пути
+     * в центр он замораживается.
+     */
+    private void dial(float x, float y) {
+        float r = (float) Math.hypot(x, y);
+        if (!dialActive) {
+            if (r < 0.75f) return;
+            dialActive = true;
+            dialSent = -1f;
+        } else if (r < 0.45f) {
+            dialActive = false;
+            float f = dialPos;
+            dialPos = -1f;
+            if (f >= 0f && Math.abs(f - dialSent) > 0.002f) seekFraction(f);
+            dialSent = -1f;
+            return;
+        }
+        if (r < 0.6f) return;
+        double deg = Math.toDegrees(Math.atan2(x, -y));
+        if (deg < 0) deg += 360;
+        dialPos = (float) (deg / 360.0);
+        long now = SystemClock.uptimeMillis();
+        if (now - dialSentAt >= 250 && (dialSent < 0f || Math.abs(dialPos - dialSent) >= 0.01f)) {
+            dialSentAt = now;
+            dialSent = dialPos;
+            seekFraction(dialPos);
+        }
+    }
+
+    /** Перемотка активного плеера на долю трека через его медиасессию (нужен доступ к уведомлениям). */
+    private void seekFraction(float f) {
+        Context c = appCtx;
+        if (c == null) return;
+        List<MediaController> list = sessions(c);
+        if (list == null) return;
+        MediaController mc = pickController(list, c.getPackageName());
+        if (mc == null) return;
+        MediaMetadata md = mc.getMetadata();
+        long dur = md == null ? 0 : md.getLong(MediaMetadata.METADATA_KEY_DURATION);
+        PlaybackState ps = mc.getPlaybackState();
+        if (dur <= 0 || ps == null || (ps.getActions() & PlaybackState.ACTION_SEEK_TO) == 0) return;
+        mc.getTransportControls().seekTo((long) (dur * Math.max(0f, Math.min(1f, f))));
     }
 
     // ---------------------------------------------------------------- маршрутизация кнопок
@@ -664,13 +725,49 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
 
     // ---------------------------------------------------------------- канал: сырые события ядра через Shizuku
 
+    private InputManager.InputDeviceListener devListener;
+
+    private final Runnable pokeR = new Runnable() {
+        @Override public void run() {
+            Evdev e = evdev;
+            if (e != null) e.poke();
+        }
+    };
+
+    /** Геймпад подключился или отключился: проверяем сразу, и ещё два раза разово (узел /dev/input появляется чуть позже устройства). */
+    private void burst() {
+        pokeR.run();
+        h.postDelayed(pokeR, 400);
+        h.postDelayed(pokeR, 1500);
+    }
+
     private void startEvdev() {
         if (evdev != null) return;
         evdev = new Evdev();
         evdev.start();
+        Context c = appCtx;
+        if (c != null && devListener == null) {
+            InputManager im = (InputManager) c.getSystemService(Context.INPUT_SERVICE);
+            if (im != null) {
+                devListener = new InputManager.InputDeviceListener() {
+                    @Override public void onInputDeviceAdded(int id) { burst(); }
+                    @Override public void onInputDeviceRemoved(int id) { burst(); }
+                    @Override public void onInputDeviceChanged(int id) { }
+                };
+                im.registerInputDeviceListener(devListener, h);
+            }
+        }
+        ShizukuBridge.addReadyListener(pokeR);
     }
 
     private void stopEvdev() {
+        Context c = appCtx;
+        if (c != null && devListener != null) {
+            InputManager im = (InputManager) c.getSystemService(Context.INPUT_SERVICE);
+            if (im != null) im.unregisterInputDeviceListener(devListener);
+        }
+        devListener = null;
+        ShizukuBridge.removeReadyListener(pokeR);
         Evdev e = evdev;
         evdev = null;
         if (e != null) e.shutdown();
@@ -795,9 +892,45 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
             setDaemon(true);
         }
 
+        private final Object wake = new Object();
+        private boolean pending = true;
+
+        /** Проверить устройства сейчас (подключение, отключение, Shizuku стал доступен, оборвалось чтение). */
+        void poke() {
+            synchronized (wake) {
+                pending = true;
+                wake.notifyAll();
+            }
+        }
+
+        private boolean connected() {
+            synchronized (streams) {
+                return !streams.isEmpty();
+            }
+        }
+
+        /**
+         * Подключение ловит слушатель устройств мгновенно, поэтому пока геймпада нет, проверок по таймеру нет.
+         * Пока он подключён, раз в 5 секунд смотрим только, не пропал ли его узел (отключение без сообщения).
+         */
         @Override
         public void run() {
             while (!stopFlag) {
+                synchronized (wake) {
+                    long until = SystemClock.uptimeMillis() + 5000;
+                    while (!pending && !stopFlag) {
+                        long left = connected() ? until - SystemClock.uptimeMillis() : 0;
+                        if (connected() && left <= 0) break;
+                        try {
+                            if (connected()) wake.wait(left);
+                            else wake.wait();
+                        } catch (InterruptedException ie) {
+                            stopFlag = true;
+                        }
+                    }
+                    pending = false;
+                }
+                if (stopFlag) break;
                 try {
                     if (!ShizukuBridge.hasPermission()) {
                         evStatus = "Shizuku не готов: запусти приложение Shizuku и выдай хосту доступ";
@@ -810,7 +943,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                     evStatus = "ошибка: " + t;
                 }
                 try {
-                    Thread.sleep(3000);
+                    Thread.sleep(500);   // не чаще двух проходов в секунду, даже если чтение сразу падает
                 } catch (InterruptedException ie) {
                     break;
                 }
@@ -975,6 +1108,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                     } catch (Throwable ignored) {
                     }
                 }
+                poke();
             }
         }
 
@@ -1319,6 +1453,10 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
         l.add(SettingItem.toggle("axes_service", "Стики и курки через службу (Android 14+)",
                 "Пока включено, другие приложения не получают движения стиков", true));
         l.add(SettingItem.section("Плеер"));
+        l.add(SettingItem.toggle("dial", "Стик-циферблат: место в треке по кругу",
+                "Стик отклонён: играет место, на которое он указывает (вверх 0%, вправо 25%, вниз 50%, влево 75%). Вернул в центр: остаёшься там. Четыре направления этого стика отключаются",
+                true));
+        l.add(SettingItem.toggle("dial_left", "Циферблат на левом стике", "Выключено: правый стик", false));
         l.add(SettingItem.toggle("direct_control", "Управлять плеером напрямую",
                 "Команды идут активной медиасессии (нужен доступ к уведомлениям), иначе медиаклавишами", true));
         l.add(SettingItem.action("grant_notifications", "Доступ к уведомлениям",
@@ -1341,6 +1479,11 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                 i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 c.startActivity(i);
             }
+            return;
+        }
+        if ("dial".equals(key) || "dial_left".equals(key)) {
+            dialActive = false;
+            dialPos = -1f;
             return;
         }
         if ("evdev".equals(key) || "axes_service".equals(key)) {

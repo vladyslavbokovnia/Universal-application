@@ -9,6 +9,7 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.ContentUris;
 import android.content.Context;
 import android.content.DialogInterface;
@@ -22,7 +23,9 @@ import android.media.AudioAttributes;
 import android.media.AudioManager;
 import android.media.MediaMetadata;
 import android.media.MediaPlayer;
+import android.media.session.MediaController;
 import android.media.session.MediaSession;
+import android.media.session.MediaSessionManager;
 import android.media.session.PlaybackState;
 import android.net.Uri;
 import android.os.Build;
@@ -31,6 +34,7 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.view.Gravity;
+import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
@@ -54,12 +58,15 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Аудиоплеер — свой плеер прямо в хосте.
+ * Аудиоплеер и пульт в одном модуле.
  *
- * Песни с устройства (список, удаление), своя медиа-сессия — поэтому пауза/треки
- * работают с гарнитуры и из модуля «Пульт». Кнопки геймпада назначаются тут же, на картинке геймпада
- * (как в модуле Gamepad): нажатие, двойное и долгое. Shizuku не нужен: кнопки идут через службу
- * специальных возможностей, стики и курки — через неё же на Android 14+.
+ * Свой плеер: песни с устройства (список, удаление), своя медиа-сессия — гарнитура и системные клавиши работают
+ * с ним. Пульт: если свой плеер не играет, кнопки геймпада управляют другим играющим плеером (через его
+ * медиасессию; нужен доступ к уведомлениям для хоста). Кнопки назначаются на картинке геймпада: нажатие,
+ * двойное и долгое. Стик-циферблат: стик отклонён — играет место трека, на которое он указывает, вернул в
+ * центр — остаёшься там. Shizuku не нужен: кнопки идут через службу специальных возможностей (работает при
+ * выключенном экране), стики — через неё на Android 14+, а на более старых (Android 11) — через открытое окно
+ * плеера (на e-ink экран можно не гасить).
  */
 public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewProvider, IKeyHandler,
         IMotionHandler, IShareHandler {
@@ -108,9 +115,9 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     private PadMapper mapper;
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 2; }
+    @Override public int getVersion() { return 3; }
     @Override public String getDescription() {
-        return "Свой аудиоплеер: песни с устройства, удаление, управление с геймпада и гарнитуры.";
+        return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
     @Override public String getIconName() { return "ic_launcher"; }
 
@@ -118,7 +125,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         appCtx = context.getApplicationContext();
         h = new Handler(Looper.getMainLooper());
         svc = (context instanceof AccessibilityService) ? (AccessibilityService) context : null;
-        ensureSession();
+        migrateRemote();
+        if (!remoteAny()) ensureSession();   // свой плеер всегда главный: гарнитура и системные клавиши идут сюда сразу
         loadTracks();
         PadMapper m = mapper(context);
         if (svc != null) m.applyAxesCapture(svc);
@@ -264,6 +272,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
     public void playAt(int i) {
         if (i < 0 || i >= tracks.size() || appCtx == null) return;
+        extPkg = null;
         try {
             ensurePlayer();
             ensureSession();
@@ -280,6 +289,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     }
 
     public void toggle() {
+        extPkg = null;
         if (mp == null || !prepared) {
             if (!tracks.isEmpty()) playAt(cur >= 0 ? cur : 0);
             return;
@@ -569,6 +579,205 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         }
     }
 
+    // ---------------------------------------------------------- пульт: другой плеер
+
+    private String extPkg;
+    private long extSeekTarget;
+    private long extSeekAt;
+
+    private boolean remoteAny() {
+        SharedPreferences p = prefs();
+        return p == null || p.getBoolean("remote_any", true);
+    }
+
+    /** Один раз переносит раскладку кнопок из бывшего модуля «Пульт». */
+    private void migrateRemote() {
+        SharedPreferences p = prefs();
+        Context c = appCtx;
+        if (p == null || c == null || p.getBoolean("remote_migrated", false)) return;
+        SharedPreferences old = c.getSharedPreferences("module_Пульт", Context.MODE_PRIVATE);
+        SharedPreferences.Editor e = p.edit();
+        for (Map.Entry<String, ?> en : old.getAll().entrySet()) {
+            String k = en.getKey();
+            Object v = en.getValue();
+            if (p.contains(k) || k.equals("pm_migrated")) continue;
+            if (v instanceof String) e.putString(k, (String) v);
+            else if (v instanceof Integer) e.putInt(k, ((Integer) v).intValue());
+            else if (v instanceof Boolean) e.putBoolean(k, ((Boolean) v).booleanValue());
+            else if (v instanceof Long) e.putLong(k, ((Long) v).longValue());
+            else if (v instanceof Float) e.putFloat(k, ((Float) v).floatValue());
+        }
+        e.putBoolean("remote_migrated", true);
+        e.apply();
+    }
+
+    private List<MediaController> activeSessions() {
+        Context c = appCtx;
+        if (c == null) return null;
+        try {
+            MediaSessionManager msm = (MediaSessionManager) c.getSystemService(Context.MEDIA_SESSION_SERVICE);
+            if (msm == null) return null;
+            return msm.getActiveSessions(new ComponentName(c, "im.manus.universalhost.CoreNotificationListener"));
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** Играющий чужой плеер; если никто не играет, тот, которым мы управляли последним (чтобы его можно было продолжить). */
+    private MediaController externalTarget() {
+        Context c = appCtx;
+        List<MediaController> list = activeSessions();
+        if (c == null || list == null) return null;
+        MediaController remembered = null;
+        for (MediaController mc : list) {
+            if (c.getPackageName().equals(mc.getPackageName())) continue;
+            PlaybackState ps = mc.getPlaybackState();
+            if (ps != null && ps.getState() == PlaybackState.STATE_PLAYING) return mc;
+            if (extPkg != null && extPkg.equals(mc.getPackageName())) remembered = mc;
+        }
+        return remembered;
+    }
+
+    private boolean routeExternal(String a) {
+        if (!remoteAny() || isPlaying()) return false;
+        MediaController ext = externalTarget();
+        return ext != null && controlExternal(ext, a);
+    }
+
+    private boolean controlExternal(MediaController mc, String a) {
+        MediaController.TransportControls tc = mc.getTransportControls();
+        PlaybackState ps = mc.getPlaybackState();
+        boolean playing = ps != null && ps.getState() == PlaybackState.STATE_PLAYING;
+        if (a.equals("play_pause")) {
+            if (playing) tc.pause(); else tc.play();
+        } else if (a.equals("play")) tc.play();
+        else if (a.equals("pause")) tc.pause();
+        else if (a.equals("next")) tc.skipToNext();
+        else if (a.equals("prev")) tc.skipToPrevious();
+        else if (a.equals("stop")) tc.stop();
+        else if (a.equals("seek_fwd") || a.equals("seek_back")) {
+            if (ps != null && (ps.getActions() & PlaybackState.ACTION_SEEK_TO) != 0) {
+                long now = SystemClock.elapsedRealtime();
+                long pos;
+                if (now - extSeekAt < 600) {
+                    pos = extSeekTarget;   // при удержании плеер не успевает обновить позицию
+                } else {
+                    pos = ps.getPosition();
+                    if (playing) pos += (long) ((now - ps.getLastPositionUpdateTime()) * ps.getPlaybackSpeed());
+                }
+                extSeekTarget = Math.max(0, pos + (a.equals("seek_fwd") ? 10000 : -10000));
+                extSeekAt = now;
+                tc.seekTo(extSeekTarget);
+            }
+        } else return false;
+        extPkg = mc.getPackageName();
+        return true;
+    }
+
+    // ---------------------------------------------------------- стик-циферблат: место в треке по кругу
+
+    private boolean dialActive;
+    private float dialPos = -1f;
+    private float dialSent = -1f;
+    private long dialSentAt;
+    private volatile float dialShown = -1f;
+    private int dialShownPct = -1;
+
+    /** Оси стика из события (служба или окно) -> циферблат. */
+    private void dialMotion(MotionEvent e) {
+        SharedPreferences p = prefs();
+        if (p == null || !p.getBoolean("dial", true)) return;
+        if ((e.getSource() & InputDevice.SOURCE_JOYSTICK) != InputDevice.SOURCE_JOYSTICK) return;
+        if (e.getActionMasked() != MotionEvent.ACTION_MOVE) return;
+        PlayerView v = boundView;
+        if (v != null && v.padOpen) return;          // идёт настройка кнопок на картинке
+        InputDevice d = e.getDevice();
+        float x;
+        float y;
+        if (p.getBoolean("dial_left", false)) {
+            x = e.getAxisValue(MotionEvent.AXIS_X);
+            y = e.getAxisValue(MotionEvent.AXIS_Y);
+        } else {
+            boolean trig = d != null && (d.getMotionRange(MotionEvent.AXIS_LTRIGGER) != null
+                    || d.getMotionRange(MotionEvent.AXIS_BRAKE) != null);
+            boolean rxy = d != null && d.getMotionRange(MotionEvent.AXIS_RX) != null
+                    && d.getMotionRange(MotionEvent.AXIS_RY) != null;
+            boolean hasZ = d != null && d.getMotionRange(MotionEvent.AXIS_Z) != null;
+            boolean useRxy = rxy && (!trig || !hasZ);
+            x = e.getAxisValue(useRxy ? MotionEvent.AXIS_RX : MotionEvent.AXIS_Z);
+            y = e.getAxisValue(useRxy ? MotionEvent.AXIS_RY : MotionEvent.AXIS_RZ);
+        }
+        dialStep(x, y);
+    }
+
+    /**
+     * Вверх = 0%, вправо = 25%, вниз = 50%, влево = 75%. Пока стик отклонён, играет место, на которое он указывает
+     * (перемотка по ходу движения, не чаще раза в 250 мс и не меньше чем на 1%). Вернул стик в центр: остаёшься там.
+     * Не то место: веди стик дальше по кругу. На обратном пути в центр угол замораживается.
+     */
+    private void dialStep(float x, float y) {
+        float r = (float) Math.hypot(x, y);
+        if (!dialActive) {
+            if (r < 0.75f) return;
+            dialActive = true;
+            dialSent = -1f;
+        } else if (r < 0.45f) {
+            dialActive = false;
+            float f = dialPos;
+            dialPos = -1f;
+            if (f >= 0f && Math.abs(f - dialSent) > 0.002f) seekFractionAny(f);
+            dialSent = -1f;
+            dialShown = -1f;
+            dialShownPct = -1;
+            afterChange();                           // одно обновление экрана и уведомления
+            return;
+        }
+        if (r < 0.6f) return;
+        double deg = Math.toDegrees(Math.atan2(x, -y));
+        if (deg < 0) deg += 360;
+        dialPos = (float) (deg / 360.0);
+        long now = SystemClock.uptimeMillis();
+        if (now - dialSentAt >= 250 && (dialSent < 0f || Math.abs(dialPos - dialSent) >= 0.01f)) {
+            dialSentAt = now;
+            dialSent = dialPos;
+            seekFractionAny(dialPos);
+        }
+        dialShown = dialPos;
+        int pct = Math.round(dialPos * 100);
+        if (pct != dialShownPct) {                   // экран e-ink обновляем только при смене процента
+            dialShownPct = pct;
+            refreshUiHead();
+        }
+    }
+
+    /** Перемотка на долю трека: своего, а если свой не играет — чужого играющего плеера. */
+    private void seekFractionAny(float f) {
+        f = Math.max(0f, Math.min(1f, f));
+        if (!isPlaying() && remoteAny()) {
+            MediaController ext = externalTarget();
+            if (ext != null) {
+                try {
+                    MediaMetadata md = ext.getMetadata();
+                    long dur = md == null ? 0 : md.getLong(MediaMetadata.METADATA_KEY_DURATION);
+                    PlaybackState ps = ext.getPlaybackState();
+                    if (dur > 0 && ps != null && (ps.getActions() & PlaybackState.ACTION_SEEK_TO) != 0) {
+                        ext.getTransportControls().seekTo((long) (dur * f));
+                    }
+                } catch (Throwable t) { }
+                return;
+            }
+        }
+        try {
+            if (mp != null && prepared) {
+                int dur = mp.getDuration();
+                if (dur > 0) {
+                    mp.seekTo((int) (dur * f));
+                    updateSession();
+                }
+            }
+        } catch (Throwable t) { }
+    }
+
     // ---------------------------------------------------------- геймпад
 
     /** Один PadMapper на модуль; создаётся и до init(), чтобы экран настроек работал при выключенной службе. */
@@ -601,10 +810,12 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     @Override public void onMotionEvent(MotionEvent e) {
         PadMapper m = mapper;
         if (m != null) m.onMotionEvent(e);
+        try { dialMotion(e); } catch (Throwable t) { }
     }
 
     private void doPerform(String a) {
         if (a == null) return;
+        if (!a.startsWith("vol_") && !a.equals("mute") && routeExternal(a)) return;
         if (a.equals("play_pause")) toggle();
         else if (a.equals("play")) { if (!isPlaying()) toggle(); }
         else if (a.equals("pause")) pause();
@@ -642,6 +853,15 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         List<SettingItem> r = new ArrayList<SettingItem>();
         r.add(SettingItem.section("Плеер"));
         r.add(SettingItem.custom("player", "Плеер", "Песни с устройства, удаление, кнопки геймпада на картинке"));
+        r.add(SettingItem.toggle("remote_any", "Управлять и другим плеером",
+                "Если свой плеер не играет, кнопки управляют другим играющим плеером (нужен доступ к уведомлениям для хоста). Выключено: только свой плеер",
+                true));
+        r.add(SettingItem.toggle("dial", "Стик-циферблат",
+                "Стик отклонён: играет место, на которое он указывает (вверх 0%, вправо 25%, вниз 50%, влево 75%). Вернул в центр: остаёшься там. Не то место: веди стик дальше по кругу",
+                true));
+        r.add(SettingItem.toggle("dial_left", "Циферблат на левом стике", "Выключено: правый стик", false));
+        r.add(SettingItem.toggle("keep_screen", "Не гасить экран при открытом плеере",
+                "Для e-ink: неподвижная картинка не тратит заряд, а стики приходят в окно плеера без Shizuku", true));
         r.add(SettingItem.section("Геймпад"));
         r.add(SettingItem.toggle("intercept", "Перехват кнопок",
                 "Включено: назначенная кнопка работает только на плеер. Выключено: действие срабатывает, а приложение тоже получает нажатие",
@@ -666,6 +886,13 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         } else if ("axes_service".equals(key)) {
             PadMapper m = mapper;
             if (m != null && svc != null) m.applyAxesCapture(svc);
+        } else if ("remote_any".equals(key)) {
+            if (!remoteAny()) ensureSession();
+        } else if ("dial".equals(key) || "dial_left".equals(key)) {
+            dialActive = false;
+            dialPos = -1f;
+            dialShown = -1f;
+            dialShownPct = -1;
         }
     }
 
@@ -780,13 +1007,25 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         @Override protected void onAttachedToWindow() {
             super.onAttachedToWindow();
             boundView = this;
+            SharedPreferences kp = prefs();
+            setKeepScreenOn(kp == null || kp.getBoolean("keep_screen", true));
             requestFocus();
             refresh();
         }
 
         @Override protected void onDetachedFromWindow() {
             if (boundView == this) boundView = null;
+            setKeepScreenOn(false);
             super.onDetachedFromWindow();
+        }
+
+        /** Стики в открытом окне плеера (Android 11 и ниже без Shizuku). */
+        @Override public boolean onGenericMotionEvent(MotionEvent e) {
+            if ((e.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) {
+                try { dialMotion(e); } catch (Throwable t) { }
+                return true;
+            }
+            return super.onGenericMotionEvent(e);
         }
 
         @Override public void onWindowFocusChanged(boolean hasFocus) {
@@ -815,7 +1054,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 buildTrackRows();
             }
             Track t = (cur >= 0 && cur < tracks.size()) ? tracks.get(cur) : null;
-            nowTitle.setText(t == null ? "Не играет" : "▶ " + t.title + "\n" + t.artist);
+            float ds = dialShown;
+            String dialTxt = ds < 0f ? "" : "\n◔ " + Math.round(ds * 100) + "%"
+                    + (t != null && t.dur > 0 ? " · " + fmtDur((long) (t.dur * ds)) : "");
+            nowTitle.setText((t == null ? "Не играет" : "▶ " + t.title + "\n" + t.artist) + dialTxt);
             bPlay.setText(isPlaying() ? "⏸" : "▶");
             status.setText(svc != null ? ""
                     : "Включи службу специальных возможностей — иначе кнопки геймпада не дойдут.");

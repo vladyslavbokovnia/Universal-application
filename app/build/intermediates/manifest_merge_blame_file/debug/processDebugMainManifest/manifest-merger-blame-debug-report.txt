@@ -1,0 +1,420 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="im.manus.universalhost"
+4    android:versionCode="8"
+5    android:versionName="1.3" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="24"
+9        android:targetSdkVersion="33" />
+10
+11    <uses-permission android:name="android.permission.INTERNET" />
+11-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:6:5-67
+11-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:6:22-64
+12    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+12-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:7:5-77
+12-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:7:22-74
+13    <uses-permission android:name="android.permission.WAKE_LOCK" />
+13-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:8:5-68
+13-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:8:22-65
+14    <uses-permission android:name="android.permission.VIBRATE" />
+14-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:9:5-66
+14-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:9:22-63
+15    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+15-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:10:5-79
+15-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:10:22-76
+16    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+16-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:11:5-81
+16-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:11:22-78
+17    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+17-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:12:5-80
+17-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:12:22-77
+18    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+18-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:13:5-75
+18-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:13:22-72
+19    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+19-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:14:5-77
+19-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:14:22-74
+20    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+20-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:15:5-81
+20-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:15:22-78
+21    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+21-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:16:5-82
+21-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:16:22-79
+22    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+22-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:17:5-78
+22-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:17:22-75
+23    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+23-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:18:5-83
+23-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:18:22-80
+24    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+24-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:19:5-77
+24-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:19:22-74
+25    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" />
+25-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:20:5-114
+25-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:20:22-75
+26    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+26-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:21:5-78
+26-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:21:22-75
+27
+28    <!-- Модуль RadioGestures -->
+29    <uses-permission
+29-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:24:5-95
+30        android:name="android.permission.BLUETOOTH"
+30-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:24:22-65
+31        android:maxSdkVersion="30" />
+31-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:24:66-92
+32    <uses-permission
+32-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:25:5-101
+33        android:name="android.permission.BLUETOOTH_ADMIN"
+33-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:25:22-71
+34        android:maxSdkVersion="30" />
+34-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:25:72-98
+35    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+35-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:26:5-76
+35-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:26:22-73
+36    <uses-permission
+36-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:27:5-120
+37        android:name="android.permission.BLUETOOTH_SCAN"
+37-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:27:22-70
+38        android:usesPermissionFlags="neverForLocation" />
+38-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:27:71-117
+39    <uses-permission
+39-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:28:5-106
+40        android:name="android.permission.ACCESS_FINE_LOCATION"
+40-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:28:22-76
+41        android:maxSdkVersion="30" />
+41-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:28:77-103
+42
+43    <permission
+43-->[androidx.core:core:1.9.0] /home/runner/.gradle/caches/transforms-4/848880cdf3d188e6e0cb265b17c6ab49/transformed/core-1.9.0/AndroidManifest.xml:22:5-24:47
+44        android:name="im.manus.universalhost.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+44-->[androidx.core:core:1.9.0] /home/runner/.gradle/caches/transforms-4/848880cdf3d188e6e0cb265b17c6ab49/transformed/core-1.9.0/AndroidManifest.xml:23:9-81
+45        android:protectionLevel="signature" />
+45-->[androidx.core:core:1.9.0] /home/runner/.gradle/caches/transforms-4/848880cdf3d188e6e0cb265b17c6ab49/transformed/core-1.9.0/AndroidManifest.xml:24:9-44
+46
+47    <uses-permission android:name="im.manus.universalhost.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" />
+47-->[androidx.core:core:1.9.0] /home/runner/.gradle/caches/transforms-4/848880cdf3d188e6e0cb265b17c6ab49/transformed/core-1.9.0/AndroidManifest.xml:26:5-97
+47-->[androidx.core:core:1.9.0] /home/runner/.gradle/caches/transforms-4/848880cdf3d188e6e0cb265b17c6ab49/transformed/core-1.9.0/AndroidManifest.xml:26:22-94
+48
+49    <application
+49-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:30:5-166:19
+50        android:name="im.manus.universalhost.UniversalApp"
+50-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:31:9-37
+51        android:allowBackup="true"
+51-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:32:9-35
+52        android:appComponentFactory="androidx.core.app.CoreComponentFactory"
+52-->[androidx.core:core:1.9.0] /home/runner/.gradle/caches/transforms-4/848880cdf3d188e6e0cb265b17c6ab49/transformed/core-1.9.0/AndroidManifest.xml:28:18-86
+53        android:debuggable="true"
+54        android:extractNativeLibs="false"
+55        android:icon="@mipmap/ic_launcher"
+55-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:33:9-43
+56        android:label="@string/app_name"
+56-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:35:9-41
+57        android:roundIcon="@mipmap/ic_launcher_round"
+57-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:34:9-54
+58        android:theme="@style/Theme.UniversalHost" >
+58-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:36:9-51
+59        <activity
+59-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:38:9-44:20
+60            android:name="im.manus.universalhost.MainActivity"
+60-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:38:19-47
+61            android:exported="true" >
+61-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:39:13-36
+62            <intent-filter>
+62-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:40:13-43:29
+63                <action android:name="android.intent.action.MAIN" />
+63-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:41:17-69
+63-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:41:25-66
+64
+65                <category android:name="android.intent.category.LAUNCHER" />
+65-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:42:17-77
+65-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:42:27-74
+66            </intent-filter>
+67        </activity>
+68        <activity
+68-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:46:9-85
+69            android:name="im.manus.universalhost.ModuleSettingsActivity"
+69-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:46:19-57
+70            android:exported="false" />
+70-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:46:58-82
+71        <!-- Приёмник «Поделиться» для модулей (PWA-стиль): виден в системном меню шаринга -->
+72        <activity
+72-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:48:9-54:20
+73            android:name="im.manus.universalhost.ModuleShareActivity"
+73-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:48:19-54
+74            android:exported="true" >
+74-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:48:55-78
+75            <intent-filter>
+75-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:49:13-53:29
+76                <action android:name="android.intent.action.SEND" />
+76-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:50:17-69
+76-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:50:25-66
+77
+78                <category android:name="android.intent.category.DEFAULT" />
+78-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:51:17-76
+78-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:51:27-73
+79
+80                <data android:mimeType="audio/*" />
+80-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:52:17-52
+80-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:52:23-49
+81            </intent-filter>
+82        </activity>
+83        <activity
+83-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:55:9-80
+84            android:name="im.manus.universalhost.AppImagesActivity"
+84-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:55:19-52
+85            android:exported="false" />
+85-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:55:53-77
+86
+87        <!-- Окно поверх блокировки для модулей (заставка ClockWallpaper) -->
+88        <activity
+88-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:58:9-64:40
+89            android:name="im.manus.universalhost.ModuleWakeActivity"
+89-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:58:19-53
+90            android:excludeFromRecents="true"
+90-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:61:13-46
+91            android:exported="false"
+91-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:64:13-37
+92            android:showWhenLocked="true"
+92-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:62:13-42
+93            android:taskAffinity="im.manus.universalhost.wake"
+93-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:60:13-63
+94            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+94-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:59:13-77
+95            android:turnScreenOn="true" />
+95-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:63:13-40
+96
+97        <!-- Обычное окно для модулей-браузеров (Browser): Недавние, поворот, без флагов блокировки -->
+98        <activity
+98-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:67:9-73:40
+99            android:name="im.manus.universalhost.ModuleBrowserActivity"
+99-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:67:19-56
+100            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|uiMode|density|fontScale"
+100-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:71:13-140
+101            android:exported="false"
+101-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:73:13-37
+102            android:launchMode="singleTask"
+102-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:70:13-44
+103            android:taskAffinity="im.manus.universalhost.browser"
+103-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:69:13-66
+104            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+104-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:68:13-77
+105            android:windowSoftInputMode="adjustResize" /> <!-- Мини-приложение «Браузер»: свой значок на экране приложений, свой пункт в «Поделиться» и в «Открыть с помощью», своя карточка в «Недавних» -->
+105-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:72:13-55
+106        <activity-alias
+106-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:76:9-99:26
+107            android:name="im.manus.universalhost.BrowserApp"
+107-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:76:25-51
+108            android:enabled="true"
+108-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:81:13-35
+109            android:exported="true"
+109-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:82:13-36
+110            android:icon="@drawable/ic_browser_app"
+110-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:79:13-52
+111            android:label="Браузер"
+111-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:78:13-36
+112            android:roundIcon="@drawable/ic_browser_app"
+112-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:80:13-57
+113            android:targetActivity="im.manus.universalhost.ModuleBrowserActivity" >
+113-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:77:13-60
+114            <intent-filter>
+114-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:40:13-43:29
+115                <action android:name="android.intent.action.MAIN" />
+115-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:41:17-69
+115-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:41:25-66
+116
+117                <category android:name="android.intent.category.LAUNCHER" />
+117-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:42:17-77
+117-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:42:27-74
+118            </intent-filter>
+119            <intent-filter>
+119-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:87:13-93:29
+120                <action android:name="android.intent.action.VIEW" />
+120-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:88:17-69
+120-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:88:25-66
+121
+122                <category android:name="android.intent.category.DEFAULT" />
+122-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:51:17-76
+122-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:51:27-73
+123                <category android:name="android.intent.category.BROWSABLE" />
+123-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:90:17-78
+123-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:90:27-75
+124
+125                <data android:scheme="http" />
+125-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:52:17-52
+125-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:91:23-44
+126                <data android:scheme="https" />
+126-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:52:17-52
+126-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:91:23-44
+127            </intent-filter>
+128            <intent-filter>
+128-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:94:13-98:29
+129                <action android:name="android.intent.action.SEND" />
+129-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:50:17-69
+129-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:50:25-66
+130
+131                <category android:name="android.intent.category.DEFAULT" />
+131-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:51:17-76
+131-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:51:27-73
+132
+133                <data android:mimeType="text/plain" />
+133-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:52:17-52
+133-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:52:23-49
+134            </intent-filter>
+135        </activity-alias>
+136
+137        <!-- Администратор устройства: только force-lock, для выключения экрана модулем -->
+138        <receiver
+138-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:102:9-111:20
+139            android:name="im.manus.universalhost.ModuleAdminReceiver"
+139-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:102:19-54
+140            android:exported="true"
+140-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:104:13-36
+141            android:permission="android.permission.BIND_DEVICE_ADMIN" >
+141-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:103:13-70
+142            <meta-data
+142-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:105:13-107:56
+143                android:name="android.app.device_admin"
+143-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:106:17-56
+144                android:resource="@xml/device_admin" />
+144-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:107:17-53
+145
+146            <intent-filter>
+146-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:108:13-110:29
+147                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+147-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:109:17-82
+147-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:109:25-79
+148            </intent-filter>
+149        </receiver>
+150
+151        <!-- После перезагрузки и обновления APK: вернуть службу специальных возможностей (модуль Shizuku) -->
+152        <receiver
+152-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:114:9-119:20
+153            android:name="im.manus.universalhost.BootReceiver"
+153-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:114:19-47
+154            android:exported="false" >
+154-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:114:48-72
+155            <intent-filter>
+155-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:115:13-118:29
+156                <action android:name="android.intent.action.BOOT_COMPLETED" />
+156-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:116:17-79
+156-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:116:25-76
+157                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+157-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:117:17-84
+157-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:117:25-81
+158            </intent-filter>
+159        </receiver>
+160
+161        <!-- Клиент Shizuku: получает binder от сервера -->
+162        <provider
+163            android:name="rikka.shizuku.ShizukuProvider"
+163-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:123:13-57
+164            android:authorities="im.manus.universalhost.shizuku"
+164-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:124:13-59
+165            android:enabled="true"
+165-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:125:13-35
+166            android:exported="true"
+166-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:126:13-36
+167            android:multiprocess="false"
+167-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:127:13-41
+168            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+168-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:128:13-79
+169
+170        <service
+170-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:130:9-141:19
+171            android:name="im.manus.universalhost.CoreAccessibilityService"
+171-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:131:13-53
+172            android:exported="true"
+172-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:134:13-36
+173            android:label="@string/accessibility_service_label"
+173-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:132:13-64
+174            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE" >
+174-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:133:13-79
+175            <intent-filter>
+175-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:135:13-137:29
+176                <action android:name="android.accessibilityservice.AccessibilityService" />
+176-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:136:17-92
+176-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:136:25-89
+177            </intent-filter>
+178
+179            <meta-data
+179-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:138:13-140:64
+180                android:name="android.view.accessibilityservice"
+180-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:139:17-65
+181                android:resource="@xml/accessibility_config" />
+181-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:140:17-61
+182        </service>
+183        <service
+183-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:143:9-151:19
+184            android:name="im.manus.universalhost.CoreNotificationListener"
+184-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:144:13-53
+185            android:exported="true"
+185-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:147:13-36
+186            android:label="@string/accessibility_service_label"
+186-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:145:13-64
+187            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" >
+187-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:146:13-87
+188            <intent-filter>
+188-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:148:13-150:29
+189                <action android:name="android.service.notification.NotificationListenerService" />
+189-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:149:17-99
+189-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:149:25-96
+190            </intent-filter>
+191        </service>
+192        <service
+192-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:153:9-164:19
+193            android:name="im.manus.universalhost.CoreInputMethodService"
+193-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:154:13-51
+194            android:exported="true"
+194-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:157:13-36
+195            android:label="@string/keyboard_label"
+195-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:155:13-51
+196            android:permission="android.permission.BIND_INPUT_METHOD" >
+196-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:156:13-70
+197            <intent-filter>
+197-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:158:13-160:29
+198                <action android:name="android.view.InputMethod" />
+198-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:159:17-67
+198-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:159:25-64
+199            </intent-filter>
+200
+201            <meta-data
+201-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:161:13-163:50
+202                android:name="android.view.im"
+202-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:162:17-47
+203                android:resource="@xml/method" />
+203-->/home/runner/work/Universal-application/Universal-application/app/src/main/AndroidManifest.xml:163:17-47
+204        </service>
+205
+206        <provider
+206-->[androidx.emoji2:emoji2:1.2.0] /home/runner/.gradle/caches/transforms-4/031ade14d877df00101a598018a2fcab/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:24:9-32:20
+207            android:name="androidx.startup.InitializationProvider"
+207-->[androidx.emoji2:emoji2:1.2.0] /home/runner/.gradle/caches/transforms-4/031ade14d877df00101a598018a2fcab/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:25:13-67
+208            android:authorities="im.manus.universalhost.androidx-startup"
+208-->[androidx.emoji2:emoji2:1.2.0] /home/runner/.gradle/caches/transforms-4/031ade14d877df00101a598018a2fcab/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:26:13-68
+209            android:exported="false" >
+209-->[androidx.emoji2:emoji2:1.2.0] /home/runner/.gradle/caches/transforms-4/031ade14d877df00101a598018a2fcab/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:27:13-37
+210            <meta-data
+210-->[androidx.emoji2:emoji2:1.2.0] /home/runner/.gradle/caches/transforms-4/031ade14d877df00101a598018a2fcab/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:29:13-31:52
+211                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+211-->[androidx.emoji2:emoji2:1.2.0] /home/runner/.gradle/caches/transforms-4/031ade14d877df00101a598018a2fcab/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:30:17-75
+212                android:value="androidx.startup" />
+212-->[androidx.emoji2:emoji2:1.2.0] /home/runner/.gradle/caches/transforms-4/031ade14d877df00101a598018a2fcab/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:31:17-49
+213            <meta-data
+213-->[androidx.lifecycle:lifecycle-process:2.4.1] /home/runner/.gradle/caches/transforms-4/516e9b34d6f188db2d8f4c4f8fc934c5/transformed/jetified-lifecycle-process-2.4.1/AndroidManifest.xml:31:13-33:52
+214                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+214-->[androidx.lifecycle:lifecycle-process:2.4.1] /home/runner/.gradle/caches/transforms-4/516e9b34d6f188db2d8f4c4f8fc934c5/transformed/jetified-lifecycle-process-2.4.1/AndroidManifest.xml:32:17-78
+215                android:value="androidx.startup" />
+215-->[androidx.lifecycle:lifecycle-process:2.4.1] /home/runner/.gradle/caches/transforms-4/516e9b34d6f188db2d8f4c4f8fc934c5/transformed/jetified-lifecycle-process-2.4.1/AndroidManifest.xml:33:17-49
+216        </provider>
+217
+218        <meta-data
+218-->[dev.rikka.shizuku:provider:13.1.5] /home/runner/.gradle/caches/transforms-4/1a134f6deb8a4161ad4269d0eeaf9fb8/transformed/jetified-provider-13.1.5/AndroidManifest.xml:11:9-13:36
+219            android:name="moe.shizuku.client.V3_SUPPORT"
+219-->[dev.rikka.shizuku:provider:13.1.5] /home/runner/.gradle/caches/transforms-4/1a134f6deb8a4161ad4269d0eeaf9fb8/transformed/jetified-provider-13.1.5/AndroidManifest.xml:12:13-57
+220            android:value="true" />
+220-->[dev.rikka.shizuku:provider:13.1.5] /home/runner/.gradle/caches/transforms-4/1a134f6deb8a4161ad4269d0eeaf9fb8/transformed/jetified-provider-13.1.5/AndroidManifest.xml:13:13-33
+221    </application>
+222
+223</manifest>

@@ -37,6 +37,19 @@ object ShizukuBridge {
     private var started = false
     private var asked = false
 
+    /** Модули просят сообщить, когда Shizuku стал доступен (запущен и выдано разрешение): вместо опроса по таймеру. */
+    private val readyListeners = java.util.concurrent.CopyOnWriteArrayList<Runnable>()
+
+    @JvmStatic
+    fun addReadyListener(r: Runnable) {
+        readyListeners.addIfAbsent(r)
+    }
+
+    @JvmStatic
+    fun removeReadyListener(r: Runnable) {
+        readyListeners.remove(r)
+    }
+
     @JvmStatic
     fun init(app: Application) {
         if (started) return
@@ -212,5 +225,12 @@ object ShizukuBridge {
             grantSecureSettings(ctx)
             if (keepAccessibility(ctx)) ensureAccessibility(ctx)
         }.start()
+        for (r in readyListeners) {
+            try {
+                r.run()
+            } catch (e: Throwable) {
+                e.printStackTrace()
+            }
+        }
     }
 }
