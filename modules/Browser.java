@@ -876,7 +876,10 @@ public class Browser implements IPlugin, ISettingsProvider {
             sc.put("connects", new JSONArray(s.connect));
             JSONObject info = new JSONObject();
             info.put("script", sc);
-            info.put("scriptHandler", "UniversalBrowser");
+            // VOT (ilyhalight) считает «только прокси» любой менеджер, кроме Tampermonkey/Violentmonkey, и гонит перевод через
+            // чужой worker вместо прямых запросов к Yandex, которые здесь работают. Только для VOT называемся Tampermonkey.
+            boolean votCompat = "vot".equals(s.namespace) && s.name != null && s.name.startsWith("[VOT]");
+            info.put("scriptHandler", votCompat ? "Tampermonkey" : "UniversalBrowser");
             info.put("version", "1");
             info.put("isIncognito", false);
             return forJs(info.toString());
