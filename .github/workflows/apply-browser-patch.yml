@@ -61,7 +61,7 @@ jobs:
           set -o pipefail
           chmod +x gradlew
           ./gradlew assembleDebug 2>&1 | tee -a /tmp/patch.log
-      - name: Compile patched Browser.java
+      - name: Compile patched modules
         if: steps.apply.outputs.has_patches == 'true'
         shell: bash
         run: |
@@ -70,7 +70,13 @@ jobs:
           APP_CLASSES="app/build/tmp/kotlin-classes/debug:app/build/intermediates/javac/debug/compileDebugJavaWithJavac/classes:app/build/intermediates/javac/debug/classes"
           test -f "$ANDROID_JAR"
           mkdir -p /tmp/classes
-          javac -encoding UTF-8 -source 8 -target 8 -d /tmp/classes -cp "$ANDROID_JAR:$APP_CLASSES" modules/Browser.java 2>&1 | tee -a /tmp/patch.log
+          # каждый изменённый или новый модуль компилируем отдельно (удалённые пропускаем)
+          mapfile -t files < <(git status --porcelain -- modules | awk '$1 != "D" && $1 != "AD" {print $2}' | grep '\.java$' || true)
+          for f in "${files[@]}"; do
+            [ -f "$f" ] || continue
+            echo "Compiling $f" | tee -a /tmp/patch.log
+            javac -encoding UTF-8 -source 8 -target 8 -d /tmp/classes -cp "$ANDROID_JAR:$APP_CLASSES" "$f" 2>&1 | tee -a /tmp/patch.log
+          done
       - name: Commit patched browser and start normal build
         if: steps.apply.outputs.has_patches == 'true'
         shell: bash
@@ -80,11 +86,11 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add modules/Browser.java
+          git add -A -- modules app
           while IFS= read -r patch; do
             [ -n "$patch" ] && git rm -q -- "$patch"
           done < /tmp/applied-patches.txt
-          git commit -m "Браузер: применить подготовленные патчи"
+          git commit -m "Применить подготовленные патчи"
           git pull --rebase origin main
           git push origin HEAD:main
           gh workflow run android.yml --ref main
