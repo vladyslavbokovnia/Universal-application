@@ -138,8 +138,11 @@ import java.util.regex.Pattern;
  * «Браузер»: окно открывается своей задачей со своим названием и значком в недавних.
  *
  * Карточки вкладок: снимок страницы с крупными значками сайта и профиля поверх него. Вкладки перетаскиваются: вкладка на
- * вкладку создаёт группу, вкладка на группу добавляется в неё, в открытой группе вкладку можно поставить на первое место
- * (её снимок станет обложкой группы) или вытащить из группы. Долгое нажатие и отпустить на месте открывает меню.
+ * вкладку создаёт группу, вкладка на группу добавляется в неё, группа на группу вкладывается в неё (вложенность любая); у края
+ * карточки вкладка или группа встаёт рядом. Так же и в открытой группе, а зона внизу вынимает вкладку или группу на уровень выше.
+ * Долгое нажатие и отпустить на месте открывает меню. В меню вкладки и в общем меню есть «Нарисовать эскиз»: белой линией
+ * пальцем на снимке вкладки в полный размер вкладки; эскиз лежит поверх снимка и хранится отдельно, поэтому не пропадает
+ * при обновлении снимка.
  * Закладки: ряд значков сайтов над карточками вкладок. Слева значок профиля, в котором откроются закладки (нажатие выбирает
  * другой профиль; по умолчанию профиль текущей вкладки), справа ⭐ добавляет текущую страницу. Нажатие на значок открывает
  * закладку в новой вкладке, долгое нажатие даёт меню (открыть в другом профиле, в фоне, переименовать, переместить, удалить).
@@ -1020,6 +1023,8 @@ public class Browser implements IPlugin, ISettingsProvider {
         int group;              // 0: вне группы
         long lastUsed;
         boolean keepFiles;      // файлы снимка и значка нужны истории закрытых
+        Bitmap sketch;          // эскиз пальцем поверх снимка: прозрачная картинка с белыми линиями (файл uid_s.png)
+        boolean sketchTried;
         Tab opener;
         JsResult pendingJs;
         final String bridgeName = "ub" + randHex(6);
@@ -1060,6 +1065,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         final int id;
         String name;
         int lastTabId;          // вкладка группы, из которой вышли в последний раз: её снимок на обложке группы
+        int parent;             // группа, в которую вложена эта группа; 0: верхний уровень
         Group(int id, String name) { this.id = id; this.name = name; }
     }
 
@@ -1841,11 +1847,6 @@ public class Browser implements IPlugin, ISettingsProvider {
             ringActions.clear();
             ringHot = -1;
             List<RingItem> items = new ArrayList<RingItem>();
-            boolean back = (t.wv != null && t.wv.canGoBack()) || (t.opener != null && tabs.contains(t.opener));
-            items.add(new RingItem("‹", "Назад", back, new Runnable() { @Override public void run() { goBackOrClose(); } }));
-            items.add(new RingItem("›", "Вперёд", t.wv != null && t.wv.canGoForward(), new Runnable() {
-                @Override public void run() { if (t.wv != null && t.wv.canGoForward()) t.wv.goForward(); }
-            }));
             items.add(new RingItem(t.loading ? "✕" : "↻", t.loading ? "Остановить загрузку" : "Обновить страницу", true, new Runnable() {
                 @Override public void run() {
                     if (t.wv == null) return;
@@ -1853,6 +1854,13 @@ public class Browser implements IPlugin, ISettingsProvider {
                 }
             }));
             items.add(new RingItem("⌕", "Поиск, адрес, закладки и новая вкладка", true, new Runnable() { @Override public void run() { showStart(false, true); } }));
+            items.add(new RingItem("✎", "Нарисовать эскиз на снимке вкладки", true, new Runnable() { @Override public void run() {
+                final Runnable back0 = fromTabs ? new Runnable() { @Override public void run() {
+                    savedScrollAt = SystemClock.uptimeMillis();
+                    showTabs();
+                } } : null;
+                captureThumbThen(t, new Runnable() { @Override public void run() { startSketch(t, back0); } });
+            } }));
             items.add(new RingItem("⋮", "Меню", true, new Runnable() { @Override public void run() { showMenu(); } }));
 
             int[] hp = new int[2];
@@ -2418,6 +2426,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                     if (id <= 0) continue;
                     Group lg = new Group(id, o.optString("n", "Группа"));
                     lg.lastTabId = o.optInt("l", 0);
+                    lg.parent = o.optInt("p", 0);
                     groups.add(lg);
                     if (id >= nextGroup) nextGroup = id + 1;
                 }
@@ -2432,6 +2441,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                     o.put("i", g.id);
                     o.put("n", g.name);
                     o.put("l", g.lastTabId);
+                    o.put("p", g.parent);
                     a.put(o);
                 }
                 sp.edit().putString("groups_json", a.toString()).putInt("groups_next", nextGroup).apply();
@@ -2443,30 +2453,81 @@ public class Browser implements IPlugin, ISettingsProvider {
             return null;
         }
 
+        /** Все вкладки группы, в том числе лежащие во вложенных в неё группах, в порядке общего списка. */
         private List<Tab> tabsOf(Group g) {
             List<Tab> out = new ArrayList<Tab>();
-            for (Tab t : tabs) if (t.group == g.id) out.add(t);
+            for (Tab t : tabs) if (inGroup(t, g.id)) out.add(t);
             return out;
         }
 
-        private Group newGroup() {
+        /** Вкладка лежит в группе gid или в любой группе, вложенной в неё. */
+        private boolean inGroup(Tab t, int gid) {
+            Group x = groupById(t.group);
+            for (int i = 0; x != null && i < 100; i++) {
+                if (x.id == gid) return true;
+                x = groupById(x.parent);
+            }
+            return false;
+        }
+
+        /** Группа g вложена в ancestor (на любую глубину). */
+        private boolean groupInside(Group g, Group ancestor) {
+            Group x = groupById(g.parent);
+            for (int i = 0; x != null && i < 100; i++) {
+                if (x == ancestor) return true;
+                x = groupById(x.parent);
+            }
+            return false;
+        }
+
+        /** Что стоит на уровне levelId (0: верхний) на месте вкладки t: сама вкладка или содержащая её группа; null, если вкладка лежит не на этом уровне. */
+        private Object childAt(Tab t, int levelId) {
+            if (t.group == levelId) return t;
+            Group x = groupById(t.group);
+            for (int i = 0; x != null && i < 100; i++) {
+                if (x.parent == levelId) return x;
+                x = groupById(x.parent);
+            }
+            return null;
+        }
+
+        private Group newGroup(int parent) {
             Group g = new Group(nextGroup++, "Группа " + (groups.size() + 1));
+            g.parent = parent;
             groups.add(g);
             return g;
         }
 
-        /** Пустые группы исчезают, вкладки с неизвестной группой выходят из групп. */
+        /** Расформировать группу на один уровень: её вкладки и вложенные группы переходят в группу выше (или на верхний уровень). */
+        private void dissolve(Group g) {
+            for (Tab x : tabs) if (x.group == g.id) x.group = g.parent;
+            for (Group c : groups) if (c.parent == g.id) c.parent = g.parent;
+        }
+
+        /**
+         * Пустые группы исчезают (группа с вложенными группами, в которых есть вкладки, не пуста), вкладки с неизвестной группой
+         * выходят из групп, у группы с неизвестной родительской группой или с циклом родитель сбрасывается.
+         */
         private void cleanGroups() {
             for (Tab t : tabs) if (t.group != 0 && groupById(t.group) == null) t.group = 0;
-            List<Group> keep = new ArrayList<Group>();
+            for (Group g : groups) if (g.parent != 0 && (g.parent == g.id || groupById(g.parent) == null)) g.parent = 0;
             for (Group g : groups) {
-                boolean used = false;
-                for (Tab t : tabs) if (t.group == g.id) { used = true; break; }
-                if (used) keep.add(g);
+                Group x = g;
+                int n = 0;
+                while (x != null && x.parent != 0 && n < 100) { x = groupById(x.parent); n++; }
+                if (n >= 100) g.parent = 0;
             }
+            Set<Integer> used = new HashSet<Integer>();
+            for (Tab t : tabs) {
+                Group x = groupById(t.group);
+                for (int i = 0; x != null && i < 100; i++) { used.add(Integer.valueOf(x.id)); x = groupById(x.parent); }
+            }
+            Group og = openGroup;
+            List<Group> keep = new ArrayList<Group>();
+            for (Group g : groups) if (used.contains(Integer.valueOf(g.id))) keep.add(g);
             groups.clear();
             groups.addAll(keep);
-            if (openGroup != null && !groups.contains(openGroup)) openGroup = null;
+            if (og != null && !groups.contains(og)) openGroup = groupById(og.parent);      // открытая группа опустела: на уровень выше
         }
 
         private File thumbDir() {
@@ -2511,6 +2572,15 @@ public class Browser implements IPlugin, ISettingsProvider {
         private Bitmap iconOf(Tab t) {
             if (t.icon == null) t.icon = loadBitmap(new File(thumbDir(), t.uid + "_i.png"));
             return t.icon;
+        }
+
+        /** Эскиз, нарисованный пальцем поверх снимка вкладки: прозрачная картинка с белыми линиями; null, если не рисовали. */
+        private Bitmap sketchOf(Tab t) {
+            if (t.sketch == null && !t.sketchTried) {
+                t.sketchTried = true;
+                t.sketch = loadBitmap(new File(thumbDir(), t.uid + "_s.png"));
+            }
+            return t.sketch;
         }
 
         /** Значок сайта, если страница не отдала его сама: favicon.ico с того же хоста, один раз на хост. */
@@ -2577,7 +2647,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         private void doBack() {
             if (customView != null) hideCustomView();
             else if (layer != null) {
-                if (tabsPanel && openGroup != null) openTabsRoot();      // из группы назад к общему списку, а не сразу к странице
+                if (tabsPanel && openGroup != null) { openGroup = groupById(openGroup.parent); showTabs(); }      // из группы на уровень выше, а не сразу к странице
                 else leaveLayer();
             }
             else if (urlField.hasFocus()) { urlField.clearFocus(); requestFocus(); }
@@ -2635,8 +2705,13 @@ public class Browser implements IPlugin, ISettingsProvider {
             applyBar(t);
             setDockHidden(false, false);
             t.lastUsed = SystemClock.uptimeMillis();
+            boolean lastChanged = false;
             Group sg = t.group != 0 ? groupById(t.group) : null;
-            if (sg != null && sg.lastTabId != t.id) { sg.lastTabId = t.id; saveGroups(); }
+            for (int gi = 0; sg != null && gi < 100; gi++) {        // обложка каждой объемлющей группы показывает эту вкладку
+                if (sg.lastTabId != t.id) { sg.lastTabId = t.id; lastChanged = true; }
+                sg = groupById(sg.parent);
+            }
+            if (lastChanged) saveGroups();
             ensureWebView(t, true);
             if (t.wv != null && t.wv.getParent() == null) content.addView(t.wv, new FrameLayout.LayoutParams(-1, -1));
             if (t.wv != null) t.wv.requestFocus();
@@ -2664,10 +2739,12 @@ public class Browser implements IPlugin, ISettingsProvider {
             tabs.remove(t);
             t.thumb = null;
             t.icon = null;
+            t.sketch = null;
             if (!t.keepFiles) {
                 try {
                     new File(thumbDir(), t.uid + ".jpg").delete();
                     new File(thumbDir(), t.uid + "_i.png").delete();
+                    new File(thumbDir(), t.uid + "_s.png").delete();
                 } catch (Throwable ignored) { }
             }
             cleanGroups();
@@ -4385,6 +4462,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             try {
                 new File(thumbDir(), uid + ".jpg").delete();
                 new File(thumbDir(), uid + "_i.png").delete();
+                new File(thumbDir(), uid + "_s.png").delete();
             } catch (Throwable ignored) { }
         }
 
@@ -4420,6 +4498,8 @@ public class Browser implements IPlugin, ISettingsProvider {
                 if (a.exists()) a.renameTo(b);
                 File ai = new File(thumbDir(), c.uid + "_i.png"), bi = new File(thumbDir(), nt.uid + "_i.png");
                 if (ai.exists()) ai.renameTo(bi);
+                File sa = new File(thumbDir(), c.uid + "_s.png"), sb = new File(thumbDir(), nt.uid + "_s.png");
+                if (sa.exists()) sa.renameTo(sb);
             } catch (Throwable ignored) { }
             saveTabs();
         }
@@ -4487,7 +4567,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                         showClosed();
                     }
                 };
-                FrameLayout box = cardBody(g, false, false, 0, removeRun);
+                FrameLayout box = cardBody(g, false, null, 0, removeRun);
                 box.setContentDescription("Закрытая вкладка: " + tabTitle(g) + ", " + displayUrl(g)
                         + ". Нажмите, чтобы вернуть. Двойное нажатие убирает из истории");
                 cardGestures(box, new Runnable() {
@@ -4499,6 +4579,207 @@ public class Browser implements IPlugin, ISettingsProvider {
             showLayer(root, true, new Runnable() {
                 @Override public void run() { showTabs(); }
             }, "Закрытые вкладки: " + closedList.size());
+        }
+
+        // ------------------------------------------------------------ эскиз пальцем на снимке вкладки
+
+        /**
+         * Поле для рисования белой линией в полный размер вкладки: так проще рисовать на большом экране, а в карточке эскиз
+         * уменьшается вместе со снимком. Под линией тонкая тёмная кромка, чтобы она читалась и на белой странице.
+         */
+        private final class SketchView extends View {
+            private final Bitmap back, base;
+            private final List<Path> strokes = new ArrayList<Path>();
+            private final Paint bp = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+            private final Paint under = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final android.graphics.Rect src = new android.graphics.Rect();
+            private final android.graphics.RectF dst = new android.graphics.RectF();
+            private Path live;
+            private float lx, ly;
+            private boolean moved, cleared;
+
+            SketchView(Context c, Bitmap back, Bitmap base) {
+                super(c);
+                this.back = back;
+                this.base = base;
+                for (Paint p : new Paint[] { under, line }) {
+                    p.setStyle(Paint.Style.STROKE);
+                    p.setStrokeCap(Paint.Cap.ROUND);
+                    p.setStrokeJoin(Paint.Join.ROUND);
+                }
+                line.setColor(0xFFFFFFFF);
+                line.setStrokeWidth(dp(9));
+                under.setColor(0x80000000);
+                under.setStrokeWidth(dp(12));
+                setContentDescription("Поле для рисования: проведите пальцем");
+            }
+
+            @Override protected void onDraw(Canvas c) {
+                int w = getWidth(), h = getHeight();
+                c.drawColor(C_SURFACE2);
+                if (back != null && w > 0 && h > 0) {
+                    float k = Math.max(w / (float) back.getWidth(), h / (float) back.getHeight());
+                    float sw = w / k, sh = h / k;
+                    src.set(Math.round((back.getWidth() - sw) / 2f), Math.round((back.getHeight() - sh) / 2f),
+                            Math.round((back.getWidth() + sw) / 2f), Math.round((back.getHeight() + sh) / 2f));
+                    dst.set(0, 0, w, h);
+                    c.drawBitmap(back, src, dst, bp);
+                }
+                if (base != null && !cleared) {
+                    dst.set(0, 0, w, h);
+                    c.drawBitmap(base, null, dst, bp);
+                }
+                for (Path p : strokes) {
+                    c.drawPath(p, under);
+                    c.drawPath(p, line);
+                }
+            }
+
+            @Override public boolean onTouchEvent(MotionEvent e) {
+                float x = e.getX(), y = e.getY();
+                switch (e.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
+                        live = new Path();
+                        live.moveTo(x, y);
+                        lx = x;
+                        ly = y;
+                        moved = false;
+                        strokes.add(live);
+                        invalidate();
+                        return true;
+                    case MotionEvent.ACTION_MOVE:
+                        if (live != null) {
+                            for (int i = 0; i < e.getHistorySize(); i++) extend(e.getHistoricalX(i), e.getHistoricalY(i));
+                            extend(x, y);
+                            invalidate();
+                        }
+                        return true;
+                    case MotionEvent.ACTION_UP:
+                        if (live != null) {
+                            extend(x, y);
+                            if (moved) live.lineTo(lx, ly); else live.lineTo(x + 0.1f, y + 0.1f);      // одиночное касание рисует точку
+                            live = null;
+                            invalidate();
+                        }
+                        return true;
+                    case MotionEvent.ACTION_CANCEL:
+                        live = null;
+                        return true;
+                    default:
+                        return true;
+                }
+            }
+
+            private void extend(float x, float y) {
+                if (live == null) return;
+                if (Math.abs(x - lx) < 0.5f && Math.abs(y - ly) < 0.5f) return;
+                live.quadTo(lx, ly, (x + lx) / 2f, (y + ly) / 2f);
+                lx = x;
+                ly = y;
+                moved = true;
+            }
+
+            void undo() {
+                if (!strokes.isEmpty()) strokes.remove(strokes.size() - 1);
+                invalidate();
+            }
+
+            void clearAll() {
+                strokes.clear();
+                cleared = true;
+                invalidate();
+            }
+
+            boolean dirty() { return !strokes.isEmpty() || cleared; }
+
+            /** Прозрачная картинка с линиями, пропорции как у поля рисования (то есть у вкладки); null, если рисунка не осталось. */
+            Bitmap result() {
+                int w = getWidth(), h = getHeight();
+                if (w <= 0 || h <= 0) return null;
+                boolean keepBase = base != null && !cleared;
+                if (strokes.isEmpty() && !keepBase) return null;
+                float sc = Math.min(1f, 600f / w);
+                int sw = Math.max(1, Math.round(w * sc)), sh = Math.max(1, Math.round(h * sc));
+                Bitmap b = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888);
+                Canvas c = new Canvas(b);
+                if (keepBase) {
+                    dst.set(0, 0, sw, sh);
+                    c.drawBitmap(base, null, dst, bp);
+                }
+                c.scale(sc, sc);
+                for (Path p : strokes) {
+                    c.drawPath(p, under);
+                    c.drawPath(p, line);
+                }
+                return b;
+            }
+        }
+
+        private void saveSketch(Tab t, SketchView sv) {
+            if (!sv.dirty()) return;
+            File f = new File(thumbDir(), t.uid + "_s.png");
+            Bitmap b = sv.result();
+            t.sketchTried = true;
+            if (b == null) {
+                t.sketch = null;
+                try { f.delete(); } catch (Throwable ignored) { }
+                toast("Эскиз убран");
+            } else {
+                t.sketch = b;
+                saveBitmapAsync(b, f, true);
+                toast("Эскиз сохранён");
+            }
+        }
+
+        private void addSketchButton(LinearLayout bar, String glyph, String desc, final Runnable action) {
+            TextView b = glyph(glyph, C_TEXT);
+            b.setTextSize(24);
+            b.setContentDescription(desc);
+            b.setBackground(pressable());
+            b.setClickable(true);
+            b.setFocusable(true);
+            b.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { action.run(); }
+            });
+            bar.addView(b, new LinearLayout.LayoutParams(dp(56), dp(48)));
+        }
+
+        /**
+         * Экран рисования эскиза на снимке вкладки t. «Готово» сохраняет и вызывает after; отмена и кнопка «Назад» выходят
+         * без сохранения и тоже вызывают after (например, возвращают панель вкладок).
+         */
+        private void startSketch(final Tab t, final Runnable after) {
+            if (t == null || closed) return;
+            final SketchView sv = new SketchView(act, thumbOf(t), sketchOf(t));
+            FrameLayout root = new FrameLayout(act);
+            root.addView(sv, new FrameLayout.LayoutParams(-1, -1));
+            LinearLayout bar = new LinearLayout(act);
+            bar.setOrientation(LinearLayout.HORIZONTAL);
+            bar.setGravity(Gravity.CENTER);
+            bar.setPadding(dp(10), dp(8), dp(10), dp(8));
+            bar.setBackground(round(0xCC202124, 34, 0x55FFFFFF, 1));
+            addSketchButton(bar, "✕", "Отмена: выйти без сохранения", new Runnable() {
+                @Override public void run() { closeLayer(true); }
+            });
+            addSketchButton(bar, "↩", "Отменить последний штрих", new Runnable() {
+                @Override public void run() { sv.undo(); }
+            });
+            addSketchButton(bar, "🗑", "Стереть весь эскиз", new Runnable() {
+                @Override public void run() { sv.clearAll(); }
+            });
+            addSketchButton(bar, "✔", "Готово: сохранить эскиз", new Runnable() {
+                @Override public void run() {
+                    saveSketch(t, sv);
+                    closeLayer(false);
+                    if (after != null) after.run();
+                }
+            });
+            FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            blp.bottomMargin = dp(28);
+            root.addView(bar, blp);
+            showLayer(root, true, after, "Рисование эскиза на снимке вкладки: проведите пальцем. Кнопки внизу: отмена, шаг назад, стереть, готово");
         }
 
         private int closeMode() { return sp.getInt("close_mode", 0); }
@@ -4630,14 +4911,14 @@ public class Browser implements IPlugin, ISettingsProvider {
                 });
             } });
             addG(items, "group", "📁", "Группа этой вкладки…", new Runnable() { @Override public void run() { showTabMenu(t); } });
+            addG(items, "sketch", "✎", "Нарисовать эскиз на снимке вкладки", new Runnable() { @Override public void run() {
+                captureThumbThen(t, new Runnable() { @Override public void run() { startSketch(t, null); } });
+            } });
             if (tabs.size() > 1) {
                 addG(items, "next", "›", "Следующая вкладка", new Runnable() { @Override public void run() { switchTab(1); } });
                 addG(items, "prev", "‹", "Предыдущая вкладка", new Runnable() { @Override public void run() { switchTab(-1); } });
             }
             addG(items, "closetab", "✕", "Закрыть эту вкладку", new Runnable() { @Override public void run() { closeTabKeep(t); } });
-            if (t.wv != null && t.wv.canGoForward()) {
-                addG(items, "fwd", "→", "Вперёд", new Runnable() { @Override public void run() { t.wv.goForward(); } });
-            }
             addG(items, "reload", t.loading ? "✕" : "↻", t.loading ? "Остановить загрузку" : "Обновить страницу", new Runnable() { @Override public void run() {
                 if (t.wv == null) return;
                 if (t.loading) t.wv.stopLoading(); else t.wv.reload();
@@ -5389,14 +5670,11 @@ public class Browser implements IPlugin, ISettingsProvider {
             root.addView(listBox, new LinearLayout.LayoutParams(-1, 0, 1f));
 
             List<Object> items = new ArrayList<Object>();
-            if (og != null) {
-                items.addAll(tabsOf(og));
-            } else {
-                Set<Integer> seen = new HashSet<Integer>();
-                for (Tab t : tabs) {
-                    if (t.group == 0) items.add(t);
-                    else if (seen.add(Integer.valueOf(t.group))) items.add(groupById(t.group));     // группа стоит на месте своей первой вкладки
-                }
+            int level = og == null ? 0 : og.id;
+            Set<Object> seenItems = new HashSet<Object>();
+            for (Tab t : tabs) {
+                Object it = childAt(t, level);      // вкладка или группа этого уровня; группа стоит на месте своей первой вкладки
+                if (it != null && seenItems.add(it)) items.add(it);
             }
             LinearLayout rowL = null;
             for (int i = 0; i < items.size(); i++) {
@@ -5522,14 +5800,14 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         /** Карточка: снимок страницы, поверх него крупные значки сайта (слева внизу) и профиля (справа внизу). */
-        private FrameLayout cardBody(Tab t, boolean current, boolean isGroup, int count, Runnable closer) {
+        private FrameLayout cardBody(Tab t, boolean current, Group grp, int count, Runnable closer) {
             FrameLayout box = new FrameLayout(act);
             box.setTag(closer);
             box.setBackground(round(C_SURFACE, 12, 0, 0));      // без рамок: текущую вкладку показывает галочка
             box.setClickable(true);
             box.setFocusable(true);
             box.setClipToOutline(true);
-            fillCard(box, t, isGroup, count, 0);
+            fillCard(box, t, grp, count, 0);
             return box;
         }
 
@@ -5561,7 +5839,8 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         /** Содержимое карточки; у группы его можно перерисовать на другую вкладку (pos — номер показанной вкладки с единицы, 0: без номера). */
-        private void fillCard(FrameLayout box, Tab t, boolean isGroup, int count, int pos) {
+        private void fillCard(FrameLayout box, Tab t, Group grp, int count, int pos) {
+            boolean isGroup = grp != null;
             box.removeAllViews();
             // у группы по краям полоса под чёрточки: снимок внутри, рамка вокруг него, поэтому группа крупнее обычной вкладки
             int band = isGroup ? dp(GROUP_BAND) : 0;
@@ -5586,6 +5865,13 @@ public class Browser implements IPlugin, ISettingsProvider {
                 TextView ph = label(displayUrl(t), 14, C_TEXT2, false);
                 ph.setGravity(Gravity.CENTER);
                 thumbBox.addView(ph, new FrameLayout.LayoutParams(-1, -1));
+            }
+            Bitmap sk = sketchOf(t);
+            if (sk != null) {          // эскиз пальцем лежит поверх снимка и не пропадает, когда снимок обновляется
+                ImageView skv = new ImageView(act);
+                skv.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                skv.setImageBitmap(sk);
+                thumbBox.addView(skv, new FrameLayout.LayoutParams(-1, -1));
             }
             box.addView(thumbBox, new FrameLayout.LayoutParams(-1, dp(190)));
 
@@ -5614,8 +5900,7 @@ public class Browser implements IPlugin, ISettingsProvider {
 
             if (t.id >= 0) {
                 // точка в углу снимка: страница ещё грузится или работает; пропадает, когда загрузка закончилась
-                Group wg = isGroup ? groupById(t.group) : null;
-                List<Tab> watch = wg != null ? tabsOf(wg) : new ArrayList<Tab>(java.util.Collections.singletonList(t));
+                List<Tab> watch = grp != null ? tabsOf(grp) : new ArrayList<Tab>(java.util.Collections.singletonList(t));
                 View dot = new View(act);
                 dot.setBackground(round(0xFFFFB300, 8, 0xCCFFFFFF, 2));
                 dot.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
@@ -5719,7 +6004,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                     showTabs();
                 }
             };
-            final FrameLayout box = cardBody(t, current, false, 0, closer);
+            final FrameLayout box = cardBody(t, current, null, 0, closer);
             box.setContentDescription("Вкладка " + (index + 1) + " из " + total + ": " + tabTitle(t) + ", " + displayUrl(t)
                     + ", профиль " + profileName(t.profile) + (current ? ", текущая" : "") + ". Двойное нажатие закрывает");
 
@@ -5746,7 +6031,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 for (int k = 0; k < gt.size(); k++) if (gt.get(k) == cur) { start = k; break; }
             }
             final int[] shown = { start };
-            boolean current = cur != null && cur.group == g.id;
+            boolean current = cur != null && inGroup(cur, g.id);
             FrameLayout outer = new FrameLayout(act);
             final Runnable closer = new Runnable() {
                 @Override public void run() {
@@ -5754,8 +6039,8 @@ public class Browser implements IPlugin, ISettingsProvider {
                     showTabs();
                 }
             };
-            final FrameLayout box = cardBody(gt.get(start), current, true, gt.size(), closer);
-            fillCard(box, gt.get(start), true, gt.size(), start + 1);
+            final FrameLayout box = cardBody(gt.get(start), current, g, gt.size(), closer);
+            fillCard(box, gt.get(start), g, gt.size(), start + 1);
             box.setContentDescription("Группа " + g.name + ", вкладок " + gt.size() + (current ? ", в ней текущая вкладка" : "") + ". Двойное нажатие закрывает группу"
                     + ". Нажатие открывает показанную вкладку, долгое нажатие открывает группу"
                     + (gt.size() > 1 ? ". Смахивание вправо или влево листает вкладки группы" : ""));
@@ -5773,7 +6058,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                     int n = gt.size();
                     shown[0] = ((shown[0] + dir) % n + n) % n;       // по кругу
                     Tab t = gt.get(shown[0]);
-                    fillCard(box, t, true, n, shown[0] + 1);
+                    fillCard(box, t, g, n, shown[0] + 1);
                     box.announceForAccessibility("Вкладка " + (shown[0] + 1) + " из " + n + ": " + tabTitle(t));
                     // новый снимок въезжает с той стороны, куда смахнули
                     View inner = box.getChildCount() > 0 ? box.getChildAt(0) : null;
@@ -5977,7 +6262,7 @@ public class Browser implements IPlugin, ISettingsProvider {
          */
         private View dragZone(final Group og) {
             final boolean inGroup = og != null;
-            final TextView z = label(inGroup ? "↩  Вынуть из группы" : "⊟  Расформировать группу", 16, C_TEXT, true);
+            final TextView z = label(inGroup ? "↩  Вынуть на уровень выше" : "⊟  Расформировать группу", 16, C_TEXT, true);
             z.setGravity(Gravity.CENTER);
             z.setPadding(dp(12), dp(14), dp(12), dp(14));
             z.setBackground(round(0xE61E2430, 14, C_ACCENT, 2));
@@ -5985,7 +6270,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             z.setOnDragListener(new View.OnDragListener() {
                 @Override public boolean onDrag(View v, DragEvent e) {
                     Object d = e.getLocalState();
-                    boolean ok = inGroup ? d instanceof Tab : d instanceof Group;
+                    boolean ok = inGroup ? (d instanceof Tab || d instanceof Group) : d instanceof Group;
                     switch (e.getAction()) {
                         case DragEvent.ACTION_DRAG_STARTED:
                             if (!ok) return false;
@@ -6004,11 +6289,18 @@ public class Browser implements IPlugin, ISettingsProvider {
                                     if (inGroup && dropped instanceof Tab) {
                                         Tab dt = (Tab) dropped;
                                         Tab anchor = lastOfGroup(og.id, dt);
-                                        dt.group = 0;
+                                        dt.group = og.parent;
                                         if (anchor != null) moveAfter(dt, anchor);
                                         finishDrop();
+                                    } else if (inGroup && dropped instanceof Group) {
+                                        Group dg = (Group) dropped;
+                                        List<Tab> moving = tabsOf(dg);
+                                        Tab anchor = lastOfGroup(og.id, moving);
+                                        dg.parent = og.parent;
+                                        if (anchor != null) moveBlockAfter(moving, anchor);
+                                        finishDrop();
                                     } else if (!inGroup && dropped instanceof Group) {
-                                        for (Tab x : tabsOf((Group) dropped)) x.group = 0;
+                                        dissolve((Group) dropped);
                                         finishDrop();
                                     }
                                 }
@@ -6059,16 +6351,27 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         /** Вкладки каждой группы идут подряд на месте своей первой вкладки — так их и рисует панель. */
         private void compactGroups() {
+            cleanGroups();
             List<Tab> out = new ArrayList<Tab>();
             Set<Integer> done = new HashSet<Integer>();
             for (Tab t : tabs) {
-                if (t.group == 0) out.add(t);
-                else if (done.add(Integer.valueOf(t.group))) {
-                    for (Tab m : tabs) if (m.group == t.group) out.add(m);
-                }
+                Object it = childAt(t, 0);
+                if (it instanceof Tab) out.add((Tab) it);
+                else if (it instanceof Group) appendGroup((Group) it, out, done);
             }
+            for (Tab t : tabs) if (!out.contains(t)) out.add(t);      // на случай вкладки с непонятной цепочкой групп
             tabs.clear();
             tabs.addAll(out);
+        }
+
+        /** Вкладки группы подряд, вложенные группы тоже подряд, каждая на месте своей первой вкладки. */
+        private void appendGroup(Group g, List<Tab> out, Set<Integer> done) {
+            if (!done.add(Integer.valueOf(g.id))) return;
+            for (Tab t : tabs) {
+                Object it = childAt(t, g.id);
+                if (it instanceof Tab) { if (!out.contains(it)) out.add((Tab) it); }
+                else if (it instanceof Group) appendGroup((Group) it, out, done);
+            }
         }
 
         private List<Tab> unitTabs(Object o) {
@@ -6090,9 +6393,23 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         private Tab lastOfGroup(int gid, Tab exclude) {
+            List<Tab> ex = new ArrayList<Tab>();
+            if (exclude != null) ex.add(exclude);
+            return lastOfGroup(gid, ex);
+        }
+
+        /** Последняя вкладка группы (с вложенными группами), кроме перечисленных. */
+        private Tab lastOfGroup(int gid, List<Tab> exclude) {
             Tab last = null;
-            for (Tab t : tabs) if (t.group == gid && t != exclude) last = t;
+            for (Tab t : tabs) if (inGroup(t, gid) && !exclude.contains(t)) last = t;
             return last;
+        }
+
+        /** Поставить блок вкладок сразу после вкладки anchor, порядок внутри блока сохраняется. */
+        private void moveBlockAfter(List<Tab> block, Tab anchor) {
+            tabs.removeAll(block);
+            int i = tabs.indexOf(anchor);
+            tabs.addAll(i < 0 ? tabs.size() : i + 1, block);
         }
 
         private void moveAfter(Tab t, Tab anchor) {
@@ -6108,24 +6425,15 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         /**
-         * Бросили [d] на [target]. В общем списке: вкладка на вкладку создаёт группу, вкладка на группу добавляется в неё,
-         * группа на группу сливается. Внутри группы: вкладка встаёт на место той, на которую её бросили; бросить на первую
-         * значит сделать её обложкой группы (по первой вкладке рисуется карточка группы).
+         * Бросили [d] на [target] (на любом уровне: в общем списке или в открытой группе). У левого и правого края карточки:
+         * вкладка или группа встаёт рядом. В середине: вкладка на вкладку создаёт группу (на этом же уровне), вкладка на группу
+         * добавляется в неё, группа на вкладку забирает её к себе, группа на группу вкладывается в неё (на любую глубину,
+         * но не в саму себя и не в свою вложенную). Обложкой группы становится вкладка, показанная на её карточке.
          */
         private void handleDrop(Object d, Object target, int zone, Runnable menu) {
             if (closed || d == null) return;
             if (d == target) { menu.run(); return; }
-            if (openGroup != null) {
-                if (d instanceof Tab && target instanceof Tab) {
-                    Tab dt = (Tab) d, tt = (Tab) target;
-                    boolean after = zone > 0 || (zone == 0 && tabs.indexOf(dt) < tabs.indexOf(tt));
-                    tabs.remove(dt);
-                    int ti = tabs.indexOf(tt);
-                    tabs.add(after ? ti + 1 : ti, dt);
-                    finishDrop();
-                }
-                return;
-            }
+            final int level = openGroup == null ? 0 : openGroup.id;
             if (zone != 0) {            // край карточки: поменять местами / переставить вкладку или группу целиком
                 compactGroups();
                 moveUnit(d, target, zone > 0);
@@ -6136,16 +6444,10 @@ public class Browser implements IPlugin, ISettingsProvider {
                 Tab dt = (Tab) d;
                 if (target instanceof Tab) {
                     Tab tt = (Tab) target;
-                    int gid;
-                    if (tt.group != 0) {
-                        gid = tt.group;
-                    } else {
-                        Group g = newGroup();
-                        tt.group = g.id;
-                        gid = g.id;
-                    }
-                    Tab anchor = lastOfGroup(gid, dt);
-                    dt.group = gid;
+                    Group g = newGroup(level);
+                    tt.group = g.id;
+                    Tab anchor = lastOfGroup(g.id, dt);
+                    dt.group = g.id;
                     if (anchor != null) moveAfter(dt, anchor);
                 } else if (target instanceof Group) {
                     Group g = (Group) target;
@@ -6162,11 +6464,11 @@ public class Browser implements IPlugin, ISettingsProvider {
                     if (anchor != null) moveAfter(tt, anchor);
                 } else if (target instanceof Group) {
                     Group tg = (Group) target;
-                    for (Tab m : tabsOf(dg)) {
-                        Tab anchor = lastOfGroup(tg.id, m);
-                        m.group = tg.id;
-                        if (anchor != null) moveAfter(m, anchor);
-                    }
+                    if (tg == dg || groupInside(tg, dg)) return;
+                    List<Tab> moving = tabsOf(dg);
+                    Tab anchor = lastOfGroup(tg.id, moving);
+                    dg.parent = tg.id;
+                    if (anchor != null) moveBlockAfter(moving, anchor);
                 }
             }
             finishDrop();
@@ -6177,12 +6479,25 @@ public class Browser implements IPlugin, ISettingsProvider {
             List<GridItem> items = new ArrayList<GridItem>();
             if (t.group != 0) {
                 addG(items, "ungroup", "↩", "Убрать из группы", new Runnable() { @Override public void run() {
-                    t.group = 0;
+                    Group og0 = groupById(t.group);
+                    if (og0 != null) {      // вынуть на уровень выше и поставить сразу после группы
+                        Tab anchor = lastOfGroup(og0.id, t);
+                        t.group = og0.parent;
+                        if (anchor != null) moveAfter(t, anchor);
+                    } else {
+                        t.group = 0;
+                    }
                     cleanGroups();
                     saveTabs();
                     showTabs();
                 } });
             }
+            addG(items, "sketch", "✎", "Нарисовать эскиз на снимке", new Runnable() { @Override public void run() {
+                startSketch(t, new Runnable() { @Override public void run() {
+                    savedScrollAt = SystemClock.uptimeMillis();      // рисование долгое: прокрутка панели должна вернуться на место
+                    showTabs();
+                } });
+            } });
             addG(items, "badges", "◐", "Значки на карточках: " + BADGE_NAMES[badgeStyle()] + ". Нажмите, чтобы сменить", new Runnable() { @Override public void run() {
                 int n = (badgeStyle() + 1) % BADGE_NAMES.length;
                 sp.edit().putInt("badge_style", n).apply();
@@ -6228,7 +6543,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 });
             } });
             add(icons, labels, actions, "⊟", "Разгруппировать", new Runnable() { @Override public void run() {
-                for (Tab x : tabsOf(g)) x.group = 0;
+                dissolve(g);
                 cleanGroups();
                 saveTabs();
                 showTabs();
