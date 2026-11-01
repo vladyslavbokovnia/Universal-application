@@ -1,0 +1,68 @@
+diff --git a/modules/Browser.java b/modules/Browser.java
+index d6dd5b0..aaa82e9 100644
+--- a/modules/Browser.java
++++ b/modules/Browser.java
+@@ -793,6 +793,15 @@ public class Browser implements IPlugin, ISettingsProvider {
+             }
+         }
+ 
++        /** Удаляет файл скрипта из папки скриптов (кнопка ✕ на экране «Скрипты»). */
++        static synchronized String remove(UserScript s) {
++            if (s == null || s.file == null) return "Скрипт не найден";
++            String path = s.file.getAbsolutePath();
++            boolean ok = s.file.delete();
++            cache.remove(path);
++            return ok ? "Скрипт удалён: " + s.name : "Не удалось удалить файл " + path + " (нужен доступ ко всем файлам)";
++        }
++
+         private static String safeName(String name) {
+             String n = name.replaceAll("[^\\p{L}\\p{N}._-]+", "_");
+             while (n.startsWith(".")) n = n.substring(1);
+@@ -4931,7 +4940,7 @@ public class Browser implements IPlugin, ISettingsProvider {
+                 applyUserAgent(t);
+                 if (t.wv != null) t.wv.reload();
+             } });
+-            addG(items, "scripts", "📜", "Скрипты", new Runnable() { @Override public void run() { showScripts(t); } });
++            addG(items, "scripts", "🧩", "Скрипты", new Runnable() { @Override public void run() { showScripts(t); } });
+             addG(items, "profiles", "🎭", "Значки профилей…", new Runnable() { @Override public void run() { showProfileList(); } });
+             addG(items, "fullscreen", "⛶", fullscreen ? "Выйти из полноэкранного режима" : "Полноэкранный режим", new Runnable() { @Override public void run() {
+                 sp.edit().putBoolean("fullscreen", !sp.getBoolean("fullscreen", false)).apply();
+@@ -5302,14 +5311,36 @@ public class Browser implements IPlugin, ISettingsProvider {
+                 col.addView(label("Скриптов нет. Папка: " + ScriptStore.dir().getPath(), 15, C_TEXT2, false));
+             }
+             for (final UserScript s : scripts) {
+-                col.addView(scriptSwitchRow("📄  " + s.name + (s.version.length() > 0 ? " " + s.version : ""),
++                LinearLayout srow = (LinearLayout) scriptSwitchRow("🧩  " + s.name + (s.version.length() > 0 ? " " + s.version : ""),
+                         sp.getBoolean("script_on:" + s.fileName, true),
+                         new android.widget.CompoundButton.OnCheckedChangeListener() {
+                             @Override public void onCheckedChanged(android.widget.CompoundButton b, boolean on) {
+                                 sp.edit().putBoolean("script_on:" + s.fileName, on).apply();
+                                 scriptsDirty = true;
+                             }
+-                        }));
++                        });
++                final TextView del = label("✕", 22, C_TEXT2, false);
++                del.setPadding(dp(16), dp(6), dp(10), dp(6));
++                del.setContentDescription("Удалить скрипт " + s.name);
++                del.setOnClickListener(new View.OnClickListener() {
++                    private boolean armed;
++                    @Override public void onClick(View v) {
++                        if (!armed) {          // первое нажатие просит подтверждение, второе удаляет файл
++                            armed = true;
++                            del.setText("Удалить? ✔");
++                            del.setTextColor(C_TEXT);
++                            return;
++                        }
++                        String r = ScriptStore.remove(s);
++                        sp.edit().remove("script_on:" + s.fileName).apply();
++                        scriptsDirty = true;
++                        toast(r);
++                        if (scriptsScroll != null) scriptsScrollY = scriptsScroll.getScrollY();
++                        buildScripts(t);
++                    }
++                });
++                srow.addView(del, new LinearLayout.LayoutParams(-2, -2));
++                col.addView(srow);
+                 for (final MenuCmd m : new ArrayList<MenuCmd>(t.menu)) {
+                     if (!m.inj.script.fileName.equals(s.fileName)) continue;
+                     LinearLayout row = new LinearLayout(act);
