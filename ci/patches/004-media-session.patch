@@ -1,0 +1,235 @@
+diff --git a/modules/Browser.java b/modules/Browser.java
+index aaa82e9..9b08434 100644
+--- a/modules/Browser.java
++++ b/modules/Browser.java
+@@ -380,6 +380,8 @@ public class Browser implements IPlugin, ISettingsProvider {
+                 "Отдельный значок «Браузер»: окно открывается как самостоятельное приложение со своей карточкой в недавних"));
+         l.add(SettingItem.toggle("tts_bridge", "Озвучка для скриптов",
+                 "Подставляет в страницы speechSynthesis поверх голоса Android, иначе скрипты в WebView молчат. Применяется при следующей загрузке страницы", true));
++        l.add(SettingItem.toggle("ms_bridge", "Кнопки наушников и шторка для скриптов",
++                "Подставляет в страницы navigator.mediaSession поверх системной медиа-сессии: озвучка скриптов слушается на кнопки наушников и часов. Применяется при следующей загрузке страницы", true));
+ 
+         l.add(SettingItem.section("Профили: отдельные сессии для входа в разные аккаунты"));
+         for (int i = 0; i < PROFILES; i++) {
+@@ -429,7 +431,7 @@ public class Browser implements IPlugin, ISettingsProvider {
+             new Thread(new Runnable() {
+                 @Override public void run() { toast(ScriptStore.updateAll()); }
+             }).start();
+-        } else if ("user_agent".equals(key) || "keep_screen_on".equals(key) || "tts_bridge".equals(key) || "fullscreen".equals(key)) {
++        } else if ("user_agent".equals(key) || "keep_screen_on".equals(key) || "tts_bridge".equals(key) || "ms_bridge".equals(key) || "fullscreen".equals(key)) {
+             final BrowserView v = view;
+             if (v != null) main.post(new Runnable() {
+                 @Override public void run() { v.applySettingsLive(); }
+@@ -1012,6 +1014,29 @@ public class Browser implements IPlugin, ISettingsProvider {
+             "def(window,'SpeechSynthesisUtterance',U);def(window,'speechSynthesis',S);\n" +
+             "})();\n";
+ 
++    /**
++     * Подмена navigator.mediaSession (в этом WebView его нет) поверх нативной MediaSession: кнопки наушников, шторка и часы
++     * приходят странице как обычные обработчики setActionHandler. Маркер @@MS@@ заменяется именем моста вкладки.
++     * Работает только в самой странице (не во фреймах). Повторная вставка безвредна (защита __ubMs).
++     */
++    private static final String MS_POLYFILL =
++            "(function(){var B=window['@@MS@@'];if(!B||window.__ubMs||window.top!==window||navigator.mediaSession)return;\n" +
++            "function def(o,k,v){try{Object.defineProperty(o,k,{value:v,configurable:true,writable:true});}catch(e){}}\n" +
++            "def(window,'__ubMs',1);\n" +
++            "var handlers={},meta=null,state='none',pos=null,timer=0;\n" +
++            "function MediaMetadata(i){i=i||{};this.title=i.title==null?'':String(i.title);this.artist=i.artist==null?'':String(i.artist);\n" +
++            "this.album=i.album==null?'':String(i.album);this.artwork=i.artwork||[];}\n" +
++            "function flush(){timer=0;try{B.update(JSON.stringify({s:state,t:meta?meta.title:'',a:meta?meta.artist:'',al:meta?meta.album:'',\n" +
++            "h:Object.keys(handlers),p:pos?{d:+pos.duration||0,r:pos.playbackRate==null?1:+pos.playbackRate,x:+pos.position||0}:null}));}catch(e){}}\n" +
++            "function push(){if(!timer)timer=setTimeout(flush,40);}\n" +
++            "var MS={setActionHandler:function(a,f){a=String(a);if(typeof f==='function')handlers[a]=f;else delete handlers[a];push();},\n" +
++            "setPositionState:function(p){pos=p||null;push();},setCameraActive:function(){},setMicrophoneActive:function(){}};\n" +
++            "Object.defineProperty(MS,'metadata',{get:function(){return meta;},set:function(m){meta=m||null;push();},enumerable:true});\n" +
++            "Object.defineProperty(MS,'playbackState',{get:function(){return state;},set:function(s){state=String(s);push();},enumerable:true});\n" +
++            "def(window,'__ubMsAct',function(a,v){var f=handlers[a];if(!f)return;try{f({action:a,seekTime:v,seekOffset:v});}catch(e){console.error(e);}});\n" +
++            "def(window,'MediaMetadata',MediaMetadata);def(navigator,'mediaSession',MS);\n" +
++            "})();\n";
++
+     // ---------------------------------------------------------------- вкладка и мелкие вью
+ 
+     private static final class Tab {
+@@ -1042,6 +1067,8 @@ public class Browser implements IPlugin, ISettingsProvider {
+         final String bridgeName = "ub" + randHex(6);
+         final String ttsName = "ut" + randHex(6);
+         Object ttsDocumentStartScript;
++        final String msName = "um" + randHex(6);
++        Object msDocumentStartScript;
+         final Map<String, Object[]> docStart = new HashMap<String, Object[]>();    // файл скрипта -> {версия, ScriptHandler, Injected}
+         final Map<String, Injected> injected = new ConcurrentHashMap<String, Injected>();
+         final Map<String, Injected> byScript = new ConcurrentHashMap<String, Injected>();
+@@ -1390,6 +1417,7 @@ public class Browser implements IPlugin, ISettingsProvider {
+             if (fileCb != null) { fileCb.onReceiveValue(null); fileCb = null; }
+             closeLayer(false);
+             h.removeCallbacksAndMessages(null);
++            msRelease();
+             for (Tab t : tabs) destroyWebView(t);
+             if (tts != null) {
+                 try { tts.stop(); tts.shutdown(); } catch (Throwable ignored) { }
+@@ -1412,6 +1440,14 @@ public class Browser implements IPlugin, ISettingsProvider {
+                     } else {
+                         t.wv.removeJavascriptInterface(t.ttsName);
+                     }
++                    if (sp.getBoolean("ms_bridge", true)) {
++                        t.wv.addJavascriptInterface(new MsBridge(t), t.msName);
++                        installMsDocumentStart(t, t.wv);
++                        injectMsPolyfill(t);
++                    } else {
++                        t.wv.removeJavascriptInterface(t.msName);
++                        if (msTab == t) msRelease();
++                    }
+                 }
+             }
+             if (sp.getBoolean("keep_screen_on", false)) act.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+@@ -1519,6 +1555,17 @@ public class Browser implements IPlugin, ISettingsProvider {
+             catch (Throwable ignored) { }
+         }
+ 
++        private void installMsDocumentStart(Tab t, WebView w) {
++            if (t.msDocumentStartScript != null) return;
++            t.msDocumentStartScript = addDocStart(w, MS_POLYFILL.replace("@@MS@@", t.msName));
++        }
++
++        private void injectMsPolyfill(Tab t) {
++            if (t.wv == null || !sp.getBoolean("ms_bridge", true)) return;
++            try { t.wv.evaluateJavascript(MS_POLYFILL.replace("@@MS@@", t.msName), null); }
++            catch (Throwable ignored) { }
++        }
++
+         private void maybeAutoUpdate() {
+             if (!sp.getBoolean("auto_update", true)) return;
+             long now = System.currentTimeMillis();
+@@ -2806,6 +2853,8 @@ public class Browser implements IPlugin, ISettingsProvider {
+             }
+             t.clearScripts();
+             t.ttsDocumentStartScript = null;
++            if (msTab == t) msRelease();
++            t.msDocumentStartScript = null;
+             if (w == null) return;
+             t.wv = null;
+             try {
+@@ -3122,6 +3171,10 @@ public class Browser implements IPlugin, ISettingsProvider {
+                 w.addJavascriptInterface(new TtsBridge(t), t.ttsName);
+                 installTtsDocumentStart(t, w);
+             }
++            if (sp.getBoolean("ms_bridge", true)) {
++                w.addJavascriptInterface(new MsBridge(t), t.msName);
++                installMsDocumentStart(t, w);
++            }
+             syncDocStart(t);
+             if (sp.getBoolean("force_zoom", true)) addDocStart(w, FORCE_ZOOM_JS);
+             if (sp.getBoolean("links_by_scripts", true)) addDocStart(w, LINKS_OFF_JS);
+@@ -3477,9 +3530,11 @@ public class Browser implements IPlugin, ISettingsProvider {
+             String low = url.toLowerCase(Locale.ROOT);
+             if (!(low.startsWith("http://") || low.startsWith("https://"))) return;
+             if (early) t.resetScripts();                               // началась новая страница
++            if (early && msTab == t) msRelease();                      // старая страница больше не управляет медиа-сессией
+             if (sp.getBoolean("tts_bridge", true)) {                   // fallback для WebView без document-start API
+                 injectTtsPolyfill(t);
+             }
++            injectMsPolyfill(t);
+             for (UserScript s : ScriptStore.list()) {
+                 if (!sp.getBoolean("script_on:" + s.fileName, true)) continue;
+                 if (early && !"document-start".equals(s.runAt)) continue;
+@@ -3970,6 +4025,100 @@ public class Browser implements IPlugin, ISettingsProvider {
+             }
+         }
+ 
++        // ------------------------------------------------------------ mediaSession для страниц (поверх нативной MediaSession)
++
++        private android.media.session.MediaSession msSession;
++        private Tab msTab;                  // вкладка, которой сейчас принадлежит сессия; только главный поток
++
++        private final class MsBridge {
++            private final Tab t;
++            MsBridge(Tab t) { this.t = t; }
++
++            @JavascriptInterface public void update(final String json) {
++                if (json == null || json.length() > 20000) return;
++                h.post(new Runnable() {
++                    @Override public void run() { if (!closed) msUpdate(t, json); }
++                });
++            }
++        }
++
++        private long msAction(String name) {
++            if (name.equals("play")) return android.media.session.PlaybackState.ACTION_PLAY;
++            if (name.equals("pause")) return android.media.session.PlaybackState.ACTION_PAUSE;
++            if (name.equals("stop")) return android.media.session.PlaybackState.ACTION_STOP;
++            if (name.equals("nexttrack")) return android.media.session.PlaybackState.ACTION_SKIP_TO_NEXT;
++            if (name.equals("previoustrack")) return android.media.session.PlaybackState.ACTION_SKIP_TO_PREVIOUS;
++            if (name.equals("seekbackward")) return android.media.session.PlaybackState.ACTION_REWIND;
++            if (name.equals("seekforward")) return android.media.session.PlaybackState.ACTION_FAST_FORWARD;
++            if (name.equals("seekto")) return android.media.session.PlaybackState.ACTION_SEEK_TO;
++            return 0;
++        }
++
++        /** Состояние страницы (метаданные, кнопки, позиция) переносится в системную MediaSession. */
++        private void msUpdate(Tab t, String json) {
++            try {
++                JSONObject o = new JSONObject(json);
++                JSONArray hs = o.optJSONArray("h");
++                String state = o.optString("s", "none");
++                boolean playing = state.equals("playing");
++                if ((hs == null || hs.length() == 0) && !playing && !state.equals("paused")) {
++                    if (msTab == t) msRelease();      // страница сняла все обработчики: сессия не нужна
++                    return;
++                }
++                if (msSession == null) {
++                    msSession = new android.media.session.MediaSession(act.getApplicationContext(), "BrowserPage");
++                    msSession.setCallback(new android.media.session.MediaSession.Callback() {
++                        @Override public void onPlay() { msAct("play", 0); }
++                        @Override public void onPause() { msAct("pause", 0); }
++                        @Override public void onStop() { msAct("stop", 0); }
++                        @Override public void onSkipToNext() { msAct("nexttrack", 0); }
++                        @Override public void onSkipToPrevious() { msAct("previoustrack", 0); }
++                        @Override public void onRewind() { msAct("seekbackward", 10); }
++                        @Override public void onFastForward() { msAct("seekforward", 10); }
++                        @Override public void onSeekTo(long pos) { msAct("seekto", pos / 1000.0); }
++                    }, h);
++                }
++                msTab = t;
++                long actions = 0;
++                if (hs != null) for (int i = 0; i < hs.length(); i++) actions |= msAction(hs.optString(i));
++                long pos = android.media.session.PlaybackState.PLAYBACK_POSITION_UNKNOWN, dur = 0;
++                float rate = playing ? 1f : 0f;
++                JSONObject p = o.optJSONObject("p");
++                if (p != null) {
++                    dur = (long) (p.optDouble("d", 0) * 1000);
++                    pos = (long) (p.optDouble("x", 0) * 1000);
++                    if (playing) rate = (float) p.optDouble("r", 1);
++                }
++                msSession.setPlaybackState(new android.media.session.PlaybackState.Builder()
++                        .setActions(actions)
++                        .setState(playing ? android.media.session.PlaybackState.STATE_PLAYING
++                                : android.media.session.PlaybackState.STATE_PAUSED, pos, rate)
++                        .build());
++                android.media.MediaMetadata.Builder mb = new android.media.MediaMetadata.Builder()
++                        .putString(android.media.MediaMetadata.METADATA_KEY_TITLE, o.optString("t", ""))
++                        .putString(android.media.MediaMetadata.METADATA_KEY_ARTIST, o.optString("a", ""))
++                        .putString(android.media.MediaMetadata.METADATA_KEY_ALBUM, o.optString("al", ""));
++                if (dur > 0) mb.putLong(android.media.MediaMetadata.METADATA_KEY_DURATION, dur);
++                msSession.setMetadata(mb.build());
++                msSession.setActive(true);
++            } catch (Throwable ignored) { }
++        }
++
++        /** Команда с кнопки наушников или шторки уходит обработчику, который зарегистрировала страница. */
++        private void msAct(String action, double v) {
++            Tab t = msTab;
++            if (closed || t == null || t.wv == null) return;
++            t.wv.evaluateJavascript("try{window.__ubMsAct('" + action + "'," + v + ")}catch(e){}", null);
++        }
++
++        private void msRelease() {
++            msTab = null;
++            android.media.session.MediaSession s = msSession;
++            msSession = null;
++            if (s == null) return;
++            try { s.setActive(false); s.release(); } catch (Throwable ignored) { }
++        }
++
+         // ------------------------------------------------------------ интерфейс
+ 
+         private int dp(int v) { return Math.round(v * density); }
