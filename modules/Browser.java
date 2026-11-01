@@ -5455,6 +5455,34 @@ public class Browser implements IPlugin, ISettingsProvider {
             col.setPadding(dp(14), dp(14), dp(14), dp(28));
             sv.addView(col, new ViewGroup.LayoutParams(-1, -2));
             col.addView(panelTitle("Скрипты"));
+            final TextView upd = label("↻  Обновить скрипты", 18, C_TEXT, true);
+            upd.setPadding(dp(4), dp(10), dp(4), dp(14));
+            upd.setClickable(true);
+            upd.setContentDescription("Обновить скрипты по @downloadURL или @updateURL");
+            upd.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    upd.setText("↻  Обновляю…");
+                    upd.setEnabled(false);
+                    final View mine = scriptsLayer;
+                    new Thread(new Runnable() {
+                        @Override public void run() {
+                            final String r = ScriptStore.updateAll();
+                            h.post(new Runnable() {
+                                @Override public void run() {
+                                    if (closed) return;
+                                    toast(r);
+                                    if (!r.startsWith("Скрипты: обновлено 0") && !r.startsWith("Нет скриптов")) scriptsDirty = true;
+                                    if (layer != null && layer == mine) {
+                                        if (scriptsScroll != null) scriptsScrollY = scriptsScroll.getScrollY();
+                                        buildScripts(t);
+                                    }
+                                }
+                            });
+                        }
+                    }).start();
+                }
+            });
+            col.addView(upd);
             List<UserScript> scripts = ScriptStore.list();
             if (scripts.isEmpty()) {
                 col.addView(label("Скриптов нет. Папка: " + ScriptStore.dir().getPath(), 15, C_TEXT2, false));
@@ -5894,7 +5922,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         /** Обозначение группы: по контуру снимка столько чёрточек, сколько вкладок; чёрточка показанной вкладки крупнее и светлее. */
-        private static final int GROUP_BAND = 11;
+        private static final int GROUP_BAND = 9;
 
         /** Метка текущей вкладки: тонкая белая галочка, под ней мягкое тёмное пятно, к краям уходящее в прозрачность. */
         private final class CurrentMark extends View {
@@ -5950,7 +5978,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
 
             @Override protected void onDraw(Canvas c) {
-                float inset = dp(GROUP_BAND) / 2f;
+                float inset = dp(4);
                 rect.set(inset, inset, getWidth() - inset, getHeight() - inset);
                 if (rect.width() <= 0 || rect.height() <= 0) return;
                 outline.reset();
