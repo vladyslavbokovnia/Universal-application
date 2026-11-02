@@ -757,7 +757,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
                 im.registerInputDeviceListener(devListener, h);
             }
         }
-        ShizukuBridge.addReadyListener(pokeR);
+        try { ShizukuBridge.addReadyListener(pokeR); } catch (Throwable t) { }   // старый хост без метода: работает и так
     }
 
     private void stopEvdev() {
@@ -767,7 +767,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
             if (im != null) im.unregisterInputDeviceListener(devListener);
         }
         devListener = null;
-        ShizukuBridge.removeReadyListener(pokeR);
+        try { ShizukuBridge.removeReadyListener(pokeR); } catch (Throwable t) { }
         Evdev e = evdev;
         evdev = null;
         if (e != null) e.shutdown();
