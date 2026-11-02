@@ -1,0 +1,392 @@
+diff --git a/modules/AudioPlayer.java b/modules/AudioPlayer.java
+index d3c2fe8..ba3c144 100644
+--- a/modules/AudioPlayer.java
++++ b/modules/AudioPlayer.java
+@@ -23,6 +23,7 @@ import android.media.AudioAttributes;
+ import android.media.AudioManager;
+ import android.media.MediaMetadata;
+ import android.media.MediaPlayer;
++import android.media.ToneGenerator;
+ import android.media.session.MediaController;
+ import android.media.session.MediaSession;
+ import android.media.session.MediaSessionManager;
+@@ -92,8 +93,13 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
+             {"vol_down", "Тише"},
+             {"vol_up", "Громче"},
+             {"mute", "Без звука"},
++            {"later", "В плейлист «Послушать позже»"},
++            {"fav", "В «Избранное»"},
+     };
+ 
++    private static final String PL_LATER = "pl_later";
++    private static final String PL_FAV = "pl_fav";
++
+     static class Track {
+         long id;
+         String title;
+@@ -109,13 +115,15 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
+     private boolean prepared = false;
+     private final List<Track> tracks = new ArrayList<Track>();
+     private int cur = -1;
++    /** Очередь из плейлиста (индексы в tracks); null: играем всю библиотеку по порядку. */
++    private int[] queue;
+     private MediaSession session;
+     private BroadcastReceiver cmdReceiver;
+     private PlayerView boundView;
+     private PadMapper mapper;
+ 
+     @Override public String getName() { return "Аудиоплеер"; }
+-    @Override public int getVersion() { return 5; }
++    @Override public int getVersion() { return 6; }
+     @Override public String getDescription() {
+         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
+     }
+@@ -201,6 +209,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
+ 
+     void loadTracks() {
+         tracks.clear();
++        queue = null;
+         if (appCtx == null || !hasPermission()) return;
+         Uri uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI;
+         String[] proj = {
+@@ -307,13 +316,29 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
+     }
+ 
+     public void next() {
++        int[] q = queue;
++        if (q != null && q.length > 0) {
++            playAt(q[(queuePos(q) + 1) % q.length]);
++            return;
++        }
+         if (!tracks.isEmpty()) playAt((cur + 1) % tracks.size());
+     }
+ 
+     public void prev() {
++        int[] q = queue;
++        if (q != null && q.length > 0) {
++            int p = queuePos(q);
++            playAt(q[p < 0 ? q.length - 1 : (p - 1 + q.length) % q.length]);
++            return;
++        }
+         if (!tracks.isEmpty()) playAt((cur - 1 + tracks.size()) % tracks.size());
+     }
+ 
++    private int queuePos(int[] q) {
++        for (int i = 0; i < q.length; i++) if (q[i] == cur) return i;
++        return -1;
++    }
++
+     public void seekBy(int ms) {
+         try {
+             if (mp != null && prepared) {
+@@ -566,6 +591,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
+             tr.dur = 0;
+             tr.uri = stream;
+             tracks.add(0, tr);
++            queue = null;
+             ensureSession();
+             ensureReceiver();
+             playAt(0);
+@@ -576,6 +602,144 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
+         }
+     }
+ 
++    // ---------------------------------------------------------- плейлисты: «Послушать позже» и «Избранное»
++
++    private static String clean(String s) {
++        return s == null ? "" : s.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ');
++    }
++
++    /** Записи плейлиста: {uri или "-", название, исполнитель}. */
++    private List<String[]> plLoad(String key) {
++        List<String[]> r = new ArrayList<String[]>();
++        SharedPreferences p = prefs();
++        if (p == null) return r;
++        for (String line : p.getString(key, "").split("\n")) {
++            if (line.length() == 0) continue;
++            String[] f = line.split("\t", -1);
++            if (f.length >= 3) r.add(new String[]{f[0], f[1], f[2]});
++        }
++        return r;
++    }
++
++    private void plSave(String key, List<String[]> l) {
++        SharedPreferences p = prefs();
++        if (p == null) return;
++        StringBuilder sb = new StringBuilder();
++        for (String[] e : l) {
++            sb.append(clean(e[0])).append('\t').append(clean(e[1])).append('\t').append(clean(e[2])).append('\n');
++        }
++        p.edit().putString(key, sb.toString()).apply();
++    }
++
++    private static boolean sameEntry(String[] a, String[] b) {
++        if (!a[0].equals("-") && a[0].equals(b[0])) return true;
++        return a[1].equalsIgnoreCase(b[1]) && a[2].equalsIgnoreCase(b[2]);
++    }
++
++    void plRemove(String key, int pos) {
++        List<String[]> l = plLoad(key);
++        if (pos >= 0 && pos < l.size()) {
++            l.remove(pos);
++            plSave(key, l);
++        }
++    }
++
++    int plCount(String key) {
++        return plLoad(key).size();
++    }
++
++    /** Звуковой отклик, чтобы не смотреть на экран. */
++    private void tone(int type) {
++        try {
++            final ToneGenerator tg = new ToneGenerator(AudioManager.STREAM_MUSIC, 45);
++            tg.startTone(type, 250);
++            Handler hh = h;
++            if (hh != null) {
++                hh.postDelayed(new Runnable() {
++                    @Override public void run() { try { tg.release(); } catch (Throwable t) { } }
++                }, 700);
++            }
++        } catch (Throwable t) { }
++    }
++
++    /** Что сейчас слушаем: свой трек, а если свой не играет, то трек чужого плеера (по названию и исполнителю). */
++    private String[] currentEntry() {
++        if (isPlaying()) return ownEntry();
++        if (remoteAny()) {
++            MediaController ext = externalTarget();
++            if (ext != null) {
++                PlaybackState ps = ext.getPlaybackState();
++                MediaMetadata md = ext.getMetadata();
++                if (md != null && ps != null && ps.getState() == PlaybackState.STATE_PLAYING) {
++                    String title = md.getString(MediaMetadata.METADATA_KEY_TITLE);
++                    String artist = md.getString(MediaMetadata.METADATA_KEY_ARTIST);
++                    if (artist == null) artist = md.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST);
++                    if (title != null && title.length() > 0) {
++                        return new String[]{"-", title, artist == null ? "" : artist};
++                    }
++                }
++            }
++        }
++        if (mp != null && prepared) return ownEntry();
++        return null;
++    }
++
++    private String[] ownEntry() {
++        if (cur < 0 || cur >= tracks.size()) return null;
++        Track t = tracks.get(cur);
++        return new String[]{t.uri == null ? "-" : t.uri.toString(), t.title, t.artist};
++    }
++
++    /** Кнопка геймпада: текущий трек в плейлист. Отклик: «позже» и «избранное» звучат по-разному, повтор и «нечего добавлять» тоже. */
++    private void addCurrentTo(String key) {
++        String[] e = currentEntry();
++        if (e == null) { tone(ToneGenerator.TONE_PROP_NACK); return; }
++        List<String[]> l = plLoad(key);
++        for (String[] x : l) {
++            if (sameEntry(x, e)) { tone(ToneGenerator.TONE_PROP_BEEP); return; }
++        }
++        l.add(e);
++        plSave(key, l);
++        tone(key.equals(PL_FAV) ? ToneGenerator.TONE_PROP_ACK : ToneGenerator.TONE_PROP_PROMPT);
++        refreshUiHead();
++    }
++
++    /** Номер трека в библиотеке для записи плейлиста (по адресу, затем по названию и исполнителю) или -1. */
++    private int findTrack(String[] e) {
++        if (!e[0].equals("-")) {
++            for (int i = 0; i < tracks.size(); i++) {
++                Uri u = tracks.get(i).uri;
++                if (u != null && u.toString().equals(e[0])) return i;
++            }
++        }
++        for (int i = 0; i < tracks.size(); i++) {
++            Track t = tracks.get(i);
++            if (t.title.equalsIgnoreCase(e[1]) && (e[2].length() == 0 || t.artist.equalsIgnoreCase(e[2]))) return i;
++        }
++        return -1;
++    }
++
++    /** Играть плейлист с выбранной записи; дальше «следующий» и «предыдущий» идут по плейлисту. */
++    void playFromList(String key, int pos) {
++        List<String[]> pl = plLoad(key);
++        List<Integer> q = new ArrayList<Integer>();
++        int start = -1;
++        for (int i = 0; i < pl.size(); i++) {
++            int idx = findTrack(pl.get(i));
++            if (idx < 0) continue;
++            if (i == pos) start = q.size();
++            q.add(Integer.valueOf(idx));
++        }
++        if (start < 0) {
++            toast("Этого трека нет на устройстве");
++            return;
++        }
++        int[] arr = new int[q.size()];
++        for (int i = 0; i < arr.length; i++) arr[i] = q.get(i).intValue();
++        queue = arr;
++        playAt(arr[start]);
++    }
++
+     // ---------------------------------------------------------- пульт: другой плеер
+ 
+     private String extPkg;
+@@ -809,6 +973,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
+     private void doPerform(String a) {
+         if (a == null) return;
+         if (!a.startsWith("vol_") && !a.equals("mute") && routeExternal(a)) return;
++        if (a.equals("later")) { addCurrentTo(PL_LATER); return; }
++        if (a.equals("fav")) { addCurrentTo(PL_FAV); return; }
+         if (a.equals("play_pause")) toggle();
+         else if (a.equals("play")) { if (!isPlaying()) toggle(); }
+         else if (a.equals("pause")) pause();
+@@ -902,6 +1068,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
+         private final LinearLayout trackRows;
+         private final TextView status;
+         private boolean padOpen = false;
++        private int listMode = 0;                  // 0 все песни, 1 «Послушать позже», 2 «Избранное»
++        private Button bAll;
++        private Button bLater;
++        private Button bFav;
+ 
+         PlayerView(Context ctx) {
+             super(ctx);
+@@ -959,6 +1129,17 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
+             ctrls.addView(bNext);
+             body.addView(ctrls);
+ 
++            // списки: все песни / «Послушать позже» / «Избранное»
++            LinearLayout lists = new LinearLayout(ctx);
++            lists.setOrientation(LinearLayout.HORIZONTAL);
++            bAll = listButton(ctx, 0);
++            bLater = listButton(ctx, 1);
++            bFav = listButton(ctx, 2);
++            lists.addView(bAll, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
++            lists.addView(bLater, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
++            lists.addView(bFav, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
++            body.addView(lists);
++
+             // геймпад: картинка открывается по кнопке; пока она открыта, кнопки геймпада выбирают
+             // назначение, а не управляют плеером
+             bPad = new Button(ctx);
+@@ -1035,6 +1216,23 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
+             if (hasFocus) refresh(); else padReleaseAll();
+         }
+ 
++        private Button listButton(Context ctx, final int mode) {
++            Button b = new Button(ctx);
++            b.setOnClickListener(new OnClickListener() {
++                @Override public void onClick(View v) {
++                    listMode = mode;
++                    buildTrackRows();
++                }
++            });
++            return b;
++        }
++
++        private void updateListButtons() {
++            bAll.setText((listMode == 0 ? "● " : "") + "Все");
++            bLater.setText((listMode == 1 ? "● " : "") + "Позже (" + plCount(PL_LATER) + ")");
++            bFav.setText((listMode == 2 ? "● " : "") + "Избранное (" + plCount(PL_FAV) + ")");
++        }
++
+         private void togglePad() {
+             padOpen = !padOpen;
+             padBox.removeAllViews();
+@@ -1060,6 +1258,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
+             nowTitle.setText((t == null ? "Не играет" : "▶ " + t.title + "\n" + t.artist) + dialTxt);
+             bPlay.setText(isPlaying() ? "⏸" : "▶");
+             status.setText("Геймпад работает, пока это окно открыто и в фокусе.");
++            if (bAll != null) updateListButtons();
+         }
+ 
+         /** Полное обновление: шапка + список песен. */
+@@ -1068,9 +1267,53 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
+             buildTrackRows();
+         }
+ 
++        /** Строки плейлиста: нажатие играет его с этой записи, «Убрать» удаляет запись. */
++        private void buildPlaylistRows(final Context ctx) {
++            final String key = listMode == 1 ? PL_LATER : PL_FAV;
++            final List<String[]> pl = plLoad(key);
++            trackHead.setText((listMode == 1 ? "Послушать позже (" : "Избранное (") + pl.size() + ")");
++            for (int i = 0; i < pl.size(); i++) {
++                final int pos = i;
++                String[] en = pl.get(i);
++                LinearLayout row = new LinearLayout(ctx);
++                row.setOrientation(LinearLayout.HORIZONTAL);
++                row.setGravity(Gravity.CENTER_VERTICAL);
++                row.setPadding(0, dp(6), 0, dp(6));
++                LinearLayout txt = new LinearLayout(ctx);
++                txt.setOrientation(LinearLayout.VERTICAL);
++                TextView tt = new TextView(ctx);
++                tt.setText(en[1]);
++                tt.setTextSize(15);
++                TextView ta = new TextView(ctx);
++                ta.setText(en[2].length() == 0 ? "—" : en[2]);
++                ta.setTextSize(12);
++                txt.addView(tt);
++                txt.addView(ta);
++                row.addView(txt, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
++                Button rm = new Button(ctx);
++                rm.setText("Убрать");
++                rm.setOnClickListener(new OnClickListener() {
++                    @Override public void onClick(View v) {
++                        plRemove(key, pos);
++                        buildTrackRows();
++                    }
++                });
++                row.addView(rm);
++                row.setOnClickListener(new OnClickListener() {
++                    @Override public void onClick(View v) { playFromList(key, pos); }
++                });
++                trackRows.addView(row);
++            }
++        }
++
+         private void buildTrackRows() {
+             trackRows.removeAllViews();
+             final Context ctx = getContext();
++            updateListButtons();
++            if (listMode != 0) {
++                buildPlaylistRows(ctx);
++                return;
++            }
+             trackHead.setText("Песни (" + tracks.size() + ")");
+             for (int i = 0; i < tracks.size(); i++) {
+                 final int idx = i;
+@@ -1103,7 +1346,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
+                 row.addView(del);
+ 
+                 row.setOnClickListener(new OnClickListener() {
+-                    @Override public void onClick(View v) { playAt(idx); }
++                    @Override public void onClick(View v) {
++                        queue = null;
++                        playAt(idx);
++                    }
+                 });
+                 trackRows.addView(row);
+             }
+diff --git a/modules/GamepadModule.java b/modules/GamepadModule.java
+index ffa9cd8..cf19a7e 100644
+--- a/modules/GamepadModule.java
++++ b/modules/GamepadModule.java
+@@ -757,7 +757,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
+                 im.registerInputDeviceListener(devListener, h);
+             }
+         }
+-        ShizukuBridge.addReadyListener(pokeR);
++        try { ShizukuBridge.addReadyListener(pokeR); } catch (Throwable t) { }   // старый хост без метода: работает и так
+     }
+ 
+     private void stopEvdev() {
+@@ -767,7 +767,7 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
+             if (im != null) im.unregisterInputDeviceListener(devListener);
+         }
+         devListener = null;
+-        ShizukuBridge.removeReadyListener(pokeR);
++        try { ShizukuBridge.removeReadyListener(pokeR); } catch (Throwable t) { }
+         Evdev e = evdev;
+         evdev = null;
+         if (e != null) e.shutdown();
