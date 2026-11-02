@@ -5919,17 +5919,16 @@ public class Browser implements IPlugin, ISettingsProvider {
             int shown = og != null ? tabsOf(og).size() : tabs.size();
 
             ScrollView sv = swipeScroll();
-            sv.setFillViewport(true);            // пустое место под карточками тоже принимает перетаскиваемое
             tabScroll = sv;
             LinearLayout grid = new LinearLayout(act);
             grid.setOrientation(LinearLayout.VERTICAL);
             grid.setPadding(0, 0, 0, dp(130));       // карточки вплотную; снизу запас под панель-планету
             sv.addView(grid, new ViewGroup.LayoutParams(-1, -2));
             dragGrid = grid;
-            installGridDrag(grid);
             fillGrid(grid, og);
             // Панель-планета лежит поверх списка внизу и спрятана за краем: вид должен быть в дереве, чтобы получить начало перетаскивания
             FrameLayout listBox = new FrameLayout(act);
+            installGridDrag(listBox);           // слушатель на всём поле: пустое место под карточками тоже принимает перетаскиваемое
             listBox.addView(sv, new FrameLayout.LayoutParams(-1, -1));
             listBox.addView(dragBar(), new FrameLayout.LayoutParams(-1, dp(124), Gravity.BOTTOM));
             root.addView(listBox, new LinearLayout.LayoutParams(-1, 0, 1f));
@@ -6518,6 +6517,7 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         private DropCard cardAt(float gx, float gy) {
             if (dragGrid == null) return null;
+            if (tabScroll != null) gy += tabScroll.getScrollY();       // координаты поля -> координаты сетки внутри прокрутки
             for (DropCard c : dropCards) {
                 if (c.box.getParent() == null) continue;
                 float[] p = relPos(c.box, dragGrid);
@@ -6543,7 +6543,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         /** Один слушатель на всю сетку: карточки определяются по координатам, поэтому при смене уровня во время перетаскивания всё продолжает работать. */
-        private void installGridDrag(final LinearLayout grid) {
+        private void installGridDrag(final ViewGroup grid) {
             grid.setOnDragListener(new View.OnDragListener() {
                 @Override public boolean onDrag(View v, DragEvent e) {
                     Object d = e.getLocalState();
