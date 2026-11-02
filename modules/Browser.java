@@ -139,7 +139,7 @@ import java.util.regex.Pattern;
  *
  * Карточки вкладок: снимок страницы с крупными значками сайта и профиля поверх него. Вкладки перетаскиваются: вкладка на
  * вкладку создаёт группу, вкладка на группу добавляется в неё, группа на группу вкладывается в неё (вложенность любая); у края
- * карточки вкладка или группа встаёт рядом. Так же и в открытой группе, а зона внизу вынимает вкладку или группу на уровень выше.
+ * карточки вкладка или группа встаёт рядом. Так же и в открытой группе. Пока тянут карточку, снизу выезжает круглая панель с двумя значками без текста: «закрыть» и «на уровень выше» (подержать над ним: панель переходит на уровень выше, перетаскивание продолжается, карточку можно положить там). Группа при этом не расформировывается.
  * Долгое нажатие и отпустить на месте открывает меню. В меню вкладки и в общем меню есть «Нарисовать эскиз»: белой линией
  * пальцем на снимке вкладки в полный размер вкладки; эскиз лежит поверх снимка и хранится отдельно, поэтому не пропадает
  * при обновлении снимка.
@@ -5869,17 +5869,43 @@ public class Browser implements IPlugin, ISettingsProvider {
             int shown = og != null ? tabsOf(og).size() : tabs.size();
 
             ScrollView sv = swipeScroll();
+            sv.setFillViewport(true);            // пустое место под карточками тоже принимает перетаскиваемое
             tabScroll = sv;
             LinearLayout grid = new LinearLayout(act);
             grid.setOrientation(LinearLayout.VERTICAL);
-            grid.setPadding(0, 0, 0, dp(80));        // карточки вплотную; снизу запас под зону сброса
+            grid.setPadding(0, 0, 0, dp(130));       // карточки вплотную; снизу запас под панель-планету
             sv.addView(grid, new ViewGroup.LayoutParams(-1, -2));
-            // Зона сброса лежит поверх списка внизу: всегда видима (прозрачна), иначе скрытый вид не получает события перетаскивания
+            dragGrid = grid;
+            installGridDrag(grid);
+            fillGrid(grid, og);
+            // Панель-планета лежит поверх списка внизу и спрятана за краем: вид должен быть в дереве, чтобы получить начало перетаскивания
             FrameLayout listBox = new FrameLayout(act);
             listBox.addView(sv, new FrameLayout.LayoutParams(-1, -1));
-            listBox.addView(dragZone(og), new FrameLayout.LayoutParams(-1, dp(72), Gravity.BOTTOM));
+            listBox.addView(dragBar(), new FrameLayout.LayoutParams(-1, dp(124), Gravity.BOTTOM));
             root.addView(listBox, new LinearLayout.LayoutParams(-1, 0, 1f));
+            showLayer(root, true, null, og != null ? "Группа " + og.name + ": вкладок " + shown : "Вкладки: " + shown);
+            tabsPanel = true;
+            if (savedScrollAt != 0 && SystemClock.uptimeMillis() - savedScrollAt < 3000 && savedScrollGroup == og && savedScrollY > 0) {
+                final int keepY = savedScrollY;
+                final ScrollView svKeep = sv;
+                sv.post(new Runnable() {
+                    @Override public void run() { svKeep.scrollTo(0, keepY); }
+                });
+            }
+            savedScrollAt = 0;
+            panelGroup = og;
+            if (hub != null) {
+                hub.setVisibility(View.VISIBLE);
+                hub.bringToFront();             // кнопка управления остаётся над панелью вкладок
+                hub.setAlpha(HUB_ALPHA);
+            }
+        }
 
+        /** Карточки одного уровня (og: открытая группа, null: верхний уровень) в сетку по две в ряд. Можно вызывать и во время перетаскивания. */
+        private void fillGrid(LinearLayout grid, Group og) {
+            loadDots.clear();
+            dropCards.clear();
+            grid.removeAllViews();
             List<Object> items = new ArrayList<Object>();
             int level = og == null ? 0 : og.id;
             Set<Object> seenItems = new HashSet<Object>();
@@ -5902,22 +5928,6 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
             if (items.size() % 2 == 1 && rowL != null) {
                 rowL.addView(new View(act), new LinearLayout.LayoutParams(0, 1, 1f));
-            }
-            showLayer(root, true, null, og != null ? "Группа " + og.name + ": вкладок " + shown : "Вкладки: " + shown);
-            tabsPanel = true;
-            if (savedScrollAt != 0 && SystemClock.uptimeMillis() - savedScrollAt < 3000 && savedScrollGroup == og && savedScrollY > 0) {
-                final int keepY = savedScrollY;
-                final ScrollView svKeep = sv;
-                sv.post(new Runnable() {
-                    @Override public void run() { svKeep.scrollTo(0, keepY); }
-                });
-            }
-            savedScrollAt = 0;
-            panelGroup = og;
-            if (hub != null) {
-                hub.setVisibility(View.VISIBLE);
-                hub.bringToFront();             // кнопка управления остаётся над панелью вкладок
-                hub.setAlpha(HUB_ALPHA);
             }
         }
 
@@ -6417,117 +6427,381 @@ public class Browser implements IPlugin, ISettingsProvider {
             return g;
         }
 
+        /** Карточка уровня, принимающая перетаскиваемое: события разбирает один слушатель сетки, чтобы сетку можно было перерисовать на лету. */
+        private final class DropCard {
+            final FrameLayout box;
+            final Object item;
+            final Runnable menu;
+
+            DropCard(FrameLayout box, Object item, Runnable menu) {
+                this.box = box;
+                this.item = item;
+                this.menu = menu;
+            }
+        }
+
+        private final List<DropCard> dropCards = new ArrayList<DropCard>();
+        private LinearLayout dragGrid;
+        private View dragBarView, upIcon;
+        private boolean dropHandled;
+        private Group dragStartGroup;
+        private final Runnable upHover = new Runnable() {
+            @Override public void run() {
+                if (closed || openGroup == null) return;
+                dragLevelUp();
+                if (openGroup != null) h.postDelayed(this, 900);      // пока держат над значком, поднимаемся дальше
+            }
+        };
+
+        /** Положение вида внутри предка (без учёта прокрутки предка: сетка сама лежит в прокрутке). */
+        private float[] relPos(View v, View ancestor) {
+            float x = 0, y = 0;
+            View c = v;
+            for (int i = 0; c != null && c != ancestor && i < 20; i++) {
+                x += c.getLeft() + c.getTranslationX();
+                y += c.getTop() + c.getTranslationY();
+                android.view.ViewParent p = c.getParent();
+                c = p instanceof View ? (View) p : null;
+            }
+            return new float[] { x, y };
+        }
+
+        private DropCard cardAt(float gx, float gy) {
+            if (dragGrid == null) return null;
+            for (DropCard c : dropCards) {
+                if (c.box.getParent() == null) continue;
+                float[] p = relPos(c.box, dragGrid);
+                if (gx >= p[0] && gx <= p[0] + c.box.getWidth() && gy >= p[1] && gy <= p[1] + c.box.getHeight()) return c;
+            }
+            return null;
+        }
+
         /** -1: левый край (поставить перед), 1: правый (после), 0: середина (в группу). */
-        private int dropZone(View v, DragEvent e) {
-            float w = v.getWidth();
+        private int zoneOf(DropCard c, float gx) {
+            float w = c.box.getWidth();
             if (w <= 0) return 0;
-            float f = e.getX() / w;
+            float f = (gx - relPos(c.box, dragGrid)[0]) / w;
             return f < 0.28f ? -1 : (f > 0.72f ? 1 : 0);
         }
 
-        private void attachDrop(final FrameLayout box, final Object item, final Runnable menu) {
-            box.setOnDragListener(new View.OnDragListener() {
-                @Override public boolean onDrag(View v, DragEvent e) {
-                    Object d = e.getLocalState();
-                    switch (e.getAction()) {
-                        case DragEvent.ACTION_DRAG_STARTED:
-                            if (d == item) v.setAlpha(0.35f);
-                            return d != null;
-                        case DragEvent.ACTION_DRAG_ENTERED:
-                        case DragEvent.ACTION_DRAG_LOCATION: {
-                            if (d != item) {
-                                int z = dropZone(v, e);
-                                box.setForeground(z == 0 ? dropHint() : edgeHint(z < 0));
-                            }
-                            if (e.getAction() == DragEvent.ACTION_DRAG_LOCATION) dragAutoScroll(v, e);
-                            return true;
-                        }
-                        case DragEvent.ACTION_DRAG_EXITED:
-                            box.setForeground(null);
-                            return true;
-                        case DragEvent.ACTION_DROP: {
-                            box.setForeground(null);
-                            final Object dropped = d;
-                            final int zone = dropZone(v, e);
-                            h.post(new Runnable() {
-                                @Override public void run() { handleDrop(dropped, item, zone, menu); }
-                            });
-                            return true;
-                        }
-                        case DragEvent.ACTION_DRAG_ENDED:
-                            v.setAlpha(1f);
-                            box.setForeground(null);
-                            stopDragScroll();
-                            dragItem = null;
-                            return true;
-                        default:
-                            return true;
-                    }
-                }
-            });
+        private void clearHints() {
+            for (DropCard c : dropCards) c.box.setForeground(null);
         }
 
-        /**
-         * Зона внизу списка. В общем списке принимает группу и расформировывает её (вкладки остаются на месте),
-         * внутри группы принимает вкладку и вынимает её из группы. Всегда «видима», просто прозрачна, пока ничего не тянут.
-         */
-        private View dragZone(final Group og) {
-            final boolean inGroup = og != null;
-            final TextView z = label(inGroup ? "↩  Вынуть на уровень выше" : "⊟  Расформировать группу", 16, C_TEXT, true);
-            z.setGravity(Gravity.CENTER);
-            z.setPadding(dp(12), dp(14), dp(12), dp(14));
-            z.setBackground(round(0xE61E2430, 14, C_ACCENT, 2));
-            z.setAlpha(0f);
-            z.setOnDragListener(new View.OnDragListener() {
+        private void attachDrop(final FrameLayout box, final Object item, final Runnable menu) {
+            dropCards.add(new DropCard(box, item, menu));
+        }
+
+        /** Один слушатель на всю сетку: карточки определяются по координатам, поэтому при смене уровня во время перетаскивания всё продолжает работать. */
+        private void installGridDrag(final LinearLayout grid) {
+            grid.setOnDragListener(new View.OnDragListener() {
                 @Override public boolean onDrag(View v, DragEvent e) {
                     Object d = e.getLocalState();
-                    boolean ok = inGroup ? (d instanceof Tab || d instanceof Group) : d instanceof Group;
                     switch (e.getAction()) {
                         case DragEvent.ACTION_DRAG_STARTED:
-                            if (!ok) return false;
-                            z.setAlpha(0.92f);
+                            if (d == null) return false;
+                            dropHandled = false;
+                            dragStartGroup = openGroup;
+                            for (DropCard c : dropCards) if (c.item == d) c.box.setAlpha(0.35f);
+                            showDragBar(true);
                             return true;
                         case DragEvent.ACTION_DRAG_ENTERED:
-                            z.setBackground(round(0xFF2B4A63, 14, C_ACCENT, 3));
+                        case DragEvent.ACTION_DRAG_LOCATION: {
+                            clearHints();
+                            DropCard c = cardAt(e.getX(), e.getY());
+                            if (c != null && c.item != d) {
+                                int z = zoneOf(c, e.getX());
+                                c.box.setForeground(z == 0 ? dropHint() : edgeHint(z < 0));
+                            }
+                            if (e.getAction() == DragEvent.ACTION_DRAG_LOCATION) dragAutoScroll(grid, e);
                             return true;
+                        }
                         case DragEvent.ACTION_DRAG_EXITED:
-                            z.setBackground(round(0xE61E2430, 14, C_ACCENT, 2));
+                            clearHints();
                             return true;
                         case DragEvent.ACTION_DROP: {
+                            clearHints();
                             final Object dropped = d;
+                            final DropCard c = cardAt(e.getX(), e.getY());
+                            final int zone = c == null ? 0 : zoneOf(c, e.getX());
+                            dropHandled = true;
                             h.post(new Runnable() {
                                 @Override public void run() {
-                                    if (inGroup && dropped instanceof Tab) {
-                                        Tab dt = (Tab) dropped;
-                                        Tab anchor = lastOfGroup(og.id, dt);
-                                        dt.group = og.parent;
-                                        if (anchor != null) moveAfter(dt, anchor);
-                                        finishDrop();
-                                    } else if (inGroup && dropped instanceof Group) {
-                                        Group dg = (Group) dropped;
-                                        List<Tab> moving = tabsOf(dg);
-                                        Tab anchor = lastOfGroup(og.id, moving);
-                                        dg.parent = og.parent;
-                                        if (anchor != null) moveBlockAfter(moving, anchor);
-                                        finishDrop();
-                                    } else if (!inGroup && dropped instanceof Group) {
-                                        dissolve((Group) dropped);
-                                        finishDrop();
-                                    }
+                                    if (c != null) handleDrop(dropped, c.item, zone, c.menu);
+                                    else moveToLevelEnd(dropped, openGroup == null ? 0 : openGroup.id);      // пустое место: в конец этого уровня
                                 }
                             });
                             return true;
                         }
+                        case DragEvent.ACTION_DRAG_ENDED: {
+                            h.removeCallbacks(upHover);
+                            clearHints();
+                            for (DropCard c : dropCards) c.box.setAlpha(1f);
+                            stopDragScroll();
+                            dragItem = null;
+                            showDragBar(false);
+                            if (!dropHandled && openGroup != dragStartGroup) {
+                                // отпустили мимо: возвращаемся на уровень, откуда начали
+                                openGroup = dragStartGroup != null && groups.contains(dragStartGroup) ? dragStartGroup : null;
+                                h.post(new Runnable() { @Override public void run() { if (!closed && tabsPanel) showTabs(); } });
+                            }
+                            return true;
+                        }
+                        default:
+                            return true;
+                    }
+                }
+            });
+        }
+
+        // ------------------------------------------------------------ панель-планета внизу: закрыть и подняться на уровень выше
+
+        /** Круглая «планета» на нижнем краю: верхняя часть большого круга с тонким светящимся ободом, значки лежат вдоль дуги. */
+        private final class PlanetBar extends FrameLayout {
+            private final Paint body = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint rim = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint halo = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint band = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final int inset = dp(10);
+            private final float[] fx = { 0.27f, 0.73f };
+
+            PlanetBar(Context c) {
+                super(c);
+                setWillNotDraw(false);
+                setClipChildren(false);
+                for (Paint p : new Paint[] { rim, halo, band }) p.setStyle(Paint.Style.STROKE);
+                halo.setStrokeWidth(dp(7));
+                halo.setColor(0x224FC3F7);
+                rim.setStrokeWidth(dp(2));
+                band.setStrokeWidth(dp(1));
+                band.setColor(0x1AFFFFFF);
+            }
+
+            private float radius(float w, float h) {
+                float vis = h - inset;
+                return (w * w / 4f + vis * vis) / (2f * vis);
+            }
+
+            @Override protected void onDraw(Canvas c) {
+                float w = getWidth(), h = getHeight();
+                if (w <= 0 || h <= inset) return;
+                float r = radius(w, h), cx = w / 2f, cy = inset + r;
+                body.setShader(new android.graphics.RadialGradient(cx, cy, r,
+                        new int[] { 0xF20F141C, 0xF2182233, 0xF2273A52 }, new float[] { 0f, 0.82f, 1f },
+                        android.graphics.Shader.TileMode.CLAMP));
+                c.drawCircle(cx, cy, r, body);
+                c.drawCircle(cx, cy, r + dp(1), halo);
+                rim.setShader(new android.graphics.LinearGradient(0, 0, w, 0,
+                        new int[] { 0x004FC3F7, 0xCC4FC3F7, 0x004FC3F7 }, null, android.graphics.Shader.TileMode.CLAMP));
+                c.drawCircle(cx, cy, r, rim);
+                c.drawCircle(cx, cy, r - dp(14), band);
+            }
+
+            @Override protected void onLayout(boolean changed, int l, int t, int rr, int b) {
+                int w = rr - l, h = b - t;
+                if (w <= 0 || h <= inset) return;
+                float r = radius(w, h), cx = w / 2f, cy = inset + r;
+                for (int i = 0; i < getChildCount() && i < fx.length; i++) {
+                    View v = getChildAt(i);
+                    float x = fx[i] * w, dx = x - cx;
+                    float arcY = cy - (float) Math.sqrt(Math.max(0f, r * r - dx * dx));
+                    int s = v.getMeasuredWidth(), hh = v.getMeasuredHeight();
+                    int left = Math.round(x - s / 2f), top = Math.round(arcY + dp(44) - hh / 2f);
+                    v.layout(left, top, left + s, top + hh);
+                }
+            }
+        }
+
+        private GradientDrawable barIconBg(boolean hot) {
+            return hot ? round(0x664FC3F7, 30, C_ACCENT, 2) : round(0x33FFFFFF, 30, 0x99FFFFFF, 1);
+        }
+
+        private FrameLayout barIcon(String glyph, String desc) {
+            FrameLayout c = new FrameLayout(act);
+            c.setBackground(barIconBg(false));
+            TextView g = glyph(glyph);
+            g.setTextSize(28);
+            g.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            c.addView(g, new FrameLayout.LayoutParams(-1, -1));
+            c.setContentDescription(desc);
+            return c;
+        }
+
+        private void barHot(View v, boolean hot) {
+            v.setBackground(barIconBg(hot));
+            v.animate().scaleX(hot ? 1.22f : 1f).scaleY(hot ? 1.22f : 1f).setDuration(120).start();
+            if (hot) { try { v.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK); } catch (Throwable ignored) { } }
+        }
+
+        /**
+         * Панель внизу показывается, пока тянут карточку: значок «закрыть» (отпустить на нём закрывает вкладку или группу)
+         * и значок «на уровень выше» (подержать над ним: панель переходит на уровень выше, а перетаскивание продолжается и
+         * карточку можно положить на том уровне; отпустить прямо на нём: вынуть на уровень выше).
+         * Группу она не расформировывает. До начала перетаскивания спрятана за нижним краем, но остаётся в дереве видов.
+         */
+        private View dragBar() {
+            final PlanetBar bar = new PlanetBar(act);
+            dragBarView = bar;
+            barShown = false;           // новая панель вкладок всегда начинается со спрятанной планеты
+            final FrameLayout up = barIcon("↑", "Подняться на уровень выше: подержите над значком, перетаскивание продолжится");
+            final FrameLayout close = barIcon("✕", "Закрыть: отпустите карточку на значке");
+            upIcon = up;
+            bar.addView(up, new FrameLayout.LayoutParams(dp(60), dp(60)));
+            bar.addView(close, new FrameLayout.LayoutParams(dp(60), dp(60)));
+            bar.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                @Override public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) {
+                    if (!barShown) v.setTranslationY(v.getHeight());
+                }
+            });
+            up.setAlpha(openGroup != null ? 1f : 0.3f);
+            up.setOnDragListener(new View.OnDragListener() {
+                @Override public boolean onDrag(View v, DragEvent e) {
+                    Object d = e.getLocalState();
+                    switch (e.getAction()) {
+                        case DragEvent.ACTION_DRAG_STARTED:
+                            return d instanceof Tab || d instanceof Group;
+                        case DragEvent.ACTION_DRAG_ENTERED:
+                            barHot(v, true);
+                            h.removeCallbacks(upHover);
+                            if (openGroup != null) h.postDelayed(upHover, 600);
+                            return true;
+                        case DragEvent.ACTION_DRAG_EXITED:
+                            barHot(v, false);
+                            h.removeCallbacks(upHover);
+                            return true;
+                        case DragEvent.ACTION_DROP: {
+                            h.removeCallbacks(upHover);
+                            dropHandled = true;
+                            final Object dropped = d;
+                            h.post(new Runnable() { @Override public void run() { dropUp(dropped); } });
+                            return true;
+                        }
                         case DragEvent.ACTION_DRAG_ENDED:
-                            z.setAlpha(0f);
-                            z.setBackground(round(0xE61E2430, 14, C_ACCENT, 2));
+                            h.removeCallbacks(upHover);
+                            barHot(v, false);
                             return true;
                         default:
                             return true;
                     }
                 }
             });
-            return z;
+            close.setOnDragListener(new View.OnDragListener() {
+                @Override public boolean onDrag(View v, DragEvent e) {
+                    Object d = e.getLocalState();
+                    switch (e.getAction()) {
+                        case DragEvent.ACTION_DRAG_STARTED:
+                            return d instanceof Tab || d instanceof Group;
+                        case DragEvent.ACTION_DRAG_ENTERED:
+                            barHot(v, true);
+                            return true;
+                        case DragEvent.ACTION_DRAG_EXITED:
+                            barHot(v, false);
+                            return true;
+                        case DragEvent.ACTION_DROP: {
+                            dropHandled = true;
+                            final Object dropped = d;
+                            h.post(new Runnable() { @Override public void run() { dropClose(dropped); } });
+                            return true;
+                        }
+                        case DragEvent.ACTION_DRAG_ENDED:
+                            barHot(v, false);
+                            return true;
+                        default:
+                            return true;
+                    }
+                }
+            });
+            return bar;
+        }
+
+        private boolean barShown;
+
+        /** Панель-планета выезжает снизу, когда начали тянуть карточку, и уезжает обратно. */
+        private void showDragBar(boolean show) {
+            View b = dragBarView;
+            if (b == null) return;
+            barShown = show;
+            if (show) updateUpIcon();
+            b.animate().cancel();
+            b.animate().translationY(show ? 0f : b.getHeight()).setDuration(show ? 220 : 160)
+                    .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+        }
+
+        private void updateUpIcon() {
+            if (upIcon != null) upIcon.setAlpha(openGroup != null ? 1f : 0.3f);
+        }
+
+        /** Во время перетаскивания перейти на уровень выше: сетка перерисовывается на месте, перетаскивание не прерывается. */
+        private void dragLevelUp() {
+            if (openGroup == null || dragGrid == null || !dragGrid.isAttachedToWindow()) return;
+            openGroup = groupById(openGroup.parent);
+            panelGroup = openGroup;
+            fillGrid(dragGrid, openGroup);
+            for (DropCard c : dropCards) if (c.item == dragItem) c.box.setAlpha(0.35f);
+            if (tabScroll != null) tabScroll.scrollTo(0, 0);
+            updateUpIcon();
+            try { dragGrid.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK); } catch (Throwable ignored) { }
+            dragGrid.announceForAccessibility(openGroup == null ? "Верхний уровень" : "Группа " + openGroup.name);
+        }
+
+        private void dropClose(Object d) {
+            if (d instanceof Tab) closeTabKeep((Tab) d);
+            else if (d instanceof Group) for (Tab x : tabsOf((Group) d)) closeTabKeep(x);
+            cleanGroups();
+            showTabs();
+        }
+
+        /** Отпустили на значке «выше»: вкладка или группа выходит из показанной группы на уровень выше и встаёт сразу за ней. */
+        private void dropUp(Object d) {
+            Group og = openGroup;
+            if (og != null) {
+                if (d instanceof Tab) {
+                    Tab dt = (Tab) d;
+                    Tab anchor = lastOfGroup(og.id, dt);
+                    dt.group = og.parent;
+                    if (anchor != null) moveAfter(dt, anchor);
+                } else if (d instanceof Group) {
+                    Group dg = (Group) d;
+                    if (dg != og && !groupInside(og, dg)) {
+                        List<Tab> moving = tabsOf(dg);
+                        Tab anchor = lastOfGroup(og.id, moving);
+                        dg.parent = og.parent;
+                        if (anchor != null) moveBlockAfter(moving, anchor);
+                    }
+                }
+            }
+            finishDrop();
+        }
+
+        /** Поставить вкладку или группу в конец уровня level (0: верхний). */
+        private void moveToLevelEnd(Object d, int level) {
+            if (d instanceof Tab) {
+                Tab dt = (Tab) d;
+                Tab anchor;
+                if (level == 0) {
+                    anchor = null;
+                    for (Tab t : tabs) if (t != dt) anchor = t;
+                } else {
+                    anchor = lastOfGroup(level, dt);
+                }
+                dt.group = level;
+                if (anchor != null) moveAfter(dt, anchor);
+            } else if (d instanceof Group) {
+                Group dg = (Group) d;
+                Group lg = groupById(level);
+                if (dg.id == level || (lg != null && groupInside(lg, dg))) { finishDrop(); return; }
+                List<Tab> moving = tabsOf(dg);
+                Tab anchor;
+                if (level == 0) {
+                    anchor = null;
+                    for (Tab t : tabs) if (!moving.contains(t)) anchor = t;
+                } else {
+                    anchor = lastOfGroup(level, moving);
+                }
+                dg.parent = level;
+                if (anchor != null) moveBlockAfter(moving, anchor);
+            }
+            finishDrop();
         }
 
         private final Runnable dragScroller = new Runnable() {
@@ -6630,6 +6904,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         private void finishDrop() {
+            dragItem = null;
             cleanGroups();
             saveTabs();
             showTabs();
