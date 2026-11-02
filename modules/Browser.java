@@ -2149,6 +2149,17 @@ public class Browser implements IPlugin, ISettingsProvider {
             });
         }
 
+        /** Введён поисковый запрос, а не адрес сайта (по тем же признакам, что в normalize). */
+        private boolean looksLikeSearch(String input) {
+            String s = input == null ? "" : input.trim();
+            if (s.length() == 0) return false;
+            String low = s.toLowerCase(Locale.ROOT);
+            if (low.startsWith("about:") || low.startsWith("javascript:") || low.matches("^[a-z][a-z0-9+.-]*://.*")) return false;
+            boolean hostLike = s.indexOf(' ') < 0 && !s.endsWith(".")
+                    && (s.indexOf('.') > 0 || low.startsWith("localhost") || s.matches("^[0-9.]+(:[0-9]+)?(/.*)?$"));
+            return !hostLike;
+        }
+
         /** Адрес подсказок поиска для выбранной в настройках поисковой системы (ответ: [запрос, [подсказки…]]). */
         private String suggestUrl(String q) throws java.io.UnsupportedEncodingException {
             String tpl = sp.getString("search_url", DEF_SEARCH).toLowerCase(Locale.ROOT);
@@ -2187,6 +2198,10 @@ public class Browser implements IPlugin, ISettingsProvider {
                                     row.setFocusable(true);
                                     row.setOnClickListener(new View.OnClickListener() {
                                         @Override public void onClick(View v) {
+                                            if (!startForNew) {         // результаты поиска открываются в новой вкладке
+                                                openNewTabFromStart(x);
+                                                return;
+                                            }
                                             closeLayer(false);
                                             if (cur != null) {
                                                 applyStartProfile();
@@ -2279,6 +2294,10 @@ public class Browser implements IPlugin, ISettingsProvider {
                             || (e != null && e.getKeyCode() == KeyEvent.KEYCODE_ENTER && e.getAction() == KeyEvent.ACTION_DOWN);
                     if (!go) return false;
                     String text = box.getText().toString();
+                    if (!forNew && looksLikeSearch(text)) {         // результаты поиска открываются в новой вкладке
+                        openNewTabFromStart(text);
+                        return true;
+                    }
                     closeLayer(false);
                     if (cur != null) {
                         applyStartProfile();
@@ -4428,16 +4447,49 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         /** Список профилей: тап открывает замену значка. */
         private void showProfileList() {
-            List<View> icons = new ArrayList<View>();
-            List<String> labels = new ArrayList<String>();
             List<Runnable> actions = new ArrayList<Runnable>();
+            List<Boolean> ok = new ArrayList<Boolean>();
             for (int i = 0; i < PROFILES; i++) {
                 final int idx = i;
-                icons.add(profileBadge(i, 30));
-                labels.add(profileName(i));
+                ok.add(Boolean.TRUE);
                 actions.add(new Runnable() { @Override public void run() { showProfileIconEditor(idx); } });
             }
-            showList("Значки профилей", icons, labels, actions);
+            showProfileGrid("Значки профилей", actions, ok);
+        }
+
+        /** Профили одними значками, без подписей и вдвое крупнее прежних (название читает экранный диктор). */
+        private void showProfileGrid(String title, List<Runnable> actions, List<Boolean> enabled) {
+            LinearLayout c = card();
+            c.setPadding(dp(8), dp(14), dp(8), dp(14));
+            final int cols = 3;
+            LinearLayout rowL = null;
+            for (int i = 0; i < PROFILES; i++) {
+                if (i % cols == 0) {
+                    rowL = new LinearLayout(act);
+                    rowL.setOrientation(LinearLayout.HORIZONTAL);
+                    c.addView(rowL, new LinearLayout.LayoutParams(-1, -2));
+                }
+                final Runnable act0 = actions.get(i);
+                boolean on = enabled.get(i).booleanValue();
+                FrameLayout cell = new FrameLayout(act);
+                cell.setBackground(pressable());
+                cell.setClickable(true);
+                cell.setFocusable(true);
+                cell.setContentDescription(profileName(i) + (on ? "" : ": недоступно, нет изоляции сессий"));
+                View badge = profileBadge(i, 56);
+                badge.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                if (!on) badge.setAlpha(0.35f);
+                cell.addView(badge, new FrameLayout.LayoutParams(dp(56), dp(56), Gravity.CENTER));
+                cell.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        closeLayer(false);
+                        act0.run();
+                    }
+                });
+                rowL.addView(cell, new LinearLayout.LayoutParams(0, dp(84), 1f));
+            }
+            while (rowL != null && rowL.getChildCount() < cols) rowL.addView(new View(act), new LinearLayout.LayoutParams(0, dp(84), 1f));
+            showLayer(c, false, null, title);
         }
 
         /** Замена значка профиля: эмодзи, номер, своя картинка; здесь же переименование. */
@@ -5043,23 +5095,21 @@ public class Browser implements IPlugin, ISettingsProvider {
             }, title);
         }
 
-        /** Список профилей для новой вкладки: значок профиля, потом название. */
+        /** Выбор профиля: значки без подписей. */
         private void chooseProfile(String title, final Pick pick) {
-            List<View> icons = new ArrayList<View>();
-            List<String> labels = new ArrayList<String>();
             List<Runnable> actions = new ArrayList<Runnable>();
+            List<Boolean> oks = new ArrayList<Boolean>();
             for (int i = 0; i < PROFILES; i++) {
                 final int idx = i;
                 boolean ok = i == 0 || Profiles.supported();
-                icons.add(profileBadge(i, 28));
-                labels.add(profileName(i) + (ok ? "" : " (недоступно: нет изоляции сессий)"));
+                oks.add(Boolean.valueOf(ok));
                 actions.add(ok ? new Runnable() {
                     @Override public void run() { pick.on(idx); }
                 } : new Runnable() {
                     @Override public void run() { toast(Profiles.status()); }
                 });
             }
-            showList(title, icons, labels, actions);
+            showProfileGrid(title, actions, oks);
         }
 
         private void showMenu() {
@@ -6556,7 +6606,7 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         // ------------------------------------------------------------ панель-планета внизу: закрыть и подняться на уровень выше
 
-        /** Круглая «планета» на нижнем краю: верхняя часть большого круга с тонким светящимся ободом, значки лежат вдоль дуги. */
+        /** Круглая «планета» на нижнем краю: нижняя часть большого круга (дуга внизу, ровный верх) с тонким светящимся ободом. */
         private final class PlanetBar extends FrameLayout {
             private final Paint body = new Paint(Paint.ANTI_ALIAS_FLAG);
             private final Paint rim = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -6582,31 +6632,32 @@ public class Browser implements IPlugin, ISettingsProvider {
                 return (w * w / 4f + vis * vis) / (2f * vis);
             }
 
+            /** Нижняя часть круга: ровный верх, снизу дуга большой окружности по краю панели. Хорда во всю ширину. */
             @Override protected void onDraw(Canvas c) {
                 float w = getWidth(), h = getHeight();
-                if (w <= 0 || h <= inset) return;
-                float r = radius(w, h), cx = w / 2f, cy = inset + r;
+                if (w <= 0 || h <= 2 * inset) return;
+                float r = radius(w, h), cx = w / 2f, cy = h - inset - r;
+                c.save();
+                c.clipRect(0, inset, w, h);
                 body.setShader(new android.graphics.RadialGradient(cx, cy, r,
-                        new int[] { 0xF20F141C, 0xF2182233, 0xF2273A52 }, new float[] { 0f, 0.82f, 1f },
+                        new int[] { 0xF2273A52, 0xF2182233, 0xF20F141C }, new float[] { 0f, 0.8f, 1f },
                         android.graphics.Shader.TileMode.CLAMP));
                 c.drawCircle(cx, cy, r, body);
-                c.drawCircle(cx, cy, r + dp(1), halo);
+                c.drawCircle(cx, cy, r - dp(14), band);
                 rim.setShader(new android.graphics.LinearGradient(0, 0, w, 0,
                         new int[] { 0x004FC3F7, 0xCC4FC3F7, 0x004FC3F7 }, null, android.graphics.Shader.TileMode.CLAMP));
+                c.drawCircle(cx, cy, r, halo);
                 c.drawCircle(cx, cy, r, rim);
-                c.drawCircle(cx, cy, r - dp(14), band);
+                c.restore();
             }
 
             @Override protected void onLayout(boolean changed, int l, int t, int rr, int b) {
                 int w = rr - l, h = b - t;
-                if (w <= 0 || h <= inset) return;
-                float r = radius(w, h), cx = w / 2f, cy = inset + r;
+                if (w <= 0 || h <= 2 * inset) return;
                 for (int i = 0; i < getChildCount() && i < fx.length; i++) {
                     View v = getChildAt(i);
-                    float x = fx[i] * w, dx = x - cx;
-                    float arcY = cy - (float) Math.sqrt(Math.max(0f, r * r - dx * dx));
                     int s = v.getMeasuredWidth(), hh = v.getMeasuredHeight();
-                    int left = Math.round(x - s / 2f), top = Math.round(arcY + dp(44) - hh / 2f);
+                    int left = Math.round(fx[i] * w - s / 2f), top = Math.round(inset + dp(46) - hh / 2f);
                     v.layout(left, top, left + s, top + hh);
                 }
             }
