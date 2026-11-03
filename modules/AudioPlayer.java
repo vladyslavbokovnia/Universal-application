@@ -3,6 +3,7 @@ package im.manus.plugins;
 import android.Manifest;
 import android.accessibilityservice.AccessibilityService;
 import android.app.Activity;
+import android.app.KeyguardManager;
 import android.app.AlertDialog;
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -18,6 +19,7 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
+import android.hardware.input.InputManager;
 import android.graphics.Bitmap;
 import android.media.AudioAttributes;
 import android.media.AudioDeviceCallback;
@@ -38,6 +40,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.view.Gravity;
@@ -116,6 +119,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             {"speed_up", "🐇 Быстрее"},
             {"speed_down", "🐢 Медленнее"},
             {"speed_reset", "1× Обычная скорость"},
+            {"focus", "🎯 Фокус для геймпада вкл/выкл"},
     };
 
     private static final String PL_LATER = "pl_later";
@@ -159,9 +163,13 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         if (!remoteAny()) ensureSession();   // свой плеер всегда главный: гарнитура и системные клавиши идут сюда сразу
         loadTracks();
         mapper(context);
+        registerFocusWatch();
+        updateFocusCatcher();
     }
 
     @Override public void stop() {
+        unregisterFocusWatch();
+        removeFocusCatcher();
         rememberPos();
         releaseHeadset();
         unlockTouch();
@@ -1230,6 +1238,194 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         screenOffRx = null;
     }
 
+    // ---------------------------------------------------------- фокус для геймпада (оверлей)
+    //
+    // На Android 11 оси джойстика приходят только окну в фокусе. Прозрачное окно 1x1 из службы специальных
+    // возможностей без FLAG_NOT_FOCUSABLE получает фокус, а касания пропускает (FLAG_NOT_TOUCHABLE): стики, курки
+    // и кнопки идут в PadMapper и циферблат, пока окно плеера закрыто. Цена: приложение под окном теряет фокус
+    // (клавиатура, «Назад»), поэтому окно есть только при включённой настройке pad_focus, подключённом геймпаде,
+    // включённом и разблокированном экране и закрытом окне плеера. Кнопкой геймпада «Фокус» настройка выключается.
+
+    private View focusView;
+    private WindowManager focusWm;
+    private BroadcastReceiver focusScreenRx;
+    private InputManager.InputDeviceListener focusDevCb;
+    private final Runnable focusUpdate = new Runnable() {
+        @Override public void run() { applyFocusCatcher(); }
+    };
+
+    private boolean padFocusOn() {
+        SharedPreferences p = prefs();
+        return p != null && p.getBoolean("pad_focus", false);
+    }
+
+    private boolean padPresent() {
+        try {
+            for (int id : InputDevice.getDeviceIds()) {
+                InputDevice d = InputDevice.getDevice(id);
+                if (d == null || d.isVirtual()) continue;
+                int s = d.getSources();
+                if ((s & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
+                        || (s & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) return true;
+            }
+        } catch (Throwable t) { }
+        return false;
+    }
+
+    private boolean screenReady() {
+        try {
+            PowerManager pm = (PowerManager) appCtx.getSystemService(Context.POWER_SERVICE);
+            if (pm != null && !pm.isInteractive()) return false;
+            KeyguardManager kg = (KeyguardManager) appCtx.getSystemService(Context.KEYGUARD_SERVICE);
+            return kg == null || !kg.isKeyguardLocked();
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    /** Пересчитать, нужно ли окно фокуса; можно вызывать откуда угодно, работа идёт в главном потоке. */
+    void updateFocusCatcher() {
+        Handler hh = h;
+        if (hh == null) return;
+        hh.removeCallbacks(focusUpdate);
+        hh.post(focusUpdate);
+    }
+
+    private void applyFocusCatcher() {
+        boolean want = svc != null && appCtx != null && padFocusOn() && boundView == null
+                && padPresent() && screenReady();
+        if (want && focusView == null) addFocusCatcher();
+        else if (!want && focusView != null) removeFocusCatcher();
+    }
+
+    private void addFocusCatcher() {
+        try {
+            WindowManager wm = (WindowManager) svc.getSystemService(Context.WINDOW_SERVICE);
+            FocusCatcher v = new FocusCatcher(svc);
+            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                    1, 1,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                            | WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM,   // клавиатура остаётся у приложения под окном
+                    PixelFormat.TRANSLUCENT);
+            lp.gravity = Gravity.TOP | Gravity.START;
+            wm.addView(v, lp);
+            focusWm = wm;
+            focusView = v;
+            v.requestFocus();
+        } catch (Throwable t) {
+            focusView = null;
+            focusWm = null;
+        }
+    }
+
+    private void removeFocusCatcher() {
+        View v = focusView;
+        focusView = null;
+        try {
+            if (v != null && focusWm != null) focusWm.removeView(v);
+        } catch (Throwable t) { }
+        focusWm = null;
+        if (v != null) padReleaseAll();
+    }
+
+    private void toggleFocusPref() {
+        SharedPreferences p = prefs();
+        if (p == null) return;
+        boolean now = !p.getBoolean("pad_focus", false);
+        p.edit().putBoolean("pad_focus", now).apply();
+        tone(now ? ToneGenerator.TONE_PROP_ACK : ToneGenerator.TONE_PROP_BEEP);
+        updateFocusCatcher();
+    }
+
+    /** Экран включился или погас, геймпад подключили или отключили: окно фокуса пересчитывается. */
+    private void registerFocusWatch() {
+        Context c = appCtx;
+        if (c == null) return;
+        if (focusScreenRx == null) {
+            focusScreenRx = new BroadcastReceiver() {
+                @Override public void onReceive(Context ctx, Intent intent) { updateFocusCatcher(); }
+            };
+            IntentFilter f = new IntentFilter();
+            f.addAction(Intent.ACTION_SCREEN_ON);
+            f.addAction(Intent.ACTION_SCREEN_OFF);
+            f.addAction(Intent.ACTION_USER_PRESENT);
+            try { c.registerReceiver(focusScreenRx, f); }
+            catch (Throwable t) { focusScreenRx = null; }
+        }
+        if (focusDevCb == null) {
+            try {
+                InputManager im = (InputManager) c.getSystemService(Context.INPUT_SERVICE);
+                if (im != null) {
+                    focusDevCb = new InputManager.InputDeviceListener() {
+                        @Override public void onInputDeviceAdded(int id) { updateFocusCatcher(); }
+                        @Override public void onInputDeviceRemoved(int id) { updateFocusCatcher(); }
+                        @Override public void onInputDeviceChanged(int id) { }
+                    };
+                    im.registerInputDeviceListener(focusDevCb, h);
+                }
+            } catch (Throwable t) { focusDevCb = null; }
+        }
+    }
+
+    private void unregisterFocusWatch() {
+        Context c = appCtx;
+        if (c == null) return;
+        try { if (focusScreenRx != null) c.unregisterReceiver(focusScreenRx); } catch (Throwable t) { }
+        focusScreenRx = null;
+        try {
+            InputManager im = (InputManager) c.getSystemService(Context.INPUT_SERVICE);
+            if (im != null && focusDevCb != null) im.unregisterInputDeviceListener(focusDevCb);
+        } catch (Throwable t) { }
+        focusDevCb = null;
+        if (h != null) h.removeCallbacks(focusUpdate);
+    }
+
+    /** Невидимое окно, которое держит фокус ради стиков и кнопок геймпада. */
+    class FocusCatcher extends View {
+        FocusCatcher(Context c) {
+            super(c);
+            setFocusable(true);
+            setFocusableInTouchMode(true);
+        }
+
+        @Override public boolean onGenericMotionEvent(MotionEvent e) {
+            if ((e.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) {
+                PadMapper m = mapper;
+                if (m != null) {
+                    try { m.onMotionEvent(e); } catch (Throwable t) { }
+                }
+                try { dialMotion(e); } catch (Throwable t) { }
+                return true;
+            }
+            return super.onGenericMotionEvent(e);
+        }
+
+        @Override public boolean dispatchKeyEvent(KeyEvent e) {
+            try {
+                PadMapper m = mapper;
+                if (m != null && PadMapper.isPadEvent(e)) {
+                    m.onKeyEvent(e);
+                    return true;
+                }
+            } catch (Throwable t) { }
+            if (e.getKeyCode() == KeyEvent.KEYCODE_BACK) {
+                // «Назад» пришёл нам, а не приложению под окном: передаём его через службу
+                if (e.getAction() == KeyEvent.ACTION_UP && svc != null) {
+                    try { svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK); } catch (Throwable t) { }
+                }
+                return true;
+            }
+            return super.dispatchKeyEvent(e);
+        }
+
+        @Override public void onWindowFocusChanged(boolean hasFocus) {
+            super.onWindowFocusChanged(hasFocus);
+            if (!hasFocus) padReleaseAll();
+        }
+    }
+
     // ---------------------------------------------------------- пульт: другой плеер
 
     private String extPkg;
@@ -1454,17 +1650,27 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         m.addDefault(KeyEvent.KEYCODE_DPAD_RIGHT, "t", "next");
         m.addDefault(KeyEvent.KEYCODE_BUTTON_THUMBL, "t", "mute");
         m.addDefault(KeyEvent.KEYCODE_BUTTON_THUMBR, "t", "say_pct");   // нажатие правого стика (циферблат по умолчанию на нём): процент трека
-        m.addToggle(KeyEvent.KEYCODE_BUTTON_THUMBL, "🕹 Циферблат на этом стике", new PadMapper.Toggle() {
-            @Override public boolean isOn() { return dialOn() && dialLeft(); }
-            @Override public void toggle() { toggleDial(true); }
-        });
-        m.addToggle(KeyEvent.KEYCODE_BUTTON_THUMBR, "🕹 Циферблат на этом стике", new PadMapper.Toggle() {
-            @Override public boolean isOn() { return dialOn() && !dialLeft(); }
-            @Override public void toggle() { toggleDial(false); }
-        });
+        addPadToggles(m);
         m.migrateLegacy("gbtn_");
         mapper = m;
         return m;
+    }
+
+    /**
+     * Переключатель циферблата на картинке геймпада. Нужен PadMapper.addToggle из новой сборки хоста; на старом APK
+     * этого метода нет, тогда плеер работает без переключателя (циферблат включается настройкой).
+     */
+    private void addPadToggles(PadMapper m) {
+        try {
+            m.addToggle(KeyEvent.KEYCODE_BUTTON_THUMBL, "🕹 Циферблат на этом стике", new PadMapper.Toggle() {
+                @Override public boolean isOn() { return dialOn() && dialLeft(); }
+                @Override public void toggle() { toggleDial(true); }
+            });
+            m.addToggle(KeyEvent.KEYCODE_BUTTON_THUMBR, "🕹 Циферблат на этом стике", new PadMapper.Toggle() {
+                @Override public boolean isOn() { return dialOn() && !dialLeft(); }
+                @Override public void toggle() { toggleDial(false); }
+            });
+        } catch (Throwable t) { }
     }
 
     /** Окно потеряло фокус или закрылось: отпускаем всё, чтобы удержание не зависло. */
@@ -1490,6 +1696,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     private void doPerform(String a) {
         if (a == null) return;
         if (!a.startsWith("vol_") && !a.equals("mute") && routeExternal(a)) return;
+        if (a.equals("focus")) { toggleFocusPref(); return; }
         if (a.equals("later")) { addCurrentTo(PL_LATER); return; }
         if (a.equals("fav")) { addCurrentTo(PL_FAV); return; }
         if (a.equals("delete")) { deleteCurrentConfirm(); return; }
@@ -1549,6 +1756,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 "Свой плеер не играет: кнопки идут в другой играющий (нужен доступ к уведомлениям)", true));
         r.add(SettingItem.toggle("keep_screen", "💡 Не гасить экран (e-ink)",
                 "Пока открыто окно плеера: стики и кнопки приходят в него", true));
+        r.add(SettingItem.toggle("pad_focus", "🎯 Держать фокус для геймпада",
+                "Прозрачное окно поверх экрана принимает стики и кнопки, пока геймпад подключён и окно плеера закрыто (Android 11). Минус: приложение под ним теряет фокус (клавиатура, «Назад»)", false));
         r.add(SettingItem.slider("tone_vol", "🔔 Громкость сигналов",
                 "Писки при удалении, плейлистах, блокировке касаний", 10, 100, 5, 100));
         r.add(SettingItem.section("🎮 Геймпад (окно открыто)"));
@@ -1581,6 +1790,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                     @Override public void run() { v.applyKeepScreen(); }
                 });
             }
+        } else if ("pad_focus".equals(key)) {
+            updateFocusCatcher();
         } else if ("dial".equals(key) || "dial_left".equals(key)) {
             dialActive = false;
             dialPos = -1f;
@@ -1723,6 +1934,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         @Override protected void onAttachedToWindow() {
             super.onAttachedToWindow();
             boundView = this;
+            updateFocusCatcher();
             applyKeepScreen();
             requestFocus();
             refresh();
@@ -1736,6 +1948,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
         @Override protected void onDetachedFromWindow() {
             if (boundView == this) boundView = null;
+            updateFocusCatcher();
             if (shieldParent != null) unlockTouch();
             padReleaseAll();
             setKeepScreenOn(false);
