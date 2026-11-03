@@ -56,6 +56,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 import im.manus.universalhost.IPlugin;
 import im.manus.universalhost.ISettingsProvider;
+import im.manus.universalhost.ModuleMemory;
 import im.manus.universalhost.ModuleWindows;
 import im.manus.universalhost.SettingItem;
 
@@ -861,7 +862,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
 
     // ---------------------------------------------------------------- круговое меню
 
-    private static final int K_PREV = 0, K_HIDE = 1, K_SORT = 2, K_SHOW = 3, K_INFO = 4;
+    private static final int K_PREV = 0, K_HIDE = 1, K_SORT = 2, K_SHOW = 3, K_INFO = 4, K_UNLOAD = 5;
 
     private void showMenu(View anchor, final Entry entry) {
         if (!active) return;
@@ -872,6 +873,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         kinds.add(K_HIDE);
         kinds.add(K_SORT);
         if (!store.hidden().isEmpty()) kinds.add(K_SHOW);
+        if (isModuleEntry(entry.pkg)) kinds.add(K_UNLOAD);      // выгрузить модуль из памяти (после обновления .dex)
         kinds.add(K_INFO);
 
         int n = kinds.size();
@@ -962,6 +964,15 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
             }
             case K_SHOW: {
                 showHiddenList();
+                break;
+            }
+            case K_UNLOAD: {
+                if (isModuleEntry(entry.pkg)) {
+                    String name = moduleOf(entry.pkg);
+                    boolean ok;
+                    try { ok = ModuleMemory.unload(ctx, name); } catch (Throwable t) { ok = false; }
+                    Toast.makeText(ctx, ok ? "⏏ " + name : "✕ " + name, Toast.LENGTH_SHORT).show();
+                }
                 break;
             }
             case K_INFO: {
@@ -1462,6 +1473,12 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
                 case K_SHOW:
                     r.set(-12, -7, 12, 7); c.drawOval(r, line);
                     c.drawCircle(0, 0, 3.5f, line);
+                    break;
+                case K_UNLOAD:                              // значок «извлечь»: треугольник над планкой
+                    c.drawLine(0, -10, -9, 1, line);
+                    c.drawLine(0, -10, 9, 1, line);
+                    c.drawLine(-9, 1, 9, 1, line);
+                    c.drawLine(-9, 8, 9, 8, line);
                     break;
                 case K_SORT:
                     c.drawLine(-9, -8, 9, -8, line);

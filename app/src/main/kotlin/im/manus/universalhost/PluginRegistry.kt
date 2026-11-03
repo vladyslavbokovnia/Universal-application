@@ -41,4 +41,22 @@ object PluginRegistry {
     }
 
     fun find(context: Context, name: String): IPlugin? = scan(context).firstOrNull { it.name == name }
+
+    /**
+     * Выгрузить модуль из кэша: следующий scan прочитает его .dex заново (новый загрузчик классов, новый объект).
+     * stop = true: заодно остановить выгружаемый объект (если его уже остановила служба, ставят false).
+     */
+    @Synchronized
+    fun evict(name: String, stop: Boolean) {
+        val iter = cache.entries.iterator()
+        while (iter.hasNext()) {
+            val p = iter.next().value.plugin
+            if (p != null && p.name == name) {
+                if (stop) {
+                    try { p.stop() } catch (t: Throwable) { }
+                }
+                iter.remove()
+            }
+        }
+    }
 }

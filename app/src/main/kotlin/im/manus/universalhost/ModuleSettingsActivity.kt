@@ -107,6 +107,7 @@ class ModuleSettingsActivity : Activity() {
         }
         // окно модуля из ярлыка или «Недавних»: карточку хоста в системных «Недавних» прячем
         if (intent.data?.scheme == "module") HostRecents.hideHostCard(this)
+        CoreAccessibilityService.instance?.refreshIfStale()
         ui.removeCallbacks(tick)
         if (monitors.isNotEmpty()) ui.post(tick)
     }

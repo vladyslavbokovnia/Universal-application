@@ -78,6 +78,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         HostRecents.showHostCard(this)
+        CoreAccessibilityService.instance?.refreshIfStale()      // .dex обновили: работающие модули перезагрузятся
         hideSystemUI()
         render()
         // по одному недостающему разрешению за раз; после возврата из настроек покажется следующее
