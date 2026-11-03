@@ -1684,27 +1684,17 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         m.addDefault(KeyEvent.KEYCODE_DPAD_RIGHT, "t", "next");
         m.addDefault(KeyEvent.KEYCODE_BUTTON_THUMBL, "t", "mute");
         m.addDefault(KeyEvent.KEYCODE_BUTTON_THUMBR, "t", "say_pct");   // нажатие правого стика (циферблат по умолчанию на нём): процент трека
-        addPadToggles(m);
+        m.addToggle(KeyEvent.KEYCODE_BUTTON_THUMBL, "🕹 Циферблат на этом стике", new PadMapper.Toggle() {
+            @Override public boolean isOn() { return dialOn() && dialLeft(); }
+            @Override public void toggle() { toggleDial(true); }
+        });
+        m.addToggle(KeyEvent.KEYCODE_BUTTON_THUMBR, "🕹 Циферблат на этом стике", new PadMapper.Toggle() {
+            @Override public boolean isOn() { return dialOn() && !dialLeft(); }
+            @Override public void toggle() { toggleDial(false); }
+        });
         m.migrateLegacy("gbtn_");
         mapper = m;
         return m;
-    }
-
-    /**
-     * Переключатель циферблата на картинке геймпада. Нужен PadMapper.addToggle из новой сборки хоста; на старом APK
-     * этого метода нет, тогда плеер работает без переключателя (циферблат включается настройкой).
-     */
-    private void addPadToggles(PadMapper m) {
-        try {
-            m.addToggle(KeyEvent.KEYCODE_BUTTON_THUMBL, "🕹 Циферблат на этом стике", new PadMapper.Toggle() {
-                @Override public boolean isOn() { return dialOn() && dialLeft(); }
-                @Override public void toggle() { toggleDial(true); }
-            });
-            m.addToggle(KeyEvent.KEYCODE_BUTTON_THUMBR, "🕹 Циферблат на этом стике", new PadMapper.Toggle() {
-                @Override public boolean isOn() { return dialOn() && !dialLeft(); }
-                @Override public void toggle() { toggleDial(false); }
-            });
-        } catch (Throwable t) { }
     }
 
     /** Окно потеряло фокус или закрылось: отпускаем всё, чтобы удержание не зависло. */
