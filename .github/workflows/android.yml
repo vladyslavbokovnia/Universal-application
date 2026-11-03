@@ -26,6 +26,13 @@ jobs:
         set -euo pipefail
         base64 -d ci/debug.keystore.b64 > ci/debug.keystore
         keytool -list -keystore ci/debug.keystore -storepass android | grep -i 'androiddebugkey'
+    # Значок хоста: из плашки вырезается буква U (светящиеся линии на тёмной полупрозрачной заливке, фон прозрачный).
+    - name: Cut host icon
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -m pip install --quiet pillow numpy scipy
+        python3 ci/make_icon.py
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
     - name: Build APK
