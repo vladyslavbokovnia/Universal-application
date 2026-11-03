@@ -20,9 +20,12 @@ import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.media.AudioAttributes;
+import android.media.AudioDeviceCallback;
+import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
 import android.media.MediaMetadata;
 import android.media.MediaPlayer;
+import android.media.PlaybackParams;
 import android.media.ToneGenerator;
 import android.media.session.MediaController;
 import android.media.session.MediaSession;
@@ -61,6 +64,7 @@ import im.manus.universalhost.PadMapper;
 import im.manus.universalhost.SettingItem;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -89,22 +93,26 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
     /** Геймпад: действия плеера — id, подпись. */
     private static final String[][] ACTIONS = {
-            {"play_pause", "Пауза / воспроизведение"},
-            {"play", "Воспроизведение"},
-            {"pause", "Пауза"},
-            {"prev", "Предыдущий трек"},
-            {"next", "Следующий трек"},
-            {"seek_back", "Назад 10 с"},
-            {"seek_fwd", "Вперёд 10 с"},
-            {"stop", "Стоп"},
-            {"vol_down", "Тише"},
-            {"vol_up", "Громче"},
-            {"mute", "Без звука"},
-            {"later", "В плейлист «Послушать позже»"},
-            {"fav", "В «Избранное»"},
-            {"delete", "Удалить текущий трек (нажать дважды)"},
-            {"say", "Озвучить название и сколько осталось"},
-            {"lock", "Заблокировать касания до выключения экрана"},
+            {"play_pause", "⏯ Пауза / пуск"},
+            {"play", "▶ Играть"},
+            {"pause", "⏸ Пауза"},
+            {"prev", "⏮ Назад"},
+            {"next", "⏭ Вперёд"},
+            {"seek_back", "⏪ −10 с"},
+            {"seek_fwd", "⏩ +10 с"},
+            {"stop", "⏹ Стоп"},
+            {"vol_down", "🔉 Тише"},
+            {"vol_up", "🔊 Громче"},
+            {"mute", "🔇 Без звука"},
+            {"later", "🕓 Послушать позже"},
+            {"fav", "⭐ Избранное"},
+            {"delete", "🗑 Удалить (нажать дважды)"},
+            {"say", "🗣 Название и сколько осталось"},
+            {"lock", "🔒 Блок касаний до выключения экрана"},
+            {"stop_after", "⏹ Стоп после этого трека"},
+            {"speed_up", "🐇 Быстрее"},
+            {"speed_down", "🐢 Медленнее"},
+            {"speed_reset", "1× Обычная скорость"},
     };
 
     private static final String PL_LATER = "pl_later";
@@ -127,13 +135,15 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     private int cur = -1;
     /** Очередь из плейлиста (индексы в tracks); null: играем всю библиотеку по порядку. */
     private int[] queue;
+    private boolean stopAfter;
+    private int resumeTo;
     private MediaSession session;
     private BroadcastReceiver cmdReceiver;
     private PlayerView boundView;
     private PadMapper mapper;
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 7; }
+    @Override public int getVersion() { return 8; }
     @Override public String getDescription() {
         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
@@ -149,6 +159,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     }
 
     @Override public void stop() {
+        rememberPos();
+        releaseHeadset();
         unlockTouch();
         try { if (tts != null) { tts.shutdown(); } } catch (Throwable t) { }
         tts = null;
@@ -274,12 +286,26 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         mp.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
             @Override public void onPrepared(MediaPlayer p) {
                 prepared = true;
+                if (resumeTo > 0) {
+                    try { p.seekTo(resumeTo); } catch (Throwable t) { }
+                    resumeTo = 0;
+                }
                 try { p.start(); } catch (Throwable t) { }
+                applySpeed();
                 afterChange();
             }
         });
         mp.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
-            @Override public void onCompletion(MediaPlayer p) { next(); }
+            @Override public void onCompletion(MediaPlayer p) {
+                rememberPos();                                   // дослушали: место забываем
+                SharedPreferences sp = prefs();
+                if (stopAfter || (sp != null && sp.getBoolean("no_auto_next", false))) {
+                    stopAfter = false;
+                    afterChange();                               // остановка без перехода к следующему
+                    return;
+                }
+                next();
+            }
         });
         mp.setOnErrorListener(new MediaPlayer.OnErrorListener() {
             @Override public boolean onError(MediaPlayer p, int what, int extra) {
@@ -297,9 +323,13 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             ensurePlayer();
             ensureSession();
             ensureReceiver();
+            ensureHeadset();
+            rememberPos();
             mp.reset();
             prepared = false;
             cur = i;
+            stopAfter = false;
+            resumeTo = savedPos(tracks.get(i));
             mp.setDataSource(appCtx, tracks.get(i).uri);
             mp.prepareAsync();
             afterChange();
@@ -315,7 +345,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             return;
         }
         try {
-            if (mp.isPlaying()) mp.pause(); else mp.start();
+            if (mp.isPlaying()) { mp.pause(); rememberPos(); } else mp.start();
             afterChange();
         } catch (Throwable t) { }
     }
@@ -324,6 +354,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         try {
             if (mp != null && prepared && mp.isPlaying()) {
                 mp.pause();
+                rememberPos();
                 afterChange();
             }
         } catch (Throwable t) { }
@@ -635,6 +666,146 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         } catch (Throwable t) {
             return false;
         }
+    }
+
+    // ---------------------------------------------------------- место в треке, скорость, наушники
+
+    private boolean resumeOn() {
+        SharedPreferences p = prefs();
+        return p == null || p.getBoolean("resume", true);
+    }
+
+    private LinkedHashMap<String, Integer> posLoad() {
+        LinkedHashMap<String, Integer> m = new LinkedHashMap<String, Integer>();
+        SharedPreferences p = prefs();
+        if (p == null) return m;
+        for (String line : p.getString("pos_map", "").split("\n")) {
+            int k = line.lastIndexOf('\t');
+            if (k <= 0) continue;
+            try { m.put(line.substring(0, k), Integer.valueOf(line.substring(k + 1))); } catch (Throwable t) { }
+        }
+        return m;
+    }
+
+    private void posStore(LinkedHashMap<String, Integer> m) {
+        SharedPreferences p = prefs();
+        if (p == null) return;
+        while (m.size() > 300) m.remove(m.keySet().iterator().next());
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, Integer> e : m.entrySet()) {
+            sb.append(e.getKey()).append('\t').append(e.getValue()).append('\n');
+        }
+        p.edit().putString("pos_map", sb.toString()).apply();
+    }
+
+    /** Запомнить, где остановились в текущем треке; если почти дослушали или только начали, место забывается. */
+    private void rememberPos() {
+        if (!resumeOn() || mp == null || !prepared || cur < 0 || cur >= tracks.size()) return;
+        Uri u = tracks.get(cur).uri;
+        if (u == null) return;
+        try {
+            int pos = mp.getCurrentPosition();
+            int dur = mp.getDuration();
+            LinkedHashMap<String, Integer> m = posLoad();
+            String key = u.toString();
+            m.remove(key);
+            if (dur > 0 && pos > 5000 && pos < dur - 8000) m.put(key, Integer.valueOf(pos));
+            posStore(m);
+        } catch (Throwable t) { }
+    }
+
+    private int savedPos(Track t) {
+        if (!resumeOn() || t == null || t.uri == null) return 0;
+        Integer v = posLoad().get(t.uri.toString());
+        return v == null ? 0 : v.intValue();
+    }
+
+    private float speed() {
+        SharedPreferences p = prefs();
+        return p == null ? 1f : p.getFloat("speed", 1f);
+    }
+
+    private void applySpeed() {
+        try {
+            if (mp != null && prepared) {
+                boolean was = mp.isPlaying();
+                PlaybackParams pp = mp.getPlaybackParams();
+                pp.setSpeed(speed());
+                mp.setPlaybackParams(pp);
+                if (!was) mp.pause();               // смена скорости на паузе не должна запускать воспроизведение
+            }
+        } catch (Throwable t) { }
+    }
+
+    /** Скорость меняется шагом 0,1 от 0,5 до 2,5, запоминается и озвучивается числом. */
+    private void setSpeed(float v) {
+        v = Math.max(0.5f, Math.min(2.5f, Math.round(v * 10f) / 10f));
+        SharedPreferences p = prefs();
+        if (p != null) p.edit().putFloat("speed", v).apply();
+        applySpeed();
+        speak(String.format(Locale.getDefault(), "%.1f", v));
+    }
+
+    private void toggleStopAfter() {
+        stopAfter = !stopAfter;
+        tone(stopAfter ? ToneGenerator.TONE_PROP_ACK : ToneGenerator.TONE_PROP_BEEP);
+    }
+
+    private BroadcastReceiver noisyRx;
+    private AudioDeviceCallback devCb;
+    private long devCbSince;
+
+    /** Пауза при отключении наушников и пуск при подключении (оба пункта включаются в настройках). */
+    private void ensureHeadset() {
+        Context c = appCtx;
+        if (c == null) return;
+        if (noisyRx == null) {
+            noisyRx = new BroadcastReceiver() {
+                @Override public void onReceive(Context ctx, Intent intent) {
+                    SharedPreferences p = prefs();
+                    if (p == null || p.getBoolean("unplug_pause", true)) pause();
+                }
+            };
+            try { c.registerReceiver(noisyRx, new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)); }
+            catch (Throwable t) { noisyRx = null; }
+        }
+        if (devCb == null) {
+            try {
+                AudioManager am = (AudioManager) c.getSystemService(Context.AUDIO_SERVICE);
+                devCb = new AudioDeviceCallback() {
+                    @Override public void onAudioDevicesAdded(AudioDeviceInfo[] added) {
+                        if (SystemClock.uptimeMillis() - devCbSince < 1500) return;   // первый вызов сразу после подписки: уже подключённые
+                        SharedPreferences p = prefs();
+                        if (p == null || !p.getBoolean("plug_play", false)) return;
+                        boolean headset = false;
+                        for (AudioDeviceInfo d : added) {
+                            int t = d.getType();
+                            if (d.isSink() && (t == AudioDeviceInfo.TYPE_WIRED_HEADSET || t == AudioDeviceInfo.TYPE_WIRED_HEADPHONES
+                                    || t == AudioDeviceInfo.TYPE_USB_HEADSET || t == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)) {
+                                headset = true;
+                            }
+                        }
+                        try {
+                            if (headset && mp != null && prepared && !mp.isPlaying()) toggle();
+                        } catch (Throwable t) { }
+                    }
+                };
+                devCbSince = SystemClock.uptimeMillis();
+                if (am != null) am.registerAudioDeviceCallback(devCb, h);
+            } catch (Throwable t) { devCb = null; }
+        }
+    }
+
+    private void releaseHeadset() {
+        Context c = appCtx;
+        if (c == null) return;
+        try { if (noisyRx != null) c.unregisterReceiver(noisyRx); } catch (Throwable t) { }
+        noisyRx = null;
+        try {
+            AudioManager am = (AudioManager) c.getSystemService(Context.AUDIO_SERVICE);
+            if (am != null && devCb != null) am.unregisterAudioDeviceCallback(devCb);
+        } catch (Throwable t) { }
+        devCb = null;
     }
 
     // ---------------------------------------------------------- плейлисты: «Послушать позже» и «Избранное»
@@ -1216,6 +1387,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         if (a.equals("delete")) { deleteCurrentConfirm(); return; }
         if (a.equals("say")) { sayCurrent(); return; }
         if (a.equals("lock")) { toggleTouchLock(); return; }
+        if (a.equals("stop_after")) { toggleStopAfter(); return; }
+        if (a.equals("speed_up")) { setSpeed(speed() + 0.1f); return; }
+        if (a.equals("speed_down")) { setSpeed(speed() - 0.1f); return; }
+        if (a.equals("speed_reset")) { setSpeed(1f); return; }
         if (a.equals("play_pause")) toggle();
         else if (a.equals("play")) { if (!isPlaying()) toggle(); }
         else if (a.equals("pause")) pause();
@@ -1251,26 +1426,29 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
     @Override public List<SettingItem> getSettingsSchema() {
         List<SettingItem> r = new ArrayList<SettingItem>();
-        r.add(SettingItem.section("Плеер"));
-        r.add(SettingItem.custom("player", "Плеер", "Песни с устройства, удаление, кнопки геймпада на картинке"));
-        r.add(SettingItem.toggle("remote_any", "Управлять и другим плеером",
-                "Если свой плеер не играет, кнопки управляют другим играющим плеером (нужен доступ к уведомлениям для хоста). Выключено: только свой плеер",
-                true));
-        r.add(SettingItem.toggle("dial", "Стик-циферблат",
-                "Стик отклонён: играет место, на которое он указывает (вверх 0%, вправо 25%, вниз 50%, влево 75%). Вернул в центр: остаёшься там. Не то место: веди стик дальше по кругу",
-                true));
-        r.add(SettingItem.toggle("dial_left", "Циферблат на левом стике", "Выключено: правый стик", false));
-        r.add(SettingItem.toggle("keep_screen", "Не гасить экран при открытом плеере",
-                "Для e-ink: неподвижная картинка не тратит заряд, а стики приходят в окно плеера без Shizuku", true));
-        r.add(SettingItem.section("Геймпад (пока окно плеера открыто)"));
-        r.add(SettingItem.toggle("intercept", "Перехват кнопок",
-                "Включено: назначенная кнопка работает только на плеер. Выключено: действие срабатывает, а окно тоже получает нажатие",
-                true));
-        r.add(SettingItem.slider("long_ms", "Долгое нажатие, мс", "", 300, 1000, 50, 500));
-        r.add(SettingItem.slider("double_ms", "Окно двойного нажатия, мс", "", 150, 600, 50, 300));
-        r.add(SettingItem.section("Прочее"));
-        r.add(SettingItem.action("pin", "Ярлык на рабочий стол", "Значок модуля на рабочий стол — откроется отдельным окном"));
-        r.add(SettingItem.action("reset", "Сбросить кнопки геймпада", "Вернуть кнопки по умолчанию"));
+        r.add(SettingItem.section("🎵 Плеер"));
+        r.add(SettingItem.custom("player", "🎵 Плеер", "Песни, плейлисты, кнопки геймпада на картинке 🎮"));
+        r.add(SettingItem.toggle("resume", "📍 Помнить место в треке",
+                "Ушёл на другой трек или поставил на паузу: вернёшься туда же", true));
+        r.add(SettingItem.toggle("no_auto_next", "⏹ Не переходить к следующему",
+                "Трек доиграл: тишина, без перехода дальше", false));
+        r.add(SettingItem.toggle("unplug_pause", "🎧✕ Пауза, если наушники отключили", "", true));
+        r.add(SettingItem.toggle("plug_play", "🎧▶ Играть, когда наушники подключили", "", false));
+        r.add(SettingItem.toggle("remote_any", "🔀 Управлять и чужим плеером",
+                "Свой плеер не играет: кнопки идут в другой играющий (нужен доступ к уведомлениям)", true));
+        r.add(SettingItem.section("🕹 Стик-циферблат"));
+        r.add(SettingItem.toggle("dial", "🕹 Место в треке по кругу",
+                "Вверх 0%, вправо 25%, вниз 50%, влево 75%. В центр: остаёшься там", true));
+        r.add(SettingItem.toggle("dial_left", "🕹 Левый стик (иначе правый)", "", false));
+        r.add(SettingItem.toggle("keep_screen", "💡 Не гасить экран (e-ink)", "Стики и кнопки приходят в открытое окно", true));
+        r.add(SettingItem.section("🎮 Геймпад (окно открыто)"));
+        r.add(SettingItem.toggle("intercept", "🚫 Перехват кнопок",
+                "Включено: назначенная кнопка только для плеера", true));
+        r.add(SettingItem.slider("long_ms", "⏱ Долгое нажатие, мс", "", 300, 1000, 50, 500));
+        r.add(SettingItem.slider("double_ms", "⏱⏱ Двойное нажатие, мс", "", 150, 600, 50, 300));
+        r.add(SettingItem.section("⚙"));
+        r.add(SettingItem.action("pin", "📌 Ярлык на рабочий стол", ""));
+        r.add(SettingItem.action("reset", "↺ Сбросить кнопки", ""));
         return r;
     }
 
@@ -1382,7 +1560,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             // геймпад: картинка открывается по кнопке; пока она открыта, кнопки геймпада выбирают
             // назначение, а не управляют плеером
             bPad = new Button(ctx);
-            bPad.setText("Кнопки геймпада");
+            bPad.setText("🎮");
             bPad.setOnClickListener(new OnClickListener() {
                 @Override public void onClick(View v) { togglePad(); }
             });
@@ -1468,9 +1646,9 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         }
 
         private void updateListButtons() {
-            bAll.setText((listMode == 0 ? "● " : "") + "Все");
-            bLater.setText((listMode == 1 ? "● " : "") + "Позже (" + plCount(PL_LATER) + ")");
-            bFav.setText((listMode == 2 ? "● " : "") + "Избранное (" + plCount(PL_FAV) + ")");
+            bAll.setText((listMode == 0 ? "● " : "") + "♫ " + tracks.size());
+            bLater.setText((listMode == 1 ? "● " : "") + "🕓 " + plCount(PL_LATER));
+            bFav.setText((listMode == 2 ? "● " : "") + "⭐ " + plCount(PL_FAV));
         }
 
         private void togglePad() {
@@ -1480,7 +1658,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 Context c = getContext();
                 padBox.addView(mapper(c).createView(c, ""));
             }
-            bPad.setText(padOpen ? "Скрыть кнопки геймпада" : "Кнопки геймпада");
+            bPad.setText(padOpen ? "🎮 ✕" : "🎮");
         }
 
         /** Дешёвое обновление: шапка, кнопка, статус. */
@@ -1508,7 +1686,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         private void buildPlaylistRows(final Context ctx) {
             final String key = listMode == 1 ? PL_LATER : PL_FAV;
             final List<String[]> pl = plLoad(key);
-            trackHead.setText((listMode == 1 ? "Послушать позже (" : "Избранное (") + pl.size() + ")");
+            trackHead.setText((listMode == 1 ? "🕓 " : "⭐ ") + pl.size());
             for (int i = 0; i < pl.size(); i++) {
                 final int pos = i;
                 final String[] en = pl.get(i);
@@ -1528,7 +1706,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 txt.addView(ta);
                 row.addView(txt, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
                 Button rm = new Button(ctx);
-                rm.setText("Удалить");
+                rm.setText("🗑");
                 rm.setOnClickListener(new OnClickListener() {
                     @Override public void onClick(View v) {
                         int idx = findTrack(en);
@@ -1556,7 +1734,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 buildPlaylistRows(ctx);
                 return;
             }
-            trackHead.setText("Песни (" + tracks.size() + ")");
+            trackHead.setText("♫ " + tracks.size());
             for (int i = 0; i < tracks.size(); i++) {
                 final int idx = i;
                 Track tr = tracks.get(i);
