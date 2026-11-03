@@ -46,9 +46,8 @@ object ModuleShortcuts {
                 putExtra(ModuleSettingsActivity.EXTRA_TARGET, plugin.name)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
             }
-            // Значок: createIcon живёт на ISettingsProvider (как в IconFactory), иначе монограмма.
-            val bmp = try { (plugin as? ISettingsProvider)?.createIcon(192) } catch (t: Throwable) { null }
-                ?: monogram(plugin.name)
+            // Значок: картинка пользователя, значок из модуля или монограмма (как в «Недавних»).
+            val bmp = IconFactory.forModule(context, plugin, plugin.name, 192)
             val info = ShortcutInfo.Builder(context, "module_" + plugin.name)
                 .setShortLabel(plugin.name)
                 .setLongLabel(plugin.description)
@@ -59,6 +58,21 @@ object ModuleShortcuts {
         } catch (t: Throwable) {
             try { Toast.makeText(context, "Не получилось", Toast.LENGTH_SHORT).show() } catch (x: Throwable) { }
         }
+    }
+
+    /** Значок модуля заменили: обновить уже закреплённый ярлык на рабочем столе. */
+    @JvmStatic
+    fun refresh(context: Context, name: String) {
+        if (Build.VERSION.SDK_INT < 26) return
+        try {
+            val sm = context.getSystemService(ShortcutManager::class.java) ?: return
+            val id = "module_" + name
+            if (sm.pinnedShortcuts.none { it.id == id }) return
+            val plugin = try { PluginRegistry.find(context, name) } catch (t: Throwable) { null }
+            val bmp = IconFactory.forModule(context, plugin, name, 192)
+            val info = ShortcutInfo.Builder(context, id).setIcon(Icon.createWithBitmap(bmp)).build()
+            sm.updateShortcuts(listOf(info))
+        } catch (t: Throwable) { }
     }
 
     /** Заглушка значка: первая буква названия на тёмном фоне. */

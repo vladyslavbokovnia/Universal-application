@@ -105,6 +105,8 @@ class ModuleSettingsActivity : Activity() {
         if (intent.data?.scheme == "module" && intent.getStringExtra(EXTRA_FOLDER) == null) {
             ModuleWindows.record(this, target, Intent(intent).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         }
+        // окно модуля из ярлыка или «Недавних»: карточку хоста в системных «Недавних» прячем
+        if (intent.data?.scheme == "module") HostRecents.hideHostCard(this)
         ui.removeCallbacks(tick)
         if (monitors.isNotEmpty()) ui.post(tick)
     }
@@ -497,6 +499,7 @@ class ModuleSettingsActivity : Activity() {
         val key = pendingKey
         if (uri == null || key == null) return
         if (ModuleStorage.saveImage(this, target, key, uri)) {
+            if (key == ModuleStorage.KEY_ICON) ModuleShortcuts.refresh(this, target)   // ярлык на рабочем столе тоже
             notifyModule(key)
         } else {
             Toast.makeText(this, "Не удалось прочитать картинку", Toast.LENGTH_LONG).show()

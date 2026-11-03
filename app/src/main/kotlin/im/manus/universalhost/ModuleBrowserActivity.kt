@@ -93,6 +93,7 @@ class ModuleBrowserActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        HostRecents.hideHostCard(this)
         val n = name ?: return
         // как открыть это окно снова из модуля «Недавние»
         ModuleWindows.record(this, n, Intent().setClassName(packageName, "im.manus.universalhost.BrowserApp"))
