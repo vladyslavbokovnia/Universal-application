@@ -46,6 +46,7 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewParent;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.widget.Button;
@@ -76,9 +77,10 @@ import java.util.Map;
  * с ним. Пульт: если свой плеер не играет, кнопки геймпада управляют другим играющим плеером (через его
  * медиасессию; нужен доступ к уведомлениям для хоста). Кнопки назначаются на картинке геймпада: нажатие,
  * двойное и долгое. Стик-циферблат: стик отклонён — играет место трека, на которое он указывает, вернул в
- * центр — остаёшься там. Shizuku не нужен: кнопки идут через службу специальных возможностей (работает при
- * выключенном экране), стики — через неё на Android 14+, а на более старых (Android 11) — через открытое окно
- * плеера (на e-ink экран можно не гасить).
+ * центр — остаёшься там; какой стик работает циферблатом, включается на картинке геймпада (нажать стик на
+ * картинке), нажатие самого правого стика по умолчанию озвучивает процент трека. Shizuku не нужен: кнопки идут
+ * через службу специальных возможностей (работает при выключенном экране), стики — через неё на Android 14+,
+ * а на более старых (Android 11) — через открытое окно плеера (на e-ink экран можно не гасить).
  */
 public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewProvider, IKeyHandler,
         IMotionHandler, IShareHandler {
@@ -91,7 +93,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     private static final String A_NEXT = "im.manus.plugins.audioplayer.NEXT";
     private static final String A_PREV = "im.manus.plugins.audioplayer.PREV";
 
-    /** Геймпад: действия плеера — id, подпись. */
+    /** Геймпад: действия плеера — id, подпись (эмодзи в начале подписи рисуется значком на кнопке картинки). */
     private static final String[][] ACTIONS = {
             {"play_pause", "⏯ Пауза / пуск"},
             {"play", "▶ Играть"},
@@ -108,6 +110,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             {"fav", "⭐ Избранное"},
             {"delete", "🗑 Удалить (нажать дважды)"},
             {"say", "🗣 Название и сколько осталось"},
+            {"say_pct", "📊 Сколько процентов трека"},
             {"lock", "🔒 Блок касаний до выключения экрана"},
             {"stop_after", "⏹ Стоп после этого трека"},
             {"speed_up", "🐇 Быстрее"},
@@ -143,7 +146,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     private PadMapper mapper;
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 9; }
+    @Override public int getVersion() { return 10; }
     @Override public String getDescription() {
         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
@@ -868,10 +871,17 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         return plLoad(key).size();
     }
 
+    /** Громкость звуковых сигналов 10-100 (настройка «Громкость сигналов»); по умолчанию максимум. */
+    private int toneVolume() {
+        SharedPreferences p = prefs();
+        int v = p == null ? 100 : p.getInt("tone_vol", 100);
+        return Math.max(10, Math.min(100, v));
+    }
+
     /** Звуковой отклик, чтобы не смотреть на экран. */
     private void tone(int type) {
         try {
-            final ToneGenerator tg = new ToneGenerator(AudioManager.STREAM_MUSIC, 45);
+            final ToneGenerator tg = new ToneGenerator(AudioManager.STREAM_MUSIC, toneVolume());
             tg.startTone(type, 250);
             Handler hh = h;
             if (hh != null) {
@@ -1026,6 +1036,53 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             text = text + ". " + Math.max(0, left);
         }
         speak(text);
+    }
+
+    /** Доля прослушанного текущего трека 0..1: своего, а если свой не играет, то чужого плеера; -1, если узнать нельзя. */
+    private float currentFraction() {
+        try {
+            if (!isPlaying() && remoteAny()) {
+                MediaController ext = externalTarget();
+                if (ext != null) {
+                    MediaMetadata md = ext.getMetadata();
+                    PlaybackState ps = ext.getPlaybackState();
+                    long dur = md == null ? 0 : md.getLong(MediaMetadata.METADATA_KEY_DURATION);
+                    if (dur > 0 && ps != null) {
+                        long pos = ps.getPosition();
+                        if (ps.getState() == PlaybackState.STATE_PLAYING) {
+                            pos += (long) ((SystemClock.elapsedRealtime() - ps.getLastPositionUpdateTime()) * ps.getPlaybackSpeed());
+                        }
+                        return Math.max(0f, Math.min(1f, pos / (float) dur));
+                    }
+                    return -1f;
+                }
+            }
+            if (mp != null && prepared) {
+                int dur = mp.getDuration();
+                if (dur > 0) return Math.max(0f, Math.min(1f, mp.getCurrentPosition() / (float) dur));
+            }
+        } catch (Throwable t) { }
+        return -1f;
+    }
+
+    private static String ruPercent(int n) {
+        int m100 = n % 100;
+        int m10 = n % 10;
+        if (m100 >= 11 && m100 <= 14) return "процентов";
+        if (m10 == 1) return "процент";
+        if (m10 >= 2 && m10 <= 4) return "процента";
+        return "процентов";
+    }
+
+    /** Нажатие на стик-циферблат: сказать, сколько процентов трека прослушано. */
+    private void sayPercent() {
+        float f = currentFraction();
+        if (f < 0f) {
+            tone(ToneGenerator.TONE_PROP_NACK);
+            return;
+        }
+        int pct = Math.max(0, Math.min(100, Math.round(f * 100f)));
+        speak(pct + " " + ruPercent(pct));
     }
 
     private void speak(String text) {
@@ -1254,6 +1311,34 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     private float dialSent = -1f;
     private long dialSentAt;
 
+    private boolean dialOn() {
+        SharedPreferences p = prefs();
+        return p == null || p.getBoolean("dial", true);
+    }
+
+    private boolean dialLeft() {
+        SharedPreferences p = prefs();
+        return p != null && p.getBoolean("dial_left", false);
+    }
+
+    /** Переключатель на картинке геймпада: циферблат на левом (left=true) или правом стике; второе нажатие выключает. */
+    private void toggleDial(boolean left) {
+        SharedPreferences p = prefs();
+        if (p == null) return;
+        boolean here = dialOn() && dialLeft() == left;
+        SharedPreferences.Editor e = p.edit();
+        if (here) {
+            e.putBoolean("dial", false);
+        } else {
+            e.putBoolean("dial", true);
+            e.putBoolean("dial_left", left);
+        }
+        e.apply();
+        dialActive = false;
+        dialPos = -1f;
+        dialSent = -1f;
+    }
+
     /** Оси стика из события (служба или окно) -> циферблат. */
     private void dialMotion(MotionEvent e) {
         SharedPreferences p = prefs();
@@ -1368,6 +1453,15 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         m.addDefault(KeyEvent.KEYCODE_DPAD_LEFT, "t", "prev");
         m.addDefault(KeyEvent.KEYCODE_DPAD_RIGHT, "t", "next");
         m.addDefault(KeyEvent.KEYCODE_BUTTON_THUMBL, "t", "mute");
+        m.addDefault(KeyEvent.KEYCODE_BUTTON_THUMBR, "t", "say_pct");   // нажатие правого стика (циферблат по умолчанию на нём): процент трека
+        m.addToggle(KeyEvent.KEYCODE_BUTTON_THUMBL, "🕹 Циферблат на этом стике", new PadMapper.Toggle() {
+            @Override public boolean isOn() { return dialOn() && dialLeft(); }
+            @Override public void toggle() { toggleDial(true); }
+        });
+        m.addToggle(KeyEvent.KEYCODE_BUTTON_THUMBR, "🕹 Циферблат на этом стике", new PadMapper.Toggle() {
+            @Override public boolean isOn() { return dialOn() && !dialLeft(); }
+            @Override public void toggle() { toggleDial(false); }
+        });
         m.migrateLegacy("gbtn_");
         mapper = m;
         return m;
@@ -1400,6 +1494,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         if (a.equals("fav")) { addCurrentTo(PL_FAV); return; }
         if (a.equals("delete")) { deleteCurrentConfirm(); return; }
         if (a.equals("say")) { sayCurrent(); return; }
+        if (a.equals("say_pct")) { sayPercent(); return; }
         if (a.equals("lock")) { toggleTouchLock(); return; }
         if (a.equals("stop_after")) { toggleStopAfter(); return; }
         if (a.equals("speed_up")) { setSpeed(speed() + 0.1f); return; }
@@ -1441,7 +1536,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     @Override public List<SettingItem> getSettingsSchema() {
         List<SettingItem> r = new ArrayList<SettingItem>();
         r.add(SettingItem.section("🎵 Плеер"));
-        r.add(SettingItem.custom("player", "🎵 Плеер", "Песни, плейлисты, кнопки геймпада на картинке 🎮"));
+        r.add(SettingItem.custom("player", "🎵 Плеер", "Песни, плейлисты, кнопки геймпада и стик-циферблат на картинке 🎮"));
         r.add(SettingItem.toggle("newest_first", "🆕 Новые песни сверху",
                 "Список по порядку загрузки на устройство; выключено: старые сверху, новые внизу", false));
         r.add(SettingItem.toggle("resume", "📍 Помнить место в треке",
@@ -1452,11 +1547,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         r.add(SettingItem.toggle("plug_play", "🎧▶ Играть, когда наушники подключили", "", false));
         r.add(SettingItem.toggle("remote_any", "🔀 Управлять и чужим плеером",
                 "Свой плеер не играет: кнопки идут в другой играющий (нужен доступ к уведомлениям)", true));
-        r.add(SettingItem.section("🕹 Стик-циферблат"));
-        r.add(SettingItem.toggle("dial", "🕹 Место в треке по кругу",
-                "Вверх 0%, вправо 25%, вниз 50%, влево 75%. В центр: остаёшься там", true));
-        r.add(SettingItem.toggle("dial_left", "🕹 Левый стик (иначе правый)", "", false));
-        r.add(SettingItem.toggle("keep_screen", "💡 Не гасить экран (e-ink)", "Стики и кнопки приходят в открытое окно", true));
+        r.add(SettingItem.toggle("keep_screen", "💡 Не гасить экран (e-ink)",
+                "Пока открыто окно плеера: стики и кнопки приходят в него", true));
+        r.add(SettingItem.slider("tone_vol", "🔔 Громкость сигналов",
+                "Писки при удалении, плейлистах, блокировке касаний", 10, 100, 5, 100));
         r.add(SettingItem.section("🎮 Геймпад (окно открыто)"));
         r.add(SettingItem.toggle("intercept", "🚫 Перехват кнопок",
                 "Включено: назначенная кнопка только для плеера", true));
@@ -1480,6 +1574,13 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         } else if ("newest_first".equals(key)) {
             loadTracks();                            // новый порядок списка; текущий трек находится по id
             refreshUiAll();
+        } else if ("keep_screen".equals(key)) {
+            final PlayerView v = boundView;          // применяем к открытому окну сразу, а не при следующем открытии
+            if (v != null && h != null) {
+                h.post(new Runnable() {
+                    @Override public void run() { v.applyKeepScreen(); }
+                });
+            }
         } else if ("dial".equals(key) || "dial_left".equals(key)) {
             dialActive = false;
             dialPos = -1f;
@@ -1508,6 +1609,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         private Button bAll;
         private Button bLater;
         private Button bFav;
+        // строки списка всех песен: чтобы менять пометку «▶» только у двух строк и не перерисовывать весь список
+        private final List<TextView> rowTitles = new ArrayList<TextView>();
+        private final List<View> rowViews = new ArrayList<View>();
+        private int markedCur = -2;
 
         PlayerView(Context ctx) {
             super(ctx);
@@ -1609,13 +1714,24 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             return Math.round(v * getResources().getDisplayMetrics().density);
         }
 
+        /** «Не гасить экран» из настройки; вызывается при открытии окна и сразу при смене настройки. */
+        void applyKeepScreen() {
+            SharedPreferences kp = prefs();
+            setKeepScreenOn(kp == null || kp.getBoolean("keep_screen", true));
+        }
+
         @Override protected void onAttachedToWindow() {
             super.onAttachedToWindow();
             boundView = this;
-            SharedPreferences kp = prefs();
-            setKeepScreenOn(kp == null || kp.getBoolean("keep_screen", true));
+            applyKeepScreen();
             requestFocus();
             refresh();
+            // при открытии активная песня выводится в окно (один раз, без перерисовок потом)
+            postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (listMode == 0 && cur >= 0 && cur < rowViews.size()) focusRow(rowViews.get(cur));
+                }
+            }, 250);
         }
 
         @Override protected void onDetachedFromWindow() {
@@ -1680,6 +1796,48 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             bPad.setText(padOpen ? "🎮 ✕" : "🎮");
         }
 
+        /**
+         * Сменился текущий трек: пометка «▶» переносится только между двумя строками (остальной список не
+         * перерисовывается, e-ink не мигает), а новая строка выводится в окно.
+         */
+        private void markCurrent(boolean focus) {
+            if (listMode != 0 || rowTitles.size() != tracks.size()) return;
+            int old = markedCur;
+            if (old >= 0 && old < rowTitles.size()) rowTitles.get(old).setText(tracks.get(old).title);
+            if (cur >= 0 && cur < rowTitles.size()) rowTitles.get(cur).setText("▶ " + tracks.get(cur).title);
+            markedCur = cur;
+            if (focus && cur >= 0 && cur < rowViews.size()) focusRow(rowViews.get(cur));
+        }
+
+        /**
+         * Прокрутить так, чтобы строка оказалась в верхней трети окна. Список лежит внутри прокрутки экрана
+         * настроек хоста, поэтому ищем ближайшую внешнюю прокрутку. Если строка и так почти там, ничего не двигаем.
+         */
+        private void focusRow(final View row) {
+            post(new Runnable() {
+                @Override public void run() {
+                    try {
+                        ScrollView outer = PlayerView.this;
+                        ViewParent pp = getParent();
+                        while (pp instanceof View) {
+                            if (pp instanceof ScrollView) { outer = (ScrollView) pp; break; }
+                            pp = pp.getParent();
+                        }
+                        int y = 0;
+                        View x = row;
+                        while (x != outer) {
+                            y += x.getTop();
+                            ViewParent par = x.getParent();
+                            if (!(par instanceof View)) return;
+                            x = (View) par;
+                        }
+                        int target = Math.max(0, y - outer.getHeight() / 3);
+                        if (Math.abs(target - outer.getScrollY()) > dp(24)) outer.scrollTo(0, target);
+                    } catch (Throwable t) { }
+                }
+            });
+        }
+
         /** Дешёвое обновление: шапка, кнопка, статус. */
         void refreshHead() {
             boolean perm = hasPermission();
@@ -1691,8 +1849,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             Track t = (cur >= 0 && cur < tracks.size()) ? tracks.get(cur) : null;
             nowTitle.setText(t == null ? "Не играет" : "▶ " + t.title + "\n" + t.artist);
             bPlay.setText(isPlaying() ? "⏸" : "▶");
-            status.setText("Геймпад работает, пока это окно открыто и в фокусе.");
+            status.setText("Геймпад работает, пока это окно открыто и в фокусе.\n"
+                    + "Циферблат по треку: нажми стик на картинке 🎮 и включи его там.");
             if (bAll != null) updateListButtons();
+            if (cur != markedCur) markCurrent(true);
         }
 
         /** Полное обновление: шапка + список песен. */
@@ -1747,9 +1907,12 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
         private void buildTrackRows() {
             trackRows.removeAllViews();
+            rowTitles.clear();
+            rowViews.clear();
             final Context ctx = getContext();
             updateListButtons();
             if (listMode != 0) {
+                markedCur = -2;
                 buildPlaylistRows(ctx);
                 return;
             }
@@ -1791,7 +1954,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                     }
                 });
                 trackRows.addView(row);
+                rowTitles.add(tt);
+                rowViews.add(row);
             }
+            markedCur = cur;
         }
     }
 }
