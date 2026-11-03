@@ -50,6 +50,8 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.widget.Button;
@@ -1422,7 +1424,39 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
         @Override public void onWindowFocusChanged(boolean hasFocus) {
             super.onWindowFocusChanged(hasFocus);
-            if (!hasFocus) padReleaseAll();
+            if (hasFocus) applyBars(); else padReleaseAll();
+        }
+
+        @Override protected void onAttachedToWindow() {
+            super.onAttachedToWindow();
+            post(new Runnable() {
+                @Override public void run() { applyBars(); }
+            });
+        }
+
+        /**
+         * Строка состояния скрыта, пока окно держит фокус (настройка pad_focus_fullscreen): систему рулит окно в
+         * фокусе. Режим «липкий»: потянуть с верхнего края, чтобы показать на время. Навигацию не трогаем.
+         */
+        @SuppressWarnings("deprecation")
+        void applyBars() {
+            SharedPreferences p = prefs();
+            boolean hide = p == null || p.getBoolean("pad_focus_fullscreen", true);
+            try {
+                if (Build.VERSION.SDK_INT >= 30) {
+                    WindowInsetsController c = getWindowInsetsController();
+                    if (c != null) {
+                        if (hide) {
+                            c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                            c.hide(WindowInsets.Type.statusBars());
+                        } else {
+                            c.show(WindowInsets.Type.statusBars());
+                        }
+                    }
+                }
+                setSystemUiVisibility(hide
+                        ? (View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY) : 0);
+            } catch (Throwable t) { }
         }
     }
 
@@ -1758,6 +1792,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 "Пока открыто окно плеера: стики и кнопки приходят в него", true));
         r.add(SettingItem.toggle("pad_focus", "🎯 Держать фокус для геймпада",
                 "Прозрачное окно поверх экрана принимает стики и кнопки, пока геймпад подключён и окно плеера закрыто (Android 11). Минус: приложение под ним теряет фокус (клавиатура, «Назад»)", false));
+        r.add(SettingItem.toggle("pad_focus_fullscreen", "📺 Скрывать строку состояния",
+                "Пока работает окно фокуса: строка состояния скрыта (потянуть с верхнего края, чтобы показать на время)", true));
         r.add(SettingItem.slider("tone_vol", "🔔 Громкость сигналов",
                 "Писки при удалении, плейлистах, блокировке касаний", 10, 100, 5, 100));
         r.add(SettingItem.section("🎮 Геймпад (окно открыто)"));
@@ -1792,6 +1828,9 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             }
         } else if ("pad_focus".equals(key)) {
             updateFocusCatcher();
+        } else if ("pad_focus_fullscreen".equals(key)) {
+            View fv = focusView;
+            if (fv instanceof FocusCatcher) ((FocusCatcher) fv).applyBars();
         } else if ("dial".equals(key) || "dial_left".equals(key)) {
             dialActive = false;
             dialPos = -1f;
