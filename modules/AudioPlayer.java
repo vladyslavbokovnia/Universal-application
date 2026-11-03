@@ -143,7 +143,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     private PadMapper mapper;
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 8; }
+    @Override public int getVersion() { return 9; }
     @Override public String getDescription() {
         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
@@ -233,7 +233,14 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
     // ---------------------------------------------------------- список песен
 
+    /** Порядок списка: по времени добавления на устройство (DATE_ADDED); «новые сверху» включается в настройках. */
+    private boolean newestFirst() {
+        SharedPreferences p = prefs();
+        return p != null && p.getBoolean("newest_first", false);
+    }
+
     void loadTracks() {
+        long curId = (cur >= 0 && cur < tracks.size()) ? tracks.get(cur).id : Long.MIN_VALUE;
         tracks.clear();
         queue = null;
         if (appCtx == null || !hasPermission()) return;
@@ -244,11 +251,12 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 MediaStore.Audio.Media.ARTIST,
                 MediaStore.Audio.Media.DURATION
         };
+        String dir = newestFirst() ? " DESC" : " ASC";
+        String order = MediaStore.Audio.Media.DATE_ADDED + dir + ", " + MediaStore.Audio.Media._ID + dir;
         Cursor c = null;
         try {
             c = appCtx.getContentResolver().query(uri, proj,
-                    MediaStore.Audio.Media.IS_MUSIC + " != 0", null,
-                    MediaStore.Audio.Media.TITLE + " ASC");
+                    MediaStore.Audio.Media.IS_MUSIC + " != 0", null, order);
             while (c != null && c.moveToNext()) {
                 Track t = new Track();
                 t.id = c.getLong(0);
@@ -264,6 +272,12 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             // нет доступа — список останется пустым
         } finally {
             if (c != null) try { c.close(); } catch (Throwable t) { }
+        }
+        if (curId != Long.MIN_VALUE) {               // порядок мог поменяться: текущий трек находим по id
+            cur = -1;
+            for (int i = 0; i < tracks.size(); i++) {
+                if (tracks.get(i).id == curId) { cur = i; break; }
+            }
         }
         if (cur >= tracks.size()) cur = -1;
     }
@@ -1428,6 +1442,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         List<SettingItem> r = new ArrayList<SettingItem>();
         r.add(SettingItem.section("🎵 Плеер"));
         r.add(SettingItem.custom("player", "🎵 Плеер", "Песни, плейлисты, кнопки геймпада на картинке 🎮"));
+        r.add(SettingItem.toggle("newest_first", "🆕 Новые песни сверху",
+                "Список по порядку загрузки на устройство; выключено: старые сверху, новые внизу", false));
         r.add(SettingItem.toggle("resume", "📍 Помнить место в треке",
                 "Ушёл на другой трек или поставил на паузу: вернёшься туда же", true));
         r.add(SettingItem.toggle("no_auto_next", "⏹ Не переходить к следующему",
@@ -1461,6 +1477,9 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             if (m != null) m.reset();
         } else if ("remote_any".equals(key)) {
             if (!remoteAny()) ensureSession();
+        } else if ("newest_first".equals(key)) {
+            loadTracks();                            // новый порядок списка; текущий трек находится по id
+            refreshUiAll();
         } else if ("dial".equals(key) || "dial_left".equals(key)) {
             dialActive = false;
             dialPos = -1f;
