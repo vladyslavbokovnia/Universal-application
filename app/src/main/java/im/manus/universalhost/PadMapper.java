@@ -39,12 +39,22 @@ import java.util.Map;
  * У каждой кнопки три действия: нажатие, двойное, долгое. Настройка идёт блоками на странице
  * (без всплывающих окон), белый текст на тёмном фоне. Значения лежат в prefs модуля под ключами
  * "pm_&lt;код&gt;_&lt;t|d|l&gt;".
+ *
+ * Картинка занимает всю ширину без полей: размер поля считается по самым дальним кнопкам. На кнопке рисуются
+ * значки всех назначенных действий: нажатие крупно, двойное (в кружке) и долгое (в квадрате) мелко внизу.
+ * Модуль может добавить на кнопку свой переключатель (addToggle), например «циферблат на этом стике».
  */
 public final class PadMapper {
 
     /** Выполнить действие модуля (главный поток). */
     public interface Performer {
         void perform(String action);
+    }
+
+    /** Свой переключатель модуля на кнопке картинки; показывается первой строкой в блоке кнопки. */
+    public interface Toggle {
+        boolean isOn();
+        void toggle();
     }
 
     public static final int V_LS_UP = 1001;
@@ -64,33 +74,41 @@ public final class PadMapper {
     private static final String[] GK = {"t", "d", "l"};
     private static final String[] GNAME = {"Нажатие", "Двойное нажатие", "Долгое нажатие"};
 
-    /** keyCode, x, y, радиус, цвет (0 белый, 1 зелёный, 2 красный, 3 синий, 4 жёлтый), направление (1 вверх, 2 вниз, 3 влево, 4 вправо); поле 1000x700. */
+    /** Действия, у которых значок нарисован линиями; у остальных значок = эмодзи из подписи действия. */
+    private static final String[] MEDIA_ICONS = {
+        "play", "pause", "play_pause", "next", "prev", "seek_fwd", "seek_back", "stop", "vol_up", "vol_down", "mute"
+    };
+
+    /**
+     * keyCode, x, y, радиус, цвет (0 белый, 1 зелёный, 2 красный, 3 синий, 4 жёлтый), направление (1 вверх, 2 вниз, 3 влево, 4 вправо).
+     * Кнопки почти касаются друг друга и краёв поля (1000 x 690): размер поля потом подгоняется по самым дальним кнопкам.
+     */
     private static final int[][] SLOTS = {
-        {KeyEvent.KEYCODE_BUTTON_L2, 170, 45, 38, 0, 0},
-        {KeyEvent.KEYCODE_BUTTON_R2, 830, 45, 38, 0, 0},
-        {KeyEvent.KEYCODE_BUTTON_L1, 170, 125, 38, 0, 0},
-        {KeyEvent.KEYCODE_BUTTON_R1, 830, 125, 38, 0, 0},
-        {KeyEvent.KEYCODE_BUTTON_MODE, 500, 200, 44, 0, 0},
-        {KeyEvent.KEYCODE_BUTTON_SELECT, 400, 265, 30, 0, 0},
-        {KeyEvent.KEYCODE_BUTTON_START, 600, 265, 30, 0, 0},
-        {KeyEvent.KEYCODE_BUTTON_THUMBL, 230, 300, 40, 0, 0},
-        {V_LS_UP, 230, 205, 26, 0, 1},
-        {V_LS_DOWN, 230, 395, 26, 0, 2},
-        {V_LS_LEFT, 135, 300, 26, 0, 3},
-        {V_LS_RIGHT, 325, 300, 26, 0, 4},
-        {KeyEvent.KEYCODE_DPAD_UP, 370, 420, 30, 0, 1},
-        {KeyEvent.KEYCODE_DPAD_LEFT, 310, 480, 30, 0, 3},
-        {KeyEvent.KEYCODE_DPAD_RIGHT, 430, 480, 30, 0, 4},
-        {KeyEvent.KEYCODE_DPAD_DOWN, 370, 540, 30, 0, 2},
-        {KeyEvent.KEYCODE_BUTTON_THUMBR, 620, 480, 40, 0, 0},
-        {V_RS_UP, 620, 385, 26, 0, 1},
-        {V_RS_DOWN, 620, 575, 26, 0, 2},
-        {V_RS_LEFT, 525, 480, 26, 0, 3},
-        {V_RS_RIGHT, 715, 480, 26, 0, 4},
-        {KeyEvent.KEYCODE_BUTTON_Y, 790, 240, 33, 4, 0},
-        {KeyEvent.KEYCODE_BUTTON_X, 720, 310, 33, 3, 0},
-        {KeyEvent.KEYCODE_BUTTON_B, 860, 310, 33, 2, 0},
-        {KeyEvent.KEYCODE_BUTTON_A, 790, 380, 33, 1, 0},
+        {KeyEvent.KEYCODE_BUTTON_L2, 70, 70, 68, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_L1, 212, 68, 60, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_SELECT, 360, 70, 50, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_MODE, 500, 70, 55, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_START, 640, 70, 50, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_R1, 788, 68, 60, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_R2, 930, 70, 68, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_THUMBL, 230, 330, 55, 0, 0},
+        {V_LS_UP, 230, 220, 50, 0, 1},
+        {V_LS_DOWN, 230, 440, 50, 0, 2},
+        {V_LS_LEFT, 120, 330, 50, 0, 3},
+        {V_LS_RIGHT, 340, 330, 50, 0, 4},
+        {KeyEvent.KEYCODE_DPAD_UP, 330, 450, 45, 0, 1},
+        {KeyEvent.KEYCODE_DPAD_LEFT, 235, 545, 45, 0, 3},
+        {KeyEvent.KEYCODE_DPAD_RIGHT, 425, 545, 45, 0, 4},
+        {KeyEvent.KEYCODE_DPAD_DOWN, 330, 640, 45, 0, 2},
+        {KeyEvent.KEYCODE_BUTTON_THUMBR, 640, 540, 52, 0, 0},
+        {V_RS_UP, 640, 435, 45, 0, 1},
+        {V_RS_DOWN, 640, 645, 45, 0, 2},
+        {V_RS_LEFT, 535, 540, 45, 0, 3},
+        {V_RS_RIGHT, 745, 540, 45, 0, 4},
+        {KeyEvent.KEYCODE_BUTTON_Y, 770, 198, 52, 4, 0},
+        {KeyEvent.KEYCODE_BUTTON_X, 658, 310, 52, 3, 0},
+        {KeyEvent.KEYCODE_BUTTON_B, 882, 310, 52, 2, 0},
+        {KeyEvent.KEYCODE_BUTTON_A, 770, 422, 52, 1, 0},
     };
 
     private static final class KeyState {
@@ -112,13 +130,16 @@ public final class PadMapper {
     private final List<String[]> defList = new ArrayList<String[]>();
     private final SparseArray<KeyState> states = new SparseArray<KeyState>();
     private final SparseBooleanArray vstate = new SparseBooleanArray();
+    private final SparseArray<String> toggleTitle = new SparseArray<String>();
+    private final SparseArray<Toggle> toggleObj = new SparseArray<Toggle>();
     private final int[] cnt = new int[3];
     private volatile PadView view;
 
     /**
      * @param actions список действий модуля: {id, подпись}; порядок = порядок в списке выбора.
-     *                Значки есть у media-действий: play_pause, play, pause, prev, next, seek_back,
-     *                seek_fwd, stop, vol_up, vol_down, mute (остальные получают кружок).
+     *                Подпись начинается с эмодзи: он и рисуется значком на кнопке. Исключение: media-действия
+     *                (play_pause, play, pause, prev, next, seek_back, seek_fwd, stop, vol_up, vol_down, mute)
+     *                рисуются линиями.
      */
     public PadMapper(SharedPreferences prefs, String[][] actions, Performer performer) {
         this.prefs = prefs;
@@ -140,6 +161,16 @@ public final class PadMapper {
     public PadMapper addDefault(int code, String gesture, String action) {
         defs.put(key(code, gesture), action);
         defList.add(new String[]{String.valueOf(code), gesture, action});
+        return this;
+    }
+
+    /**
+     * Свой переключатель на кнопке картинки (например, циферблат на этом стике). В блоке кнопки он идёт первой
+     * строкой, а на картинке включённый отмечается дугой внутри кнопки.
+     */
+    public PadMapper addToggle(int code, String title, Toggle toggle) {
+        toggleTitle.put(code, title);
+        toggleObj.put(code, toggle);
         return this;
     }
 
@@ -550,9 +581,46 @@ public final class PadMapper {
         }
     }
 
-    private static Bitmap iconBitmap(String a, int px) {
+    private static boolean isMediaIcon(String a) {
+        for (String m : MEDIA_ICONS) {
+            if (m.equals(a)) return true;
+        }
+        return false;
+    }
+
+    /** Эмодзи в начале подписи действия («🕓 Послушать позже» → «🕓»); null, если подпись без значка. */
+    private String emojiOf(String a) {
+        for (String[] x : actions) {
+            if (!x[0].equals(a)) continue;
+            int sp = x[1].indexOf(' ');
+            return sp > 0 ? x[1].substring(0, sp) : null;
+        }
+        return null;
+    }
+
+    /** Значок любого действия: media-действия линиями, остальные эмодзи из подписи, иначе кружок. [s] — половина размера. */
+    private void drawActionIcon(Canvas c, String a, float cx, float cy, float s, int alpha) {
+        if (isNone(a) || isMediaIcon(a)) {
+            drawIcon(c, a, cx, cy, s, alpha);
+            return;
+        }
+        String e = emojiOf(a);
+        if (e == null) {
+            drawIcon(c, a, cx, cy, s, alpha);
+            return;
+        }
+        Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
+        tp.setTextSize(s * 1.7f);
+        tp.setTextAlign(Paint.Align.CENTER);
+        tp.setColor(Color.WHITE);
+        tp.setAlpha(alpha);
+        Paint.FontMetrics fm = tp.getFontMetrics();
+        c.drawText(e, cx, cy - (fm.ascent + fm.descent) / 2f, tp);
+    }
+
+    private Bitmap iconBitmap(String a, int px) {
         Bitmap b = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888);
-        drawIcon(new Canvas(b), a, px / 2f, px / 2f, px * 0.42f, 255);
+        drawActionIcon(new Canvas(b), a, px / 2f, px / 2f, px * 0.42f, 255);
         return b;
     }
 
@@ -585,7 +653,6 @@ public final class PadMapper {
         private final LinearLayout panel;
         private final TextView status;
         private final String hint;
-        private final Paint body = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
         private int hiCode = -1;
@@ -636,6 +703,7 @@ public final class PadMapper {
                     if (slotFor(code) == null) addExtra(code);
                     hiCode = code;
                     hiUntil = SystemClock.uptimeMillis() + 1200;
+                    requestLayout();
                     invalidate();
                     showEditor(code);
                 }
@@ -671,7 +739,7 @@ public final class PadMapper {
             for (int[] sl : SLOTS) all.add(sl);
             List<Integer> ex = extras();
             for (int i = 0; i < ex.size(); i++) {
-                all.add(new int[]{ex.get(i).intValue(), 70 + i * 90, 665, 32, 0, 0});
+                all.add(new int[]{ex.get(i).intValue(), 50 + i * 95, 745, 40, 0, 0});
             }
             return all;
         }
@@ -681,6 +749,21 @@ public final class PadMapper {
                 if (sl[0] == code) return sl;
             }
             return null;
+        }
+
+        /** Границы поля по самым дальним кнопкам: {minX, minY, maxX, maxY}. Картинка растягивается ровно на них, без полей. */
+        private float[] bounds() {
+            float minX = Float.MAX_VALUE;
+            float minY = Float.MAX_VALUE;
+            float maxX = -Float.MAX_VALUE;
+            float maxY = -Float.MAX_VALUE;
+            for (int[] sl : slots()) {
+                minX = Math.min(minX, sl[1] - sl[3]);
+                minY = Math.min(minY, sl[2] - sl[3]);
+                maxX = Math.max(maxX, sl[1] + sl[3]);
+                maxY = Math.max(maxY, sl[2] + sl[3]);
+            }
+            return new float[]{minX, minY, maxX, maxY};
         }
 
         @Override public boolean onKeyDown(int keyCode, KeyEvent event) {
@@ -707,21 +790,17 @@ public final class PadMapper {
 
         @Override protected void onMeasure(int wSpec, int hSpec) {
             int w = MeasureSpec.getSize(wSpec);
-            setMeasuredDimension(w, Math.round(w * 0.70f));
+            float[] b = bounds();
+            setMeasuredDimension(w, Math.round(w * (b[3] - b[1]) / (b[2] - b[0])));
         }
 
         @Override protected void onDraw(Canvas c) {
-            float sc = getWidth() / 1000f;
+            float[] b = bounds();
+            float sc = getWidth() / (b[2] - b[0]);
+            c.drawColor(Color.rgb(18, 18, 18));
             c.save();
             c.scale(sc, sc);
-
-            body.setStyle(Paint.Style.FILL);
-            body.setColor(Color.rgb(18, 18, 18));
-            c.drawRoundRect(new RectF(70, 150, 930, 615), 210, 210, body);
-            body.setStyle(Paint.Style.STROKE);
-            body.setStrokeWidth(4);
-            body.setColor(Color.rgb(110, 110, 110));
-            c.drawRoundRect(new RectF(70, 150, 930, 615), 210, 210, body);
+            c.translate(-b[0], -b[1]);
 
             boolean hi = SystemClock.uptimeMillis() < hiUntil;
             for (int[] sl : slots()) {
@@ -737,35 +816,59 @@ public final class PadMapper {
                 ring.setStyle(Paint.Style.STROKE);
                 ring.setStrokeWidth(5);
                 ring.setColor(colorOf(sl[4]));
-                c.drawCircle(x, y, r, ring);
+                c.drawCircle(x, y, r - 2.5f, ring);
                 if (hi && code == hiCode) {
                     ring.setColor(Color.WHITE);
-                    ring.setStrokeWidth(12);
-                    c.drawCircle(x, y, r + 6, ring);
+                    ring.setStrokeWidth(10);
+                    c.drawCircle(x, y, r - 7, ring);
                 }
 
                 String t = action(code, "t");
                 String d = action(code, "d");
                 String l = action(code, "l");
-                if (isNone(t) && sl[5] != 0) drawDirection(c, x, y, r, sl[5]);
-                else drawIcon(c, t, x, y, r * 0.62f, 255);
+                boolean hasD = !isNone(d);
+                boolean hasL = !isNone(l);
+                if (!hasD && !hasL) {
+                    if (isNone(t) && sl[5] != 0) drawDirection(c, x, y, r, sl[5]);
+                    else drawActionIcon(c, t, x, y, r * 0.62f, 255);
+                } else {
+                    // нажатие крупно сверху, двойное (в кружке) и долгое (в квадрате) мелко внизу
+                    float ty = y - r * 0.28f;
+                    if (isNone(t) && sl[5] != 0) drawDirection(c, x, ty, r * 0.7f, sl[5]);
+                    else drawActionIcon(c, t, x, ty, r * 0.42f, 255);
+                    float sy = y + r * 0.52f;
+                    float ss = r * 0.27f;
+                    if (hasD && hasL) {
+                        smallIcon(c, d, x - r * 0.42f, sy, ss, false);
+                        smallIcon(c, l, x + r * 0.42f, sy, ss, true);
+                    } else if (hasD) {
+                        smallIcon(c, d, x, sy, ss, false);
+                    } else {
+                        smallIcon(c, l, x, sy, ss, true);
+                    }
+                }
 
-                // метки: двойное нажатие слева (круг), долгое справа (квадрат); тёмная окантовка, чтобы читались на любом фоне
-                if (!isNone(d)) drawMark(c, x - r * 0.6f, y + r * 0.95f, false);
-                if (!isNone(l)) drawMark(c, x + r * 0.6f, y + r * 0.95f, true);
+                Toggle tg = toggleObj.get(code);
+                if (tg != null && tg.isOn()) {
+                    // включённый переключатель модуля (например, циферблат): дуга внутри кнопки
+                    ring.setStyle(Paint.Style.STROKE);
+                    ring.setStrokeWidth(6);
+                    ring.setColor(Color.WHITE);
+                    float rr = r - 12;
+                    c.drawArc(new RectF(x - rr, y - rr, x + rr, y + rr), -60, 300, false, ring);
+                }
             }
             c.restore();
             if (hi) postInvalidateDelayed(Math.max(50, hiUntil - SystemClock.uptimeMillis() + 20));
         }
 
-        private void drawMark(Canvas c, float x, float y, boolean square) {
-            fill.setStyle(Paint.Style.FILL);
-            fill.setColor(Color.BLACK);
-            if (square) c.drawRect(x - 15, y - 15, x + 15, y + 15, fill);
-            else c.drawCircle(x, y, 16, fill);
-            fill.setColor(Color.WHITE);
-            if (square) c.drawRect(x - 11, y - 11, x + 11, y + 11, fill);
-            else c.drawCircle(x, y, 12, fill);
+        private void smallIcon(Canvas c, String a, float cx, float cy, float s, boolean square) {
+            drawActionIcon(c, a, cx, cy, s, 255);
+            ring.setStyle(Paint.Style.STROKE);
+            ring.setStrokeWidth(3);
+            ring.setColor(Color.WHITE);
+            if (square) c.drawRect(cx - s * 1.2f, cy - s * 1.2f, cx + s * 1.2f, cy + s * 1.2f, ring);
+            else c.drawCircle(cx, cy, s * 1.3f, ring);
         }
 
         private void drawDirection(Canvas c, float x, float y, float r, int dir) {
@@ -805,16 +908,17 @@ public final class PadMapper {
         }
 
         private int[] slotAt(float px, float py) {
-            float sc = getWidth() / 1000f;
-            float x = px / sc;
-            float y = py / sc;
+            float[] b = bounds();
+            float sc = getWidth() / (b[2] - b[0]);
+            float x = px / sc + b[0];
+            float y = py / sc + b[1];
             int[] best = null;
             float bestD = Float.MAX_VALUE;
             for (int[] sl : slots()) {
                 float dx = x - sl[1];
                 float dy = y - sl[2];
                 float dist = (float) Math.sqrt(dx * dx + dy * dy);
-                if (dist <= sl[3] * 1.25f && dist < bestD) {
+                if (dist <= sl[3] * 1.15f && dist < bestD) {
                     best = sl;
                     bestD = dist;
                 }
@@ -906,6 +1010,17 @@ public final class PadMapper {
         private void showEditor(final int code) {
             final Context ctx = getContext();
             panelStart(slotName(code));
+            final Toggle tg = toggleObj.get(code);
+            if (tg != null) {
+                addRow(panel, null, toggleTitle.get(code) + ": " + (tg.isOn() ? "включено" : "выключено"), Color.WHITE,
+                        new View.OnClickListener() {
+                            @Override public void onClick(View v) {
+                                tg.toggle();
+                                invalidate();
+                                showEditor(code);
+                            }
+                        });
+            }
             for (int g = 0; g < 3; g++) {
                 final int gi = g;
                 String a = action(code, GK[g]);
