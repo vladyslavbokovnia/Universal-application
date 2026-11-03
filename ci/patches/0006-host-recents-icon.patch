@@ -1,0 +1,140 @@
+diff --git a/app/src/main/kotlin/im/manus/universalhost/HostRecents.kt b/app/src/main/kotlin/im/manus/universalhost/HostRecents.kt
+new file mode 100644
+index 0000000..cdc46e7
+--- /dev/null
++++ b/app/src/main/kotlin/im/manus/universalhost/HostRecents.kt
+@@ -0,0 +1,29 @@
++package im.manus.universalhost
++
++import android.app.ActivityManager
++import android.content.Context
++
++/**
++ * Карточка хоста в системных «Недавних» нужна, только когда открыт сам хост. Пока работает окно модуля,
++ * задачу хоста исключаем из Недавних, чтобы рядом с карточкой модуля не висел ещё и значок хоста;
++ * когда открывается сам хост, карточка возвращается.
++ */
++object HostRecents {
++
++    @JvmStatic
++    fun hideHostCard(context: Context) = set(context, true)
++
++    @JvmStatic
++    fun showHostCard(context: Context) = set(context, false)
++
++    private fun set(context: Context, exclude: Boolean) {
++        try {
++            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
++            for (t in am.appTasks) {
++                val comp = t.taskInfo?.baseIntent?.component ?: continue
++                if (comp.className == MainActivity::class.java.name) t.setExcludeFromRecents(exclude)
++            }
++        } catch (e: Throwable) {
++        }
++    }
++}
+diff --git a/app/src/main/kotlin/im/manus/universalhost/MainActivity.kt b/app/src/main/kotlin/im/manus/universalhost/MainActivity.kt
+index d931c99..85a9626 100644
+--- a/app/src/main/kotlin/im/manus/universalhost/MainActivity.kt
++++ b/app/src/main/kotlin/im/manus/universalhost/MainActivity.kt
+@@ -77,6 +77,7 @@ class MainActivity : Activity() {
+ 
+     override fun onResume() {
+         super.onResume()
++        HostRecents.showHostCard(this)
+         hideSystemUI()
+         render()
+         // по одному недостающему разрешению за раз; после возврата из настроек покажется следующее
+diff --git a/app/src/main/kotlin/im/manus/universalhost/ModuleBrowserActivity.kt b/app/src/main/kotlin/im/manus/universalhost/ModuleBrowserActivity.kt
+index 07fcc97..131a916 100644
+--- a/app/src/main/kotlin/im/manus/universalhost/ModuleBrowserActivity.kt
++++ b/app/src/main/kotlin/im/manus/universalhost/ModuleBrowserActivity.kt
+@@ -93,6 +93,7 @@ class ModuleBrowserActivity : Activity() {
+ 
+     override fun onResume() {
+         super.onResume()
++        HostRecents.hideHostCard(this)
+         val n = name ?: return
+         // как открыть это окно снова из модуля «Недавние»
+         ModuleWindows.record(this, n, Intent().setClassName(packageName, "im.manus.universalhost.BrowserApp"))
+diff --git a/app/src/main/kotlin/im/manus/universalhost/ModuleSettingsActivity.kt b/app/src/main/kotlin/im/manus/universalhost/ModuleSettingsActivity.kt
+index 0eefb5b..0033945 100644
+--- a/app/src/main/kotlin/im/manus/universalhost/ModuleSettingsActivity.kt
++++ b/app/src/main/kotlin/im/manus/universalhost/ModuleSettingsActivity.kt
+@@ -105,6 +105,8 @@ class ModuleSettingsActivity : Activity() {
+         if (intent.data?.scheme == "module" && intent.getStringExtra(EXTRA_FOLDER) == null) {
+             ModuleWindows.record(this, target, Intent(intent).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+         }
++        // окно модуля из ярлыка или «Недавних»: карточку хоста в системных «Недавних» прячем
++        if (intent.data?.scheme == "module") HostRecents.hideHostCard(this)
+         ui.removeCallbacks(tick)
+         if (monitors.isNotEmpty()) ui.post(tick)
+     }
+@@ -497,6 +499,7 @@ class ModuleSettingsActivity : Activity() {
+         val key = pendingKey
+         if (uri == null || key == null) return
+         if (ModuleStorage.saveImage(this, target, key, uri)) {
++            if (key == ModuleStorage.KEY_ICON) ModuleShortcuts.refresh(this, target)   // ярлык на рабочем столе тоже
+             notifyModule(key)
+         } else {
+             Toast.makeText(this, "Не удалось прочитать картинку", Toast.LENGTH_LONG).show()
+diff --git a/app/src/main/kotlin/im/manus/universalhost/ModuleShortcuts.kt b/app/src/main/kotlin/im/manus/universalhost/ModuleShortcuts.kt
+index b59d3f8..670942c 100644
+--- a/app/src/main/kotlin/im/manus/universalhost/ModuleShortcuts.kt
++++ b/app/src/main/kotlin/im/manus/universalhost/ModuleShortcuts.kt
+@@ -46,9 +46,8 @@ object ModuleShortcuts {
+                 putExtra(ModuleSettingsActivity.EXTRA_TARGET, plugin.name)
+                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
+             }
+-            // Значок: createIcon живёт на ISettingsProvider (как в IconFactory), иначе монограмма.
+-            val bmp = try { (plugin as? ISettingsProvider)?.createIcon(192) } catch (t: Throwable) { null }
+-                ?: monogram(plugin.name)
++            // Значок: картинка пользователя, значок из модуля или монограмма (как в «Недавних»).
++            val bmp = IconFactory.forModule(context, plugin, plugin.name, 192)
+             val info = ShortcutInfo.Builder(context, "module_" + plugin.name)
+                 .setShortLabel(plugin.name)
+                 .setLongLabel(plugin.description)
+@@ -61,6 +60,21 @@ object ModuleShortcuts {
+         }
+     }
+ 
++    /** Значок модуля заменили: обновить уже закреплённый ярлык на рабочем столе. */
++    @JvmStatic
++    fun refresh(context: Context, name: String) {
++        if (Build.VERSION.SDK_INT < 26) return
++        try {
++            val sm = context.getSystemService(ShortcutManager::class.java) ?: return
++            val id = "module_" + name
++            if (sm.pinnedShortcuts.none { it.id == id }) return
++            val plugin = try { PluginRegistry.find(context, name) } catch (t: Throwable) { null }
++            val bmp = IconFactory.forModule(context, plugin, name, 192)
++            val info = ShortcutInfo.Builder(context, id).setIcon(Icon.createWithBitmap(bmp)).build()
++            sm.updateShortcuts(listOf(info))
++        } catch (t: Throwable) { }
++    }
++
+     /** Заглушка значка: первая буква названия на тёмном фоне. */
+     private fun monogram(name: String): Bitmap {
+         val s = 192
+diff --git a/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml b/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+index cc73aa7..c164fd9 100644
+--- a/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
++++ b/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+@@ -1,5 +1,5 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+-    <background android:drawable="@color/black"/>
++    <background android:drawable="@android:color/transparent"/>
+     <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+ </adaptive-icon>
+diff --git a/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml b/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+index cc73aa7..c164fd9 100644
+--- a/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
++++ b/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+@@ -1,5 +1,5 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+-    <background android:drawable="@color/black"/>
++    <background android:drawable="@android:color/transparent"/>
+     <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+ </adaptive-icon>
