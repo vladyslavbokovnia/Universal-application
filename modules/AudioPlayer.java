@@ -1585,11 +1585,86 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         hh.post(focusUpdate);
     }
 
+    /** Окно плеера на экране (видно, не в фоне): оно само принимает геймпад, окно фокуса не нужно. */
+    private boolean playerOnScreen() {
+        PlayerView v = boundView;
+        return v != null && v.isAttachedToWindow() && v.getWindowVisibility() == View.VISIBLE;
+    }
+
+    private String focusWhy = "";
+    private final List<String> focusLog = new ArrayList<String>();
+    private int fcMotion;
+    private int fcKeys;
+    private long focusReaddAt;
+    private int focusNoFocusTicks;
+    private final Runnable focusTick = new Runnable() {
+        @Override public void run() { focusWatchdog(); }
+    };
+
+    /** Короткий журнал окна фокуса: его видно на экране плеера, чтобы понять, почему окно не работает. */
+    void focusLog(String msg) {
+        synchronized (focusLog) {
+            String t = new java.text.SimpleDateFormat("HH:mm:ss", Locale.US).format(new java.util.Date());
+            focusLog.add(t + " " + msg);
+            while (focusLog.size() > 10) focusLog.remove(0);
+        }
+    }
+
+    String focusReport() {
+        if (!padFocusOn()) return "🎯 Окно фокуса: настройка выключена";
+        StringBuilder sb = new StringBuilder("🎯 Окно фокуса: ");
+        View v = focusView;
+        if (v == null) sb.append("нет (").append(focusWhy.length() == 0 ? "ещё не считалось" : focusWhy).append(")");
+        else sb.append("есть, в фокусе: ").append(v.hasWindowFocus() ? "да" : "НЕТ");
+        sb.append("\nГеймпад: ").append(padPresent() ? "найден" : "не найден")
+                .append(", событий в окно: оси ").append(fcMotion).append(", кнопки ").append(fcKeys);
+        synchronized (focusLog) {
+            for (String l : focusLog) sb.append("\n").append(l);
+        }
+        return sb.toString();
+    }
+
     private void applyFocusCatcher() {
-        boolean want = svc != null && appCtx != null && padFocusOn() && boundView == null
-                && padPresent() && screenReady();
+        String why = null;
+        if (svc == null || appCtx == null) why = "нет службы специальных возможностей";
+        else if (!padFocusOn()) why = "настройка выключена";
+        else if (playerOnScreen()) why = "открыто окно плеера, оно принимает геймпад само";
+        else if (!padPresent()) why = "геймпад не найден";
+        else if (!screenReady()) why = "экран выключен или заблокирован";
+        boolean want = why == null;
+        if (!(why == null ? "" : why).equals(focusWhy)) {
+            focusWhy = why == null ? "" : why;
+            if (!want) focusLog("ждёт: " + why);
+        }
         if (want && focusView == null) addFocusCatcher();
-        else if (!want && focusView != null) removeFocusCatcher();
+        else if (!want && focusView != null) {
+            focusLog("окно снято: " + why);
+            removeFocusCatcher();
+        }
+        Handler hh = h;
+        if (hh != null) {
+            hh.removeCallbacks(focusTick);
+            if (padFocusOn() && svc != null) hh.postDelayed(focusTick, 4000);   // страховка от пропущенных событий
+        }
+    }
+
+    /** Раз в 4 с: пересчёт условий; если окно есть, но фокуса нет 8 с, окно пересоздаётся (не чаще раза в 10 с). */
+    private void focusWatchdog() {
+        applyFocusCatcher();
+        View v = focusView;
+        if (v == null || v.hasWindowFocus()) {
+            focusNoFocusTicks = 0;
+            return;
+        }
+        focusNoFocusTicks++;
+        long now = SystemClock.uptimeMillis();
+        if (focusNoFocusTicks >= 2 && now - focusReaddAt > 10000) {
+            focusReaddAt = now;
+            focusNoFocusTicks = 0;
+            focusLog("фокуса нет 8 с: окно пересоздаётся");
+            removeFocusCatcher();
+            addFocusCatcher();
+        }
     }
 
     private void addFocusCatcher() {
@@ -1608,9 +1683,11 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             focusWm = wm;
             focusView = v;
             v.requestFocus();
+            focusLog("окно добавлено");
         } catch (Throwable t) {
             focusView = null;
             focusWm = null;
+            focusLog("не удалось добавить окно: " + t);
         }
     }
 
@@ -1673,7 +1750,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             if (im != null && focusDevCb != null) im.unregisterInputDeviceListener(focusDevCb);
         } catch (Throwable t) { }
         focusDevCb = null;
-        if (h != null) h.removeCallbacks(focusUpdate);
+        if (h != null) {
+            h.removeCallbacks(focusUpdate);
+            h.removeCallbacks(focusTick);
+        }
     }
 
     /** Невидимое окно, которое держит фокус ради стиков и кнопок геймпада. */
@@ -1686,6 +1766,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
         @Override public boolean onGenericMotionEvent(MotionEvent e) {
             if ((e.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) {
+                fcMotion++;
                 PadMapper m = mapper;
                 if (m != null) {
                     try { m.onMotionEvent(e); } catch (Throwable t) { }
@@ -1700,6 +1781,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             try {
                 PadMapper m = mapper;
                 if (m != null && PadMapper.isPadEvent(e)) {
+                    if (e.getAction() == KeyEvent.ACTION_DOWN) fcKeys++;
                     m.onKeyEvent(e);
                     return true;
                 }
@@ -1716,11 +1798,13 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
         @Override public void onWindowFocusChanged(boolean hasFocus) {
             super.onWindowFocusChanged(hasFocus);
+            focusLog(hasFocus ? "фокус получен" : "фокус потерян");
             if (hasFocus) applyBars(); else padReleaseAll();
         }
 
         @Override protected void onAttachedToWindow() {
             super.onAttachedToWindow();
+            requestFocus();
             post(new Runnable() {
                 @Override public void run() { applyBars(); }
             });
@@ -2284,6 +2368,12 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             }, 250);
         }
 
+        /** Окно плеера ушло в фон или вернулось: окну фокуса пора появиться или исчезнуть. */
+        @Override protected void onWindowVisibilityChanged(int visibility) {
+            super.onWindowVisibilityChanged(visibility);
+            updateFocusCatcher();
+        }
+
         @Override protected void onDetachedFromWindow() {
             if (boundView == this) boundView = null;
             updateFocusCatcher();
@@ -2407,7 +2497,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             nowTitle.setText(t == null ? "Не играет" : "▶ " + t.title + "\n" + t.artist);
             bPlay.setText(isPlaying() ? "⏸" : "▶");
             status.setText("Геймпад работает, пока это окно открыто и в фокусе.\n"
-                    + "Циферблат по треку: нажми стик на картинке 🎮 и включи его там.");
+                    + "Циферблат по треку: нажми стик на картинке 🎮 и включи его там.\n\n" + focusReport());
             if (bAll != null) updateListButtons();
             if (cur != markedCur) markCurrent(true);
         }
