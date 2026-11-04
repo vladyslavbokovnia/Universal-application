@@ -33,6 +33,17 @@ jobs:
         set -euo pipefail
         python3 -m pip install --quiet pillow numpy scipy
         python3 ci/make_icon.py
+    # Хэш исходников хоста (без модулей): кладётся в приложение (assets) и в релиз. Приложение сравнивает свой хэш
+    # с хэшем в релизе и по точке у стрелки обновления показывает, нужно ли ставить новый APK.
+    - name: Stamp host source hash
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p app/src/main/assets
+        git ls-files -z app ci build.gradle settings.gradle gradle.properties \
+          | xargs -0 sha256sum | sha256sum | cut -d' ' -f1 | tr -d '\n' > host_hash.txt
+        cp host_hash.txt app/src/main/assets/host_hash.txt
+        echo "Host source hash: $(cat host_hash.txt)"
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
     - name: Build APK
@@ -91,9 +102,10 @@ jobs:
         set -euo pipefail
         mkdir -p release_files
         cp app/build/outputs/apk/debug/app-debug.apk release_files/app-debug.apk
+        cp host_hash.txt release_files/host_hash.txt
         cp output_modules/*.dex release_files/
         (cd output_modules && zip -q -j ../release_files/modules.zip *.dex)
         short="$(git rev-parse --short HEAD)"
-        notes="Сборка из main, коммит ${short}: $(git log -1 --pretty=%s)"$'\n\n'"app-debug.apk — приложение. modules.zip — все модули одним архивом. Отдельные файлы *.dex — по одному модулю на файл (положить в Загрузки/UniversalPlugins)."
+        notes="Сборка из main, коммит ${short}: $(git log -1 --pretty=%s)"$'\n\n'"app-debug.apk — приложение. modules.zip — все модули одним архивом. Отдельные файлы *.dex — по одному модулю на файл (положить в Загрузки/UniversalPlugins). host_hash.txt — хэш исходников приложения: по нему приложение узнаёт, нужен ли новый APK."
         gh release delete latest --cleanup-tag --yes 2>/dev/null || true
         gh release create latest release_files/* --target "$GITHUB_SHA" --title "Latest build (${short})" --notes "$notes" --latest
