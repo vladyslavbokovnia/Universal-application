@@ -17,11 +17,13 @@ import android.view.WindowInsetsController
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Toast
 import java.io.File
 
 /**
  * Экран модулей: только значки, без подписей. Тап по модулю открывает его настройки,
  * тап по папке открывает папку. Значок можно перетащить: на другой значок — папка.
+ * Справа вверху стрелка «вниз»: одно нажатие скачивает свежие модули с GitHub.
  */
 class MainActivity : Activity() {
 
@@ -29,6 +31,8 @@ class MainActivity : Activity() {
     private lateinit var scroll: ScrollView
     private lateinit var back: GlyphView
     private lateinit var gear: GlyphView
+    private lateinit var upd: GlyphView
+    private var updating = false
 
     private var layoutModel = ModuleLayout()
     private var currentFolder: String? = null
@@ -56,6 +60,11 @@ class MainActivity : Activity() {
             currentFolder?.let { openSettings(ModuleStorage.folderTarget(it), it) }
         }
         bar.addView(gear, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.END or Gravity.CENTER_VERTICAL))
+        upd = GlyphView(this, GlyphView.UPDATE)
+        upd.alpha = 0.6f
+        upd.contentDescription = "Обновить модули"
+        upd.setOnClickListener { updateModules() }
+        bar.addView(upd, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.END or Gravity.CENTER_VERTICAL))
         root.addView(bar, LinearLayout.LayoutParams(-1, dp(56)))
 
         scroll = ScrollView(this)
@@ -103,6 +112,29 @@ class MainActivity : Activity() {
         )
     }
 
+    /** Одно нажатие: скачать с GitHub изменившиеся модули в Загрузки/UniversalPlugins и перезагрузить работающие. */
+    private fun updateModules() {
+        if (updating) return
+        updating = true
+        upd.alpha = 0.25f
+        Toast.makeText(this, "Обновляю модули…", Toast.LENGTH_SHORT).show()
+        val ctx = applicationContext
+        Thread {
+            val r = ModuleUpdater.run(ctx)
+            runOnUiThread {
+                updating = false
+                upd.alpha = 0.6f
+                if (!isFinishing && !isDestroyed) {
+                    if (r.updated.isNotEmpty()) {
+                        CoreAccessibilityService.instance?.refreshIfStale()
+                        render()
+                    }
+                }
+                Toast.makeText(ctx, ModuleUpdater.summary(r), Toast.LENGTH_LONG).show()
+            }
+        }.start()
+    }
+
     private fun render() {
         plugins = PluginRegistry.scan(this)
         layoutModel = ModuleStorage.loadLayout(this)
@@ -129,6 +161,9 @@ class MainActivity : Activity() {
         val inFolder = currentFolder != null
         back.visibility = if (inFolder) View.VISIBLE else View.INVISIBLE
         gear.visibility = if (inFolder) View.VISIBLE else View.GONE
+        // в папке стрелка обновления стоит левее шестерёнки
+        (upd.layoutParams as FrameLayout.LayoutParams).rightMargin = if (inFolder) dp(56) else 0
+        upd.requestLayout()
         grid.dropOutView = if (inFolder) back else null
     }
 
@@ -207,11 +242,12 @@ class MainActivity : Activity() {
     }
 }
 
-/** Значок-кнопка без подписи: стрелка «назад» или шестерёнка. */
+/** Значок-кнопка без подписи: стрелка «назад», шестерёнка или стрелка «вниз» (обновить модули). */
 class GlyphView(context: Context, private val kind: Int) : View(context) {
     companion object {
         const val ARROW = 0
         const val GEAR = 1
+        const val UPDATE = 2
     }
 
     private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -235,6 +271,11 @@ class GlyphView(context: Context, private val kind: Int) : View(context) {
             canvas.drawLine(cx + s, cy, cx - s, cy, p)
             canvas.drawLine(cx - s, cy, cx - s * 0.3f, cy - s * 0.7f, p)
             canvas.drawLine(cx - s, cy, cx - s * 0.3f, cy + s * 0.7f, p)
+        } else if (kind == UPDATE) {
+            canvas.drawLine(cx, cy - s, cx, cy + s * 0.45f, p)
+            canvas.drawLine(cx, cy + s * 0.45f, cx - s * 0.6f, cy - s * 0.15f, p)
+            canvas.drawLine(cx, cy + s * 0.45f, cx + s * 0.6f, cy - s * 0.15f, p)
+            canvas.drawLine(cx - s * 0.9f, cy + s, cx + s * 0.9f, cy + s, p)
         } else {
             canvas.drawCircle(cx, cy, s * 0.7f, p)
             canvas.drawCircle(cx, cy, s * 0.25f, p)
