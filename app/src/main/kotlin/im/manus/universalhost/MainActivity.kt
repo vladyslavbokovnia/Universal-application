@@ -23,7 +23,10 @@ import java.io.File
 /**
  * Экран модулей: только значки, без подписей. Тап по модулю открывает его настройки,
  * тап по папке открывает папку. Значок можно перетащить: на другой значок — папка.
- * Справа вверху стрелка «вниз»: одно нажатие скачивает свежие модули с GitHub.
+ *
+ * Справа вверху стрелка «вниз». Нажатие: скачать свежие модули с GitHub. Долгое нажатие: скачать и установить
+ * новую версию самого приложения. Точка у стрелки: в релизе есть новая версия приложения (модули одним
+ * нажатием обновляются и без неё, но если сборка меняла хост, сначала нужно обновить приложение).
  */
 class MainActivity : Activity() {
 
@@ -33,6 +36,7 @@ class MainActivity : Activity() {
     private lateinit var gear: GlyphView
     private lateinit var upd: GlyphView
     private var updating = false
+    private var hostNeed: Boolean? = null
 
     private var layoutModel = ModuleLayout()
     private var currentFolder: String? = null
@@ -62,8 +66,11 @@ class MainActivity : Activity() {
         bar.addView(gear, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.END or Gravity.CENTER_VERTICAL))
         upd = GlyphView(this, GlyphView.UPDATE)
         upd.alpha = 0.6f
-        upd.contentDescription = "Обновить модули"
         upd.setOnClickListener { updateModules() }
+        upd.setOnLongClickListener {
+            updateApp()
+            true
+        }
         bar.addView(upd, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.END or Gravity.CENTER_VERTICAL))
         root.addView(bar, LinearLayout.LayoutParams(-1, dp(56)))
 
@@ -76,6 +83,7 @@ class MainActivity : Activity() {
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
 
+        applyBadge(ModuleUpdater.cachedHostNeed(applicationContext))
         hideSystemUI()
     }
 
@@ -90,6 +98,7 @@ class MainActivity : Activity() {
         CoreAccessibilityService.instance?.refreshIfStale()      // .dex обновили: работающие модули перезагрузятся
         hideSystemUI()
         render()
+        checkHost()
         // по одному недостающему разрешению за раз; после возврата из настроек покажется следующее
         PermissionGate.next(this)
     }
@@ -112,7 +121,32 @@ class MainActivity : Activity() {
         )
     }
 
-    /** Одно нажатие: скачать с GitHub изменившиеся модули в Загрузки/UniversalPlugins и перезагрузить работающие. */
+    /** Точка у стрелки: в релизе есть новая версия приложения. null: не знаем, точки нет. */
+    private fun applyBadge(need: Boolean?) {
+        hostNeed = need
+        upd.badge = need == true
+        upd.alpha = if (need == true) 1f else 0.6f
+        upd.contentDescription = if (need == true) {
+            "Обновить модули. Есть новая версия приложения: долгое нажатие обновит его"
+        } else {
+            "Обновить модули"
+        }
+    }
+
+    /** При открытии экрана (не чаще раза в 10 минут) сверяем установленное приложение с релизом. */
+    private fun checkHost() {
+        val ctx = applicationContext
+        applyBadge(ModuleUpdater.cachedHostNeed(ctx))
+        if (!ModuleUpdater.hostCheckDue(ctx)) return
+        Thread {
+            val need = ModuleUpdater.checkHost(ctx)
+            runOnUiThread {
+                if (need != null && !isFinishing && !isDestroyed) applyBadge(need)
+            }
+        }.start()
+    }
+
+    /** Нажатие: скачать с GitHub изменившиеся модули в Загрузки/UniversalPlugins и перезагрузить работающие. */
     private fun updateModules() {
         if (updating) return
         updating = true
@@ -123,14 +157,31 @@ class MainActivity : Activity() {
             val r = ModuleUpdater.run(ctx)
             runOnUiThread {
                 updating = false
-                upd.alpha = 0.6f
                 if (!isFinishing && !isDestroyed) {
+                    applyBadge(r.hostNeedsUpdate ?: hostNeed)
                     if (r.updated.isNotEmpty()) {
                         CoreAccessibilityService.instance?.refreshIfStale()
                         render()
                     }
                 }
                 Toast.makeText(ctx, ModuleUpdater.summary(r), Toast.LENGTH_LONG).show()
+            }
+        }.start()
+    }
+
+    /** Долгое нажатие: скачать новую версию приложения и открыть системный установщик. */
+    private fun updateApp() {
+        if (updating) return
+        updating = true
+        upd.alpha = 0.25f
+        Toast.makeText(this, "Скачиваю приложение…", Toast.LENGTH_SHORT).show()
+        val ctx = applicationContext
+        Thread {
+            val err = ModuleUpdater.updateApp(ctx)
+            runOnUiThread {
+                updating = false
+                if (!isFinishing && !isDestroyed) applyBadge(hostNeed)
+                if (err != null) Toast.makeText(ctx, "Не удалось обновить приложение: $err", Toast.LENGTH_LONG).show()
             }
         }.start()
     }
@@ -242,7 +293,7 @@ class MainActivity : Activity() {
     }
 }
 
-/** Значок-кнопка без подписи: стрелка «назад», шестерёнка или стрелка «вниз» (обновить модули). */
+/** Значок-кнопка без подписи: стрелка «назад», шестерёнка или стрелка «вниз» (обновление; точка = есть новая версия приложения). */
 class GlyphView(context: Context, private val kind: Int) : View(context) {
     companion object {
         const val ARROW = 0
@@ -250,11 +301,23 @@ class GlyphView(context: Context, private val kind: Int) : View(context) {
         const val UPDATE = 2
     }
 
+    var badge: Boolean = false
+        set(value) {
+            if (field != value) {
+                field = value
+                invalidate()
+            }
+        }
+
     private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         color = Color.WHITE
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
+    }
+    private val dot = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = Color.WHITE
     }
 
     init {
@@ -276,6 +339,7 @@ class GlyphView(context: Context, private val kind: Int) : View(context) {
             canvas.drawLine(cx, cy + s * 0.45f, cx - s * 0.6f, cy - s * 0.15f, p)
             canvas.drawLine(cx, cy + s * 0.45f, cx + s * 0.6f, cy - s * 0.15f, p)
             canvas.drawLine(cx - s * 0.9f, cy + s, cx + s * 0.9f, cy + s, p)
+            if (badge) canvas.drawCircle(cx + s * 1.2f, cy - s * 1.0f, 5f * d, dot)
         } else {
             canvas.drawCircle(cx, cy, s * 0.7f, p)
             canvas.drawCircle(cx, cy, s * 0.25f, p)
