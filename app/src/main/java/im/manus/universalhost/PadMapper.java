@@ -81,34 +81,36 @@ public final class PadMapper {
 
     /**
      * keyCode, x, y, радиус, цвет (0 белый, 1 зелёный, 2 красный, 3 синий, 4 жёлтый), направление (1 вверх, 2 вниз, 3 влево, 4 вправо).
-     * Кнопки почти касаются друг друга и краёв поля (1000 x 690): размер поля потом подгоняется по самым дальним кнопкам.
+     * Поле 1000 по ширине, вытянуто вниз: слева левый стик (его левая кнопка вплотную к левому краю) и крестовина,
+     * справа ABXY (кнопка B вплотную к правому краю) и правый стик. Каждая группа занимает свою половину ширины,
+     * поэтому кнопки примерно вдвое крупнее, чем при прежнем широком поле. Размер поля подгоняется по самым дальним кнопкам.
      */
     private static final int[][] SLOTS = {
-        {KeyEvent.KEYCODE_BUTTON_L2, 70, 70, 68, 0, 0},
-        {KeyEvent.KEYCODE_BUTTON_L1, 212, 68, 60, 0, 0},
-        {KeyEvent.KEYCODE_BUTTON_SELECT, 360, 70, 50, 0, 0},
-        {KeyEvent.KEYCODE_BUTTON_MODE, 500, 70, 55, 0, 0},
-        {KeyEvent.KEYCODE_BUTTON_START, 640, 70, 50, 0, 0},
-        {KeyEvent.KEYCODE_BUTTON_R1, 788, 68, 60, 0, 0},
-        {KeyEvent.KEYCODE_BUTTON_R2, 930, 70, 68, 0, 0},
-        {KeyEvent.KEYCODE_BUTTON_THUMBL, 230, 330, 55, 0, 0},
-        {V_LS_UP, 230, 220, 50, 0, 1},
-        {V_LS_DOWN, 230, 440, 50, 0, 2},
-        {V_LS_LEFT, 120, 330, 50, 0, 3},
-        {V_LS_RIGHT, 340, 330, 50, 0, 4},
-        {KeyEvent.KEYCODE_DPAD_UP, 330, 450, 45, 0, 1},
-        {KeyEvent.KEYCODE_DPAD_LEFT, 235, 545, 45, 0, 3},
-        {KeyEvent.KEYCODE_DPAD_RIGHT, 425, 545, 45, 0, 4},
-        {KeyEvent.KEYCODE_DPAD_DOWN, 330, 640, 45, 0, 2},
-        {KeyEvent.KEYCODE_BUTTON_THUMBR, 640, 540, 52, 0, 0},
-        {V_RS_UP, 640, 435, 45, 0, 1},
-        {V_RS_DOWN, 640, 645, 45, 0, 2},
-        {V_RS_LEFT, 535, 540, 45, 0, 3},
-        {V_RS_RIGHT, 745, 540, 45, 0, 4},
-        {KeyEvent.KEYCODE_BUTTON_Y, 770, 198, 52, 4, 0},
-        {KeyEvent.KEYCODE_BUTTON_X, 658, 310, 52, 3, 0},
-        {KeyEvent.KEYCODE_BUTTON_B, 882, 310, 52, 2, 0},
-        {KeyEvent.KEYCODE_BUTTON_A, 770, 422, 52, 1, 0},
+        {KeyEvent.KEYCODE_BUTTON_L2, 85, 85, 85, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_L1, 262, 85, 85, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_SELECT, 400, 85, 48, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_MODE, 500, 85, 48, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_START, 600, 85, 48, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_R1, 738, 85, 85, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_R2, 915, 85, 85, 0, 0},
+        {KeyEvent.KEYCODE_BUTTON_THUMBL, 250, 480, 80, 0, 0},
+        {V_LS_UP, 250, 310, 80, 0, 1},
+        {V_LS_DOWN, 250, 650, 80, 0, 2},
+        {V_LS_LEFT, 80, 480, 80, 0, 3},
+        {V_LS_RIGHT, 420, 480, 80, 0, 4},
+        {KeyEvent.KEYCODE_DPAD_UP, 250, 822, 80, 0, 1},
+        {KeyEvent.KEYCODE_DPAD_LEFT, 135, 937, 80, 0, 3},
+        {KeyEvent.KEYCODE_DPAD_RIGHT, 365, 937, 80, 0, 4},
+        {KeyEvent.KEYCODE_DPAD_DOWN, 250, 1052, 80, 0, 2},
+        {KeyEvent.KEYCODE_BUTTON_THUMBR, 760, 965, 75, 0, 0},
+        {V_RS_UP, 760, 805, 75, 0, 1},
+        {V_RS_DOWN, 760, 1125, 75, 0, 2},
+        {V_RS_LEFT, 600, 965, 75, 0, 3},
+        {V_RS_RIGHT, 920, 965, 75, 0, 4},
+        {KeyEvent.KEYCODE_BUTTON_Y, 760, 320, 80, 4, 0},
+        {KeyEvent.KEYCODE_BUTTON_X, 600, 480, 80, 3, 0},
+        {KeyEvent.KEYCODE_BUTTON_B, 920, 480, 80, 2, 0},
+        {KeyEvent.KEYCODE_BUTTON_A, 760, 640, 80, 1, 0},
     };
 
     private static final class KeyState {
@@ -739,7 +741,7 @@ public final class PadMapper {
             for (int[] sl : SLOTS) all.add(sl);
             List<Integer> ex = extras();
             for (int i = 0; i < ex.size(); i++) {
-                all.add(new int[]{ex.get(i).intValue(), 50 + i * 95, 745, 40, 0, 0});
+                all.add(new int[]{ex.get(i).intValue(), 60 + i * 100, 1290, 45, 0, 0});
             }
             return all;
         }

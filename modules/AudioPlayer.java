@@ -2238,6 +2238,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             body.setOrientation(LinearLayout.VERTICAL);
             int p = dp(12);
             body.setPadding(p, p, p, p);
+            body.setClipToPadding(false);                    // схема геймпада выходит в поля до краёв экрана
             addView(body, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
             setFocusable(true);
             setFocusableInTouchMode(true);
@@ -2315,7 +2316,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             body.addView(bPad);
             padBox = new LinearLayout(ctx);
             padBox.setOrientation(LinearLayout.VERTICAL);
-            body.addView(padBox);
+            LinearLayout.LayoutParams padLp = new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
+            padLp.leftMargin = -dp(12);
+            padLp.rightMargin = -dp(12);
+            body.addView(padBox, padLp);
 
             // песни
             trackHead = new TextView(ctx);

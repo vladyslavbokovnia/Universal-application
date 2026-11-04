@@ -283,7 +283,12 @@ class ModuleSettingsActivity : Activity() {
             SettingItem.MONITOR -> content.addView(monitorRow(item))
             SettingItem.CUSTOM -> (monitorPlugin as? ISettingsViewProvider)?.let { provider ->
                 try {
-                    content.addView(provider.createSettingsView(this, item.key))
+                    // вид модуля на всю ширину экрана: отступы списка (16 dp) компенсируются отрицательными полями
+                    content.clipToPadding = false
+                    val lp = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { setMargins(-dp(16), 0, -dp(16), 0) }
+                    content.addView(provider.createSettingsView(this, item.key), lp)
                 } catch (t: Throwable) {
                     content.addView(hint("Не удалось построить вид: " + t.message))
                 }
