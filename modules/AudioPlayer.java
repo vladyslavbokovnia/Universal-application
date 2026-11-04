@@ -18,6 +18,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.database.ContentObserver;
 import android.database.Cursor;
 import android.hardware.input.InputManager;
 import android.graphics.Bitmap;
@@ -27,6 +28,7 @@ import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
 import android.media.MediaMetadata;
 import android.media.MediaPlayer;
+import android.media.MediaScannerConnection;
 import android.media.PlaybackParams;
 import android.media.ToneGenerator;
 import android.media.session.MediaController;
@@ -38,6 +40,7 @@ import android.speech.tts.UtteranceProgressListener;
 import android.graphics.PixelFormat;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
@@ -69,11 +72,14 @@ import im.manus.universalhost.IShareHandler;
 import im.manus.universalhost.PadMapper;
 import im.manus.universalhost.SettingItem;
 
+import java.io.File;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Аудиоплеер и пульт в одном модуле.
@@ -86,6 +92,10 @@ import java.util.Map;
  * картинке), нажатие самого правого стика по умолчанию озвучивает процент трека. Shizuku не нужен: кнопки идут
  * через службу специальных возможностей (работает при выключенном экране), стики — через неё на Android 14+,
  * а на более старых (Android 11) — через открытое окно плеера (на e-ink экран можно не гасить).
+ *
+ * Списки: «Все песни» (без тех, что перенесены в плейлисты), «Послушать позже» и «Избранное». Трек, добавленный в
+ * плейлист, из общего списка пропадает; вернуть его можно кнопкой «↩» в плейлисте. Следующий и предыдущий идут по
+ * тому списку, с которого начали играть; кнопкой геймпада «Сменить список» можно перейти на следующий список.
  */
 public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewProvider, IKeyHandler,
         IMotionHandler, IShareHandler {
@@ -113,6 +123,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             {"mute", "🔇 Без звука"},
             {"later", "🕓 Послушать позже"},
             {"fav", "⭐ Избранное"},
+            {"pl_switch", "🔀 Сменить список (все / позже / избранное)"},
             {"delete", "🗑 Удалить (нажать дважды)"},
             {"say", "🗣 Название и сколько осталось"},
             {"say_pct", "📊 Сколько процентов трека"},
@@ -142,17 +153,26 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     private boolean prepared = false;
     private final List<Track> tracks = new ArrayList<Track>();
     private int cur = -1;
-    /** Очередь из плейлиста (индексы в tracks); null: играем всю библиотеку по порядку. */
+    /** Очередь из плейлиста (индексы в tracks); null: играем общий список (без треков из плейлистов) по порядку. */
     private int[] queue;
+    /** С какого списка начали играть: 0 все песни, 1 «Послушать позже», 2 «Избранное». */
+    private int listSrc = 0;
     private boolean stopAfter;
     private int resumeTo;
     private MediaSession session;
     private BroadcastReceiver cmdReceiver;
     private PlayerView boundView;
     private PadMapper mapper;
+    private ContentObserver mediaObs;
+    private volatile boolean scanning;
+    private final Runnable reloadR = new Runnable() {
+        @Override public void run() {
+            if (reloadIfChanged()) refreshUiAll();
+        }
+    };
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 10; }
+    @Override public int getVersion() { return 11; }
     @Override public String getDescription() {
         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
@@ -164,6 +184,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         svc = (context instanceof AccessibilityService) ? (AccessibilityService) context : null;
         if (!remoteAny()) ensureSession();   // свой плеер всегда главный: гарнитура и системные клавиши идут сюда сразу
         loadTracks();
+        ensureObserver();
         mapper(context);
         registerFocusWatch();
         updateFocusCatcher();
@@ -172,6 +193,11 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     @Override public void stop() {
         unregisterFocusWatch();
         removeFocusCatcher();
+        try {
+            if (mediaObs != null && appCtx != null) appCtx.getContentResolver().unregisterContentObserver(mediaObs);
+        } catch (Throwable t) { }
+        mediaObs = null;
+        if (h != null) h.removeCallbacks(reloadR);
         rememberPos();
         releaseHeadset();
         unlockTouch();
@@ -252,53 +278,230 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         return p != null && p.getBoolean("newest_first", false);
     }
 
+    /**
+     * Перечитывает песни из медиатеки. Текущий трек и очередь плейлиста находятся заново по id (порядок мог
+     * поменяться, появились новые песни); песни из «Поделиться» остаются в начале списка.
+     */
     void loadTracks() {
         long curId = (cur >= 0 && cur < tracks.size()) ? tracks.get(cur).id : Long.MIN_VALUE;
+        int[] q0 = queue;
+        long[] qIds = null;
+        if (q0 != null) {
+            qIds = new long[q0.length];
+            for (int k = 0; k < q0.length; k++) {
+                qIds[k] = (q0[k] >= 0 && q0[k] < tracks.size()) ? tracks.get(q0[k]).id : Long.MIN_VALUE;
+            }
+        }
+        List<Track> shared = new ArrayList<Track>();
+        for (Track t : tracks) if (t.id < 0) shared.add(t);
         tracks.clear();
         queue = null;
-        if (appCtx == null || !hasPermission()) return;
-        Uri uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI;
-        String[] proj = {
-                MediaStore.Audio.Media._ID,
-                MediaStore.Audio.Media.TITLE,
-                MediaStore.Audio.Media.ARTIST,
-                MediaStore.Audio.Media.DURATION
-        };
-        String dir = newestFirst() ? " DESC" : " ASC";
-        String order = MediaStore.Audio.Media.DATE_ADDED + dir + ", " + MediaStore.Audio.Media._ID + dir;
-        Cursor c = null;
-        try {
-            c = appCtx.getContentResolver().query(uri, proj,
-                    MediaStore.Audio.Media.IS_MUSIC + " != 0", null, order);
-            while (c != null && c.moveToNext()) {
-                Track t = new Track();
-                t.id = c.getLong(0);
-                t.title = c.getString(1);
-                if (t.title == null || t.title.length() == 0) t.title = "Без названия";
-                t.artist = c.getString(2);
-                if (t.artist == null || t.artist.length() == 0) t.artist = "Неизвестный исполнитель";
-                t.dur = c.getLong(3);
-                t.uri = ContentUris.withAppendedId(uri, t.id);
-                tracks.add(t);
+        tracks.addAll(shared);
+        if (appCtx != null && hasPermission()) {
+            Uri uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI;
+            String[] proj = {
+                    MediaStore.Audio.Media._ID,
+                    MediaStore.Audio.Media.TITLE,
+                    MediaStore.Audio.Media.ARTIST,
+                    MediaStore.Audio.Media.DURATION
+            };
+            String dir = newestFirst() ? " DESC" : " ASC";
+            String order = MediaStore.Audio.Media.DATE_ADDED + dir + ", " + MediaStore.Audio.Media._ID + dir;
+            Cursor c = null;
+            try {
+                c = appCtx.getContentResolver().query(uri, proj,
+                        MediaStore.Audio.Media.IS_MUSIC + " != 0", null, order);
+                while (c != null && c.moveToNext()) {
+                    Track t = new Track();
+                    t.id = c.getLong(0);
+                    t.title = c.getString(1);
+                    if (t.title == null || t.title.length() == 0) t.title = "Без названия";
+                    t.artist = c.getString(2);
+                    if (t.artist == null || t.artist.length() == 0) t.artist = "Неизвестный исполнитель";
+                    t.dur = c.getLong(3);
+                    t.uri = ContentUris.withAppendedId(uri, t.id);
+                    tracks.add(t);
+                }
+            } catch (Throwable t) {
+                // нет доступа — список останется пустым
+            } finally {
+                if (c != null) try { c.close(); } catch (Throwable t) { }
             }
-        } catch (Throwable t) {
-            // нет доступа — список останется пустым
-        } finally {
-            if (c != null) try { c.close(); } catch (Throwable t) { }
         }
-        if (curId != Long.MIN_VALUE) {               // порядок мог поменяться: текущий трек находим по id
+        if (curId != Long.MIN_VALUE) {
             cur = -1;
             for (int i = 0; i < tracks.size(); i++) {
                 if (tracks.get(i).id == curId) { cur = i; break; }
             }
         }
         if (cur >= tracks.size()) cur = -1;
+        if (qIds != null) {
+            List<Integer> nq = new ArrayList<Integer>();
+            for (int k = 0; k < qIds.length; k++) {
+                if (qIds[k] == Long.MIN_VALUE) continue;
+                for (int i = 0; i < tracks.size(); i++) {
+                    if (tracks.get(i).id == qIds[k]) { nq.add(Integer.valueOf(i)); break; }
+                }
+            }
+            if (!nq.isEmpty()) {
+                int[] arr = new int[nq.size()];
+                for (int k = 0; k < arr.length; k++) arr[k] = nq.get(k).intValue();
+                queue = arr;
+            }
+        }
+    }
+
+    private long sigOf() {
+        long s = tracks.size();
+        for (Track t : tracks) s = s * 1000003L + t.id;
+        return s;
+    }
+
+    /** Перечитать песни; true, если список изменился (появились или пропали песни, поменялся порядок). */
+    boolean reloadIfChanged() {
+        long before = sigOf();
+        loadTracks();
+        return sigOf() != before;
+    }
+
+    /** Следим за медиатекой: новая песня появляется в списке сама, без перезапуска окна. */
+    private void ensureObserver() {
+        if (mediaObs != null || appCtx == null || h == null) return;
+        try {
+            mediaObs = new ContentObserver(h) {
+                @Override public void onChange(boolean selfChange) {
+                    h.removeCallbacks(reloadR);
+                    h.postDelayed(reloadR, 1000);
+                }
+            };
+            appCtx.getContentResolver().registerContentObserver(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, true, mediaObs);
+        } catch (Throwable t) {
+            mediaObs = null;
+        }
+    }
+
+    private static boolean isAudioName(String n) {
+        String s = n.toLowerCase(Locale.ROOT);
+        return s.endsWith(".mp3") || s.endsWith(".m4a") || s.endsWith(".flac") || s.endsWith(".ogg")
+                || s.endsWith(".opus") || s.endsWith(".wav") || s.endsWith(".aac") || s.endsWith(".wma");
+    }
+
+    private void collectAudio(File dir, int depth, HashSet<String> known, List<String> out) {
+        if (dir == null || depth > 4 || out.size() >= 500) return;
+        File[] list = dir.listFiles();
+        if (list == null) return;
+        for (File f : list) {
+            String n = f.getName();
+            if (n.startsWith(".")) continue;
+            if (f.isDirectory()) collectAudio(f, depth + 1, known, out);
+            else if (isAudioName(n) && !known.contains(f.getAbsolutePath())) out.add(f.getAbsolutePath());
+        }
+    }
+
+    /**
+     * Кнопка «🔄»: песни, которых система ещё не внесла в медиатеку (скачали или скопировали файлом), ищем в
+     * папках Music, Download и Podcasts и просим систему добавить; потом список перечитывается.
+     */
+    void scanNewFiles() {
+        final Context c = appCtx;
+        if (c == null || scanning) return;
+        scanning = true;
+        toast("Ищу новые песни…");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final List<String> fresh = new ArrayList<String>();
+                try {
+                    HashSet<String> known = new HashSet<String>();
+                    Cursor cu = null;
+                    try {
+                        cu = c.getContentResolver().query(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                                new String[]{MediaStore.Audio.Media.DATA}, null, null, null);
+                        while (cu != null && cu.moveToNext()) {
+                            String d = cu.getString(0);
+                            if (d != null) known.add(d);
+                        }
+                    } catch (Throwable t) {
+                    } finally {
+                        if (cu != null) try { cu.close(); } catch (Throwable t) { }
+                    }
+                    String[] dirs = {Environment.DIRECTORY_MUSIC, Environment.DIRECTORY_DOWNLOADS, Environment.DIRECTORY_PODCASTS};
+                    for (String d : dirs) collectAudio(Environment.getExternalStoragePublicDirectory(d), 0, known, fresh);
+                } catch (Throwable t) { }
+                final Handler hh = h;
+                if (fresh.isEmpty()) {
+                    scanning = false;
+                    toast("Новых песен нет");
+                    if (hh != null) hh.post(reloadR);
+                    return;
+                }
+                toast("Добавляю песен: " + fresh.size());
+                final AtomicInteger left = new AtomicInteger(fresh.size());
+                try {
+                    MediaScannerConnection.scanFile(c, fresh.toArray(new String[0]), null,
+                            new MediaScannerConnection.OnScanCompletedListener() {
+                                @Override public void onScanCompleted(String path, Uri uri) {
+                                    if (left.decrementAndGet() <= 0) {
+                                        scanning = false;
+                                        if (hh != null) hh.post(reloadR);
+                                    }
+                                }
+                            });
+                } catch (Throwable t) {
+                    scanning = false;
+                }
+            }
+        }).start();
     }
 
     static String fmtDur(long ms) {
         if (ms <= 0) return "";
         long s = ms / 1000;
         return (s / 60) + ":" + String.format("%02d", s % 60);
+    }
+
+    // ---------------------------------------------------------- общий список и очередь
+
+    /** Для каждой песни: лежит ли она в «Послушать позже» или «Избранном» (такие в общем списке не показываются). */
+    private boolean[] hiddenFlags() {
+        boolean[] hid = new boolean[tracks.size()];
+        HashSet<String> uris = new HashSet<String>();
+        HashSet<String> names = new HashSet<String>();
+        String[] keys = {PL_LATER, PL_FAV};
+        for (int k = 0; k < keys.length; k++) {
+            for (String[] e : plLoad(keys[k])) {
+                if (!e[0].equals("-")) uris.add(e[0]);
+                else names.add((e[1] + "\t" + e[2]).toLowerCase(Locale.ROOT));
+            }
+        }
+        if (uris.isEmpty() && names.isEmpty()) return hid;
+        for (int i = 0; i < hid.length; i++) {
+            Track t = tracks.get(i);
+            if (t.uri != null && uris.contains(t.uri.toString())) hid[i] = true;
+            else if (names.contains((t.title + "\t" + t.artist).toLowerCase(Locale.ROOT))) hid[i] = true;
+        }
+        return hid;
+    }
+
+    /** Номера песен общего списка: все, кроме перенесённых в плейлисты, в порядке списка. */
+    private int[] generalArray() {
+        boolean[] hid = hiddenFlags();
+        int n = 0;
+        for (int i = 0; i < hid.length; i++) if (!hid[i]) n++;
+        int[] r = new int[n];
+        int k = 0;
+        for (int i = 0; i < hid.length; i++) if (!hid[i]) r[k++] = i;
+        return r;
+    }
+
+    /** Очередь, по которой идут «следующий» и «предыдущий»: плейлист, иначе общий список, иначе вся медиатека. */
+    private int[] effectiveQueue() {
+        int[] q = queue;
+        if (q != null && q.length > 0) return q;
+        int[] g = generalArray();
+        if (g.length > 0) return g;
+        int[] all = new int[tracks.size()];
+        for (int i = 0; i < all.length; i++) all[i] = i;
+        return all;
     }
 
     // ---------------------------------------------------------- воспроизведение
@@ -368,13 +571,19 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     public void toggle() {
         extPkg = null;
         if (mp == null || !prepared) {
-            if (!tracks.isEmpty()) playAt(cur >= 0 ? cur : 0);
+            if (!tracks.isEmpty()) playAt(cur >= 0 ? cur : firstIndex());
             return;
         }
         try {
             if (mp.isPlaying()) { mp.pause(); rememberPos(); } else mp.start();
             afterChange();
         } catch (Throwable t) { }
+    }
+
+    /** С чего начинать, если ничего не выбрано: первая песня общего списка. */
+    private int firstIndex() {
+        int[] q = effectiveQueue();
+        return q.length > 0 ? q[0] : 0;
     }
 
     public void pause() {
@@ -387,23 +596,35 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         } catch (Throwable t) { }
     }
 
-    public void next() {
-        int[] q = queue;
-        if (q != null && q.length > 0) {
-            playAt(q[(queuePos(q) + 1) % q.length]);
-            return;
+    /**
+     * Номер следующей (dir = 1) или предыдущей (dir = -1) песни в текущей очереди. Если текущей песни в очереди нет
+     * (её только что перенесли в плейлист), берём ближайшую по порядку списка.
+     */
+    private int stepIdx(int dir) {
+        boolean byIdx = queue == null || queue.length == 0;
+        int[] q = effectiveQueue();
+        if (q.length == 0) return -1;
+        int p = queuePos(q);
+        if (p >= 0) return q[(p + dir + q.length) % q.length];
+        if (byIdx) {
+            if (dir > 0) {
+                for (int k = 0; k < q.length; k++) if (q[k] > cur) return q[k];
+                return q[0];
+            }
+            for (int k = q.length - 1; k >= 0; k--) if (q[k] < cur) return q[k];
+            return q[q.length - 1];
         }
-        if (!tracks.isEmpty()) playAt((cur + 1) % tracks.size());
+        return dir > 0 ? q[0] : q[q.length - 1];
+    }
+
+    public void next() {
+        int i = stepIdx(1);
+        if (i >= 0) playAt(i);
     }
 
     public void prev() {
-        int[] q = queue;
-        if (q != null && q.length > 0) {
-            int p = queuePos(q);
-            playAt(q[p < 0 ? q.length - 1 : (p - 1 + q.length) % q.length]);
-            return;
-        }
-        if (!tracks.isEmpty()) playAt((cur - 1 + tracks.size()) % tracks.size());
+        int i = stepIdx(-1);
+        if (i >= 0) playAt(i);
     }
 
     private int queuePos(int[] q) {
@@ -449,6 +670,14 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         if (v == null || h == null) return;
         h.post(new Runnable() {
             @Override public void run() { v.refresh(); }
+        });
+    }
+
+    private void setViewMode(final int mode) {
+        final PlayerView v = boundView;
+        if (v == null || h == null) return;
+        h.post(new Runnable() {
+            @Override public void run() { v.setMode(mode); }
         });
     }
 
@@ -638,9 +867,22 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             } catch (Throwable th) { }
             cur = -1;
             int[] q = queue;
-            if (q != null) playAt(q[Math.max(0, qp) % q.length]);
-            else if (!tracks.isEmpty()) playAt(Math.min(i, tracks.size() - 1));
-            else afterChange();
+            if (q != null) {
+                playAt(q[Math.max(0, qp) % q.length]);
+            } else {
+                int[] g = generalArray();             // после удаления номера сдвинулись: следующая песня теперь на месте i
+                if (g.length > 0) {
+                    int pick = g[g.length - 1];
+                    for (int k = 0; k < g.length; k++) {
+                        if (g[k] >= i) { pick = g[k]; break; }
+                    }
+                    playAt(pick);
+                } else if (!tracks.isEmpty()) {
+                    playAt(Math.min(i, tracks.size() - 1));
+                } else {
+                    afterChange();
+                }
+            }
         } else {
             if (i < cur) cur--;
         }
@@ -685,6 +927,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             tr.uri = stream;
             tracks.add(0, tr);
             queue = null;
+            listSrc = 0;
             ensureSession();
             ensureReceiver();
             playAt(0);
@@ -869,6 +1112,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         return a[1].equalsIgnoreCase(b[1]) && a[2].equalsIgnoreCase(b[2]);
     }
 
+    /** Убрать запись из плейлиста: трек, если он больше ни в одном плейлисте, снова виден в общем списке. */
     void plRemove(String key, int pos) {
         List<String[]> l = plLoad(key);
         if (pos >= 0 && pos < l.size()) {
@@ -930,7 +1174,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         return new String[]{t.uri == null ? "-" : t.uri.toString(), t.title, t.artist};
     }
 
-    /** Кнопка геймпада: текущий трек в плейлист. Отклик: «позже» и «избранное» звучат по-разному, повтор и «нечего добавлять» тоже. */
+    /**
+     * Кнопка геймпада: текущий трек переносится в плейлист (из общего списка он пропадает). Отклик: «позже» и
+     * «избранное» звучат по-разному, повтор и «нечего добавлять» тоже.
+     */
     private void addCurrentTo(String key) {
         String[] e = currentEntry();
         if (e == null) { tone(ToneGenerator.TONE_PROP_NACK); return; }
@@ -941,7 +1188,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         l.add(e);
         plSave(key, l);
         tone(key.equals(PL_FAV) ? ToneGenerator.TONE_PROP_ACK : ToneGenerator.TONE_PROP_PROMPT);
-        refreshUiHead();
+        refreshUiAll();
     }
 
     /** Номер трека в библиотеке для записи плейлиста (по адресу, затем по названию и исполнителю) или -1. */
@@ -977,7 +1224,48 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         int[] arr = new int[q.size()];
         for (int i = 0; i < arr.length; i++) arr[i] = q.get(i).intValue();
         queue = arr;
+        listSrc = key.equals(PL_FAV) ? 2 : 1;
         playAt(arr[start]);
+    }
+
+    /** Играть общий список с выбранной песни. */
+    void playFromGeneral(int idx) {
+        queue = null;
+        listSrc = 0;
+        playAt(idx);
+    }
+
+    private int firstPlayable(String key) {
+        List<String[]> pl = plLoad(key);
+        for (int i = 0; i < pl.size(); i++) {
+            if (findTrack(pl.get(i)) >= 0) return i;
+        }
+        return -1;
+    }
+
+    private static String listName(int s) {
+        return s == 1 ? "Послушать позже" : (s == 2 ? "Избранное" : "Все песни");
+    }
+
+    /** Кнопка геймпада: перейти на следующий непустой список (все, позже, избранное), начать с его первой песни и назвать его. */
+    private void switchList() {
+        for (int step = 1; step <= 2; step++) {
+            int s = (listSrc + step) % 3;
+            if (s == 0) {
+                int[] g = generalArray();
+                if (g.length == 0) continue;
+                playFromGeneral(g[0]);
+            } else {
+                String key = s == 1 ? PL_LATER : PL_FAV;
+                int pos = firstPlayable(key);
+                if (pos < 0) continue;
+                playFromList(key, pos);
+            }
+            setViewMode(listSrc);
+            speak(listName(listSrc));
+            return;
+        }
+        tone(ToneGenerator.TONE_PROP_NACK);
     }
 
     /** Удалённый с устройства трек убираем из обоих плейлистов (по адресу). */
@@ -1025,7 +1313,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         @Override public void onAudioFocusChange(int change) { }
     };
 
-    /** Название трека и после него только число: сколько треков осталось до конца списка. */
+    /** Название трека и после него только число: сколько треков осталось до конца текущего списка. */
     private void sayCurrent() {
         String[] e = currentEntry();
         if (e == null || e[1] == null || e[1].length() == 0) {
@@ -1035,13 +1323,17 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         String text = e[1];
         boolean own = !e[0].equals("-") && cur >= 0 && cur < tracks.size();
         if (own) {
-            int[] q = queue;
+            boolean byIdx = queue == null || queue.length == 0;
+            int[] q = effectiveQueue();
+            int p = queuePos(q);
             int left;
-            if (q != null && q.length > 0) {
-                int p = queuePos(q);
-                left = p < 0 ? q.length : q.length - 1 - p;
+            if (p >= 0) {
+                left = q.length - 1 - p;
+            } else if (byIdx) {
+                left = 0;
+                for (int k = 0; k < q.length; k++) if (q[k] > cur) left++;
             } else {
-                left = tracks.size() - 1 - cur;
+                left = q.length;
             }
             text = text + ". " + Math.max(0, left);
         }
@@ -1723,6 +2015,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         if (a.equals("focus")) { toggleFocusPref(); return; }
         if (a.equals("later")) { addCurrentTo(PL_LATER); return; }
         if (a.equals("fav")) { addCurrentTo(PL_FAV); return; }
+        if (a.equals("pl_switch")) { switchList(); return; }
         if (a.equals("delete")) { deleteCurrentConfirm(); return; }
         if (a.equals("say")) { sayCurrent(); return; }
         if (a.equals("say_pct")) { sayPercent(); return; }
@@ -1849,9 +2142,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         private Button bAll;
         private Button bLater;
         private Button bFav;
-        // строки списка всех песен: чтобы менять пометку «▶» только у двух строк и не перерисовывать весь список
+        // строки общего списка: чтобы менять пометку «▶» только у двух строк и не перерисовывать весь список
         private final List<TextView> rowTitles = new ArrayList<TextView>();
         private final List<View> rowViews = new ArrayList<View>();
+        private final List<Integer> rowIdx = new ArrayList<Integer>();   // номер песни в tracks для каждой строки
         private int markedCur = -2;
 
         PlayerView(Context ctx) {
@@ -1910,15 +2204,21 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             ctrls.addView(bNext);
             body.addView(ctrls);
 
-            // списки: все песни / «Послушать позже» / «Избранное»
+            // списки: все песни / «Послушать позже» / «Избранное», справа «🔄» (найти новые песни)
             LinearLayout lists = new LinearLayout(ctx);
             lists.setOrientation(LinearLayout.HORIZONTAL);
             bAll = listButton(ctx, 0);
             bLater = listButton(ctx, 1);
             bFav = listButton(ctx, 2);
+            Button bScan = new Button(ctx);
+            bScan.setText("🔄");
+            bScan.setOnClickListener(new OnClickListener() {
+                @Override public void onClick(View v) { scanNewFiles(); }
+            });
             lists.addView(bAll, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
             lists.addView(bLater, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
             lists.addView(bFav, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
+            lists.addView(bScan, new LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT));
             body.addView(lists);
 
             // геймпад: картинка открывается по кнопке; пока она открыта, кнопки геймпада выбирают
@@ -1960,17 +2260,26 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             setKeepScreenOn(kp == null || kp.getBoolean("keep_screen", true));
         }
 
+        /** Переключить показанный список (например, после «Сменить список» с геймпада). */
+        void setMode(int mode) {
+            listMode = mode;
+            buildTrackRows();
+        }
+
         @Override protected void onAttachedToWindow() {
             super.onAttachedToWindow();
             boundView = this;
             updateFocusCatcher();
             applyKeepScreen();
             requestFocus();
+            ensureObserver();
+            reloadIfChanged();                       // песни могли появиться, пока окно было закрыто
             refresh();
             // при открытии активная песня выводится в окно (один раз, без перерисовок потом)
             postDelayed(new Runnable() {
                 @Override public void run() {
-                    if (listMode == 0 && cur >= 0 && cur < rowViews.size()) focusRow(rowViews.get(cur));
+                    int pos = rowIdx.indexOf(Integer.valueOf(cur));
+                    if (listMode == 0 && pos >= 0 && pos < rowViews.size()) focusRow(rowViews.get(pos));
                 }
             }, 250);
         }
@@ -2008,7 +2317,12 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
         @Override public void onWindowFocusChanged(boolean hasFocus) {
             super.onWindowFocusChanged(hasFocus);
-            if (hasFocus) refresh(); else padReleaseAll();
+            if (hasFocus) {
+                reloadIfChanged();
+                refresh();
+            } else {
+                padReleaseAll();
+            }
         }
 
         private Button listButton(Context ctx, final int mode) {
@@ -2023,7 +2337,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         }
 
         private void updateListButtons() {
-            bAll.setText((listMode == 0 ? "● " : "") + "♫ " + tracks.size());
+            bAll.setText((listMode == 0 ? "● " : "") + "♫ " + generalArray().length);
             bLater.setText((listMode == 1 ? "● " : "") + "🕓 " + plCount(PL_LATER));
             bFav.setText((listMode == 2 ? "● " : "") + "⭐ " + plCount(PL_FAV));
         }
@@ -2043,12 +2357,13 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
          * перерисовывается, e-ink не мигает), а новая строка выводится в окно.
          */
         private void markCurrent(boolean focus) {
-            if (listMode != 0 || rowTitles.size() != tracks.size()) return;
-            int old = markedCur;
-            if (old >= 0 && old < rowTitles.size()) rowTitles.get(old).setText(tracks.get(old).title);
-            if (cur >= 0 && cur < rowTitles.size()) rowTitles.get(cur).setText("▶ " + tracks.get(cur).title);
+            if (listMode != 0) return;
+            int po = markedCur >= 0 ? rowIdx.indexOf(Integer.valueOf(markedCur)) : -1;
+            if (po >= 0 && markedCur < tracks.size()) rowTitles.get(po).setText(tracks.get(markedCur).title);
+            int pn = cur >= 0 ? rowIdx.indexOf(Integer.valueOf(cur)) : -1;
+            if (pn >= 0 && cur < tracks.size()) rowTitles.get(pn).setText("▶ " + tracks.get(cur).title);
             markedCur = cur;
-            if (focus && cur >= 0 && cur < rowViews.size()) focusRow(rowViews.get(cur));
+            if (focus && pn >= 0 && pn < rowViews.size()) focusRow(rowViews.get(pn));
         }
 
         /**
@@ -2103,7 +2418,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             buildTrackRows();
         }
 
-        /** Строки плейлиста: нажатие играет его с этой записи, «Удалить» удаляет трек с устройства. */
+        /**
+         * Строки плейлиста: нажатие играет его с этой записи, «↩» убирает запись из плейлиста (песня снова
+         * появляется в общем списке), «🗑» удаляет песню с устройства.
+         */
         private void buildPlaylistRows(final Context ctx) {
             final String key = listMode == 1 ? PL_LATER : PL_FAV;
             final List<String[]> pl = plLoad(key);
@@ -2126,6 +2444,15 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 txt.addView(tt);
                 txt.addView(ta);
                 row.addView(txt, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
+                Button back = new Button(ctx);
+                back.setText("↩");
+                back.setOnClickListener(new OnClickListener() {
+                    @Override public void onClick(View v) {
+                        plRemove(key, pos);
+                        buildTrackRows();
+                    }
+                });
+                row.addView(back);
                 Button rm = new Button(ctx);
                 rm.setText("🗑");
                 rm.setOnClickListener(new OnClickListener() {
@@ -2151,6 +2478,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             trackRows.removeAllViews();
             rowTitles.clear();
             rowViews.clear();
+            rowIdx.clear();
             final Context ctx = getContext();
             updateListButtons();
             if (listMode != 0) {
@@ -2158,10 +2486,11 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 buildPlaylistRows(ctx);
                 return;
             }
-            trackHead.setText("♫ " + tracks.size());
-            for (int i = 0; i < tracks.size(); i++) {
-                final int idx = i;
-                Track tr = tracks.get(i);
+            int[] gen = generalArray();               // песни из плейлистов в общем списке не показываем
+            trackHead.setText("♫ " + gen.length);
+            for (int g = 0; g < gen.length; g++) {
+                final int idx = gen[g];
+                Track tr = tracks.get(idx);
                 LinearLayout row = new LinearLayout(ctx);
                 row.setOrientation(LinearLayout.HORIZONTAL);
                 row.setGravity(Gravity.CENTER_VERTICAL);
@@ -2170,7 +2499,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 LinearLayout txt = new LinearLayout(ctx);
                 txt.setOrientation(LinearLayout.VERTICAL);
                 TextView tt = new TextView(ctx);
-                tt.setText((i == cur ? "▶ " : "") + tr.title);
+                tt.setText((idx == cur ? "▶ " : "") + tr.title);
                 tt.setTextSize(15);
                 TextView ta = new TextView(ctx);
                 String sub = tr.artist;
@@ -2190,14 +2519,12 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 row.addView(del);
 
                 row.setOnClickListener(new OnClickListener() {
-                    @Override public void onClick(View v) {
-                        queue = null;
-                        playAt(idx);
-                    }
+                    @Override public void onClick(View v) { playFromGeneral(idx); }
                 });
                 trackRows.addView(row);
                 rowTitles.add(tt);
                 rowViews.add(row);
+                rowIdx.add(Integer.valueOf(idx));
             }
             markedCur = cur;
         }
