@@ -84,16 +84,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A -- modules app
-          while IFS= read -r patch; do
-            [ -n "$patch" ] && git rm -q -- "$patch"
-          done < /tmp/applied-patches.txt
-          git commit -m "Применить подготовленные патчи"
-          git pull --rebase origin main
-          git push origin HEAD:main
-          gh workflow run android.yml --ref main
+          {
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            # в коммит идут только исходники: результат сборки (app/build) не трогаем
+            git add -A -- modules app/src app/build.gradle build.gradle settings.gradle gradle.properties
+            while IFS= read -r patch; do
+              [ -n "$patch" ] && git rm -q -- "$patch"
+            done < /tmp/applied-patches.txt
+            git commit -m "Применить подготовленные патчи"
+            # сброс изменённых файлов сборки, иначе pull --rebase откажется работать
+            git checkout -- . || true
+            git clean -fdq -- app/build || true
+            git pull --rebase origin main
+            git push origin HEAD:main
+            gh workflow run android.yml --ref main
+          } 2>&1 | tee -a /tmp/patch.log
       - name: Save log to branch patch-log on failure
         if: failure()
         shell: bash
