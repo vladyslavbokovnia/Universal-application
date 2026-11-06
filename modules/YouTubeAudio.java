@@ -47,12 +47,12 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IShareHandler {
     private Context appCtx;
     private Handler h;
     private boolean loaded;
-    private ConnectivityManager.NetworkCallback wifiCb;
+    private ConnectivityManager.NetworkCallback netCb;
     /** Загрузки, ждущие Wi-Fi: {ссылка, название}. */
     private final List<String[]> pending = new ArrayList<String[]>();
 
     @Override public String getName() { return "YouTube аудио"; }
-    @Override public int getVersion() { return 2; }
+    @Override public int getVersion() { return 3; }
     @Override public String getDescription() {
         return "Скачивает русскую аудиодорожку YouTube по кнопке 🎧 из скрипта YouTube TTS; превью видно в плеере.";
     }
@@ -64,7 +64,7 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IShareHandler {
         loadPending();
     }
 
-    @Override public void stop() { unwatchWifi(); }
+    @Override public void stop() { unwatchNet(); }
     @Override public Object execute(Map<String, ?> data) { return null; }
     @Override public void onAccessibilityEvent(android.view.accessibility.AccessibilityEvent event, AccessibilityService service) { }
     @Override public Bitmap createIcon(int sizePx) { return null; }
@@ -126,29 +126,54 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IShareHandler {
         return new File(root, rel.trim()).getAbsolutePath();
     }
 
-    // ---------------------------------------------------------- ожидание Wi-Fi
+    // ---------------------------------------------------------- очередь и сеть
+    //
+    // Ссылка попадает в очередь (она хранится в настройках и переживает перезапуск), если нет подходящей сети:
+    // совсем нет интернета, а при «только Wi-Fi» ещё и если подключена только мобильная сеть.
+    // Очередь сама уходит в загрузку, когда сеть появляется. Оборвалась сеть во время загрузки: ссылка тоже в очередь.
 
-    private boolean isWifi() {
+    private ConnectivityManager cm() {
+        return (ConnectivityManager) appCtx.getSystemService(Context.CONNECTIVITY_SERVICE);
+    }
+
+    /** Сеть с рабочим интернетом (при wifiOnly: только Wi-Fi или Ethernet). VPN не считается: смотрим сети под ним. */
+    private Network findNetwork(boolean wifiOnly) {
         try {
-            ConnectivityManager cm = (ConnectivityManager) appCtx.getSystemService(Context.CONNECTIVITY_SERVICE);
-            Network n = cm.getActiveNetwork();
-            NetworkCapabilities c = n == null ? null : cm.getNetworkCapabilities(n);
-            return c != null && (c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                    || c.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED));
+            ConnectivityManager cm = cm();
+            Network best = null;
+            for (Network n : cm.getAllNetworks()) {
+                NetworkCapabilities c = cm.getNetworkCapabilities(n);
+                if (c == null || c.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue;
+                if (!c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        || !c.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) continue;
+                boolean wifi = c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                        || c.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET);
+                if (wifiOnly && !wifi) continue;
+                if (best == null || wifi) best = n;
+            }
+            return best;
         } catch (Throwable t) {
-            return false;
+            return null;
         }
     }
 
-    /** Качает сразу или, если включено «только по Wi-Fi» и его нет, ставит в очередь. */
+    private String netName() {
+        if (findNetwork(true) != null) return "Wi-Fi";
+        return findNetwork(false) != null ? "мобильная сеть" : "нет сети";
+    }
+
+    /** Качает сразу или, если подходящей сети нет, ставит в очередь. */
     private void submit(String url, String title) {
-        if (prefs().getBoolean("wifi_only", false) && !isWifi()) {
-            int n = addPending(url, title);
-            toast("📶 Нет Wi-Fi: скачаю, когда появится (в очереди: " + n + ")");
-            watchWifi();
+        boolean wifiOnly = prefs().getBoolean("wifi_only", false);
+        Network n = findNetwork(wifiOnly);
+        if (n == null) {
+            int q = addPending(url, title);
+            toast("📵 Сейчас: " + netName() + (wifiOnly ? ", а нужен Wi-Fi" : "") + ". В очереди: " + q
+                    + ". Скачаю, когда сеть появится");
+            watchNet();
             return;
         }
-        startDownload(url, title);
+        startDownload(url, title, wifiOnly ? n : null);
     }
 
     private synchronized int addPending(String url, String title) {
@@ -166,7 +191,7 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IShareHandler {
         } catch (Throwable t) { }
     }
 
-    /** После перезапуска очередь читается из настроек; если Wi-Fi уже есть, она сразу уходит в загрузку. */
+    /** После перезапуска очередь читается из настроек и ждёт сеть. */
     private synchronized void loadPending() {
         if (loaded || appCtx == null) return;
         loaded = true;
@@ -177,57 +202,71 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IShareHandler {
                 pending.add(new String[]{o.getString("u"), o.optString("t", "")});
             }
         } catch (Throwable t) { }
-        if (pending.isEmpty()) return;
-        if (isWifi()) drainPending(); else watchWifi();
+        if (!pending.isEmpty()) tryDrain();
     }
 
-    /** Запускает всё, что ждало, и выключает наблюдение за сетью. */
-    private synchronized void drainPending() {
-        unwatchWifi();
+    /** Если подходящая сеть уже есть, запускает очередь; иначе ждёт её. */
+    private synchronized void tryDrain() {
+        if (pending.isEmpty()) { unwatchNet(); return; }
+        boolean wifiOnly = prefs().getBoolean("wifi_only", false);
+        Network n = findNetwork(wifiOnly);
+        if (n == null) { watchNet(); return; }
+        drainPending(wifiOnly ? n : null);
+    }
+
+    /** Запускает всё, что ждало (net: сеть для загрузки или null), и выключает наблюдение за сетью. */
+    private synchronized void drainPending(Network net) {
+        unwatchNet();
         List<String[]> copy = new ArrayList<String[]>(pending);
         pending.clear();
         savePending();
-        for (String[] p : copy) startDownload(p[0], p[1].length() == 0 ? null : p[1]);
+        for (String[] p : copy) startDownload(p[0], p[1].length() == 0 ? null : p[1], net);
     }
 
-    private synchronized void watchWifi() {
-        if (wifiCb != null || appCtx == null) return;
+    private synchronized void watchNet() {
+        if (netCb != null || appCtx == null) return;
         try {
-            ConnectivityManager cm = (ConnectivityManager) appCtx.getSystemService(Context.CONNECTIVITY_SERVICE);
             NetworkRequest rq = new NetworkRequest.Builder()
                     .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build();
-            wifiCb = new ConnectivityManager.NetworkCallback() {
-                @Override public void onAvailable(Network network) {
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED).build();
+            netCb = new ConnectivityManager.NetworkCallback() {
+                @Override public void onAvailable(Network network) { later(); }
+                @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) { later(); }
+                private void later() {
                     h.postDelayed(new Runnable() {
-                        @Override public void run() { drainPending(); }
+                        @Override public void run() { tryDrain(); }
                     }, 1500);   // даём сети стать основной
                 }
             };
-            cm.registerNetworkCallback(rq, wifiCb);
+            cm().registerNetworkCallback(rq, netCb);
         } catch (Throwable t) {
-            wifiCb = null;
+            netCb = null;
         }
     }
 
-    private synchronized void unwatchWifi() {
-        if (wifiCb == null || appCtx == null) return;
-        try {
-            ((ConnectivityManager) appCtx.getSystemService(Context.CONNECTIVITY_SERVICE)).unregisterNetworkCallback(wifiCb);
-        } catch (Throwable t) { }
-        wifiCb = null;
+    private synchronized void unwatchNet() {
+        if (netCb == null || appCtx == null) return;
+        try { cm().unregisterNetworkCallback(netCb); } catch (Throwable t) { }
+        netCb = null;
     }
 
-    private void startDownload(String url, String title) {
+    private void startDownload(final String url, final String title, Network net) {
         SharedPreferences p = prefs();
         String lang = p.getString("lang", "ru");
         boolean fb = p.getBoolean("fallback_original", false);
         toast("🎧 Начинаю: " + (title == null || title.length() == 0 ? url : title));
-        YtAudioBridge.start(appCtx, url, title, lang, outDir(), fb, new YtAudioBridge.Listener() {
+        YtAudioBridge.start(appCtx, url, title, lang, outDir(), fb, net, new YtAudioBridge.Listener() {
             @Override public void onStatus(String text) { toast(text); }
             @Override public void onDone(String audioPath, String error) {
-                if (error != null) toast("🎧 " + error);
-                else toast("✅ Готово: " + new File(audioPath).getName());
+                if (error == null) {
+                    toast("✅ Готово: " + new File(audioPath).getName());
+                } else if (error.startsWith("Нет сети")) {
+                    int q = addPending(url, title);
+                    toast("📵 Сеть пропала. В очереди: " + q + ". Скачаю, когда она появится");
+                    watchNet();
+                } else {
+                    toast("🎧 " + error);
+                }
             }
         });
     }
@@ -244,21 +283,41 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IShareHandler {
                 "Нет Wi-Fi: ссылка ждёт в очереди и скачается, когда он появится", false));
         r.add(SettingItem.text("out_dir", "Папка", "Внутри памяти телефона; рядом кладётся превью .jpg", "Music/YouTube"));
         r.add(SettingItem.section("🧪 Проверка"));
-        r.add(SettingItem.action("force_pending", "▶ Качать очередь сейчас", "Запустить ждущие Wi-Fi загрузки без него"));
+        r.add(SettingItem.section("📋 Очередь"));
+        r.add(SettingItem.action("show_queue", "📋 Что в очереди" + (appCtx == null ? "" : " (" + pending.size() + ")"),
+                "Показать ссылки, которые ждут сеть"));
+        r.add(SettingItem.action("force_pending", "▶ Качать очередь сейчас", "Запустить ждущие загрузки, не дожидаясь сети"));
+        r.add(SettingItem.action("clear_pending", "🗑 Очистить очередь", "Убрать все ждущие ссылки"));
         r.add(SettingItem.action("from_clip", "📋 Скачать по ссылке из буфера", "Скопируй ссылку на видео YouTube и нажми"));
         return r;
     }
 
     @Override public void onSettingChanged(String key) {
-        if (!"from_clip".equals(key) && !"force_pending".equals(key)) return;
+        if (!"from_clip".equals(key) && !"force_pending".equals(key) && !"show_queue".equals(key)
+                && !"clear_pending".equals(key)) return;
         try {
             Context c = appCtx;
             if (c == null) return;
             ensure(c);
+            if ("show_queue".equals(key)) {
+                if (pending.isEmpty()) { toast("Очередь пуста"); return; }
+                StringBuilder sb = new StringBuilder("📋 В очереди:");
+                int i = 1;
+                for (String[] q : pending) sb.append("\n").append(i++).append(". ").append(q[1].length() == 0 ? q[0] : q[1]);
+                toast(sb.toString());
+                return;
+            }
+            if ("clear_pending".equals(key)) {
+                pending.clear();
+                savePending();
+                unwatchNet();
+                toast("Очередь очищена");
+                return;
+            }
             if ("force_pending".equals(key)) {
                 int n = pending.size();
                 toast(n == 0 ? "Очередь пуста" : "Качаю очередь: " + n);
-                drainPending();
+                drainPending(null);
                 return;
             }
             ClipboardManager cm = (ClipboardManager) c.getSystemService(Context.CLIPBOARD_SERVICE);

@@ -2,6 +2,7 @@ package im.manus.universalhost;
 
 import android.content.Context;
 import android.media.MediaScannerConnection;
+import android.net.Network;
 
 import org.schabi.newpipe.extractor.Image;
 import org.schabi.newpipe.extractor.MediaFormat;
@@ -56,21 +57,46 @@ public final class YtAudioBridge {
 
     private static boolean inited;
 
+    /** Сеть, через которую качает текущий поток (null: по умолчанию). Нужна для режима «только Wi-Fi». */
+    private static final ThreadLocal<Network> NET = new ThreadLocal<Network>();
+
+    private static HttpURLConnection open(String u) throws IOException {
+        URL url = new URL(u);
+        Network n = NET.get();
+        return (HttpURLConnection) (n != null ? n.openConnection(url) : url.openConnection());
+    }
+
+    /** Ошибка связана с сетью (нет сети, обрыв, таймаут): такую загрузку стоит поставить в очередь. */
+    private static boolean netCause(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof java.net.UnknownHostException || t instanceof java.net.ConnectException
+                    || t instanceof java.net.SocketException || t instanceof java.net.SocketTimeoutException
+                    || t instanceof java.net.NoRouteToHostException || t instanceof javax.net.ssl.SSLException) return true;
+        }
+        return false;
+    }
+
     private YtAudioBridge() { }
 
-    /** Запускает загрузку в фоне. lang — код языка дорожки (ru), outDir — папка (по умолчанию Music/YouTube). */
+    public static void start(Context ctx, String url, String title, String lang,
+                             String outDir, boolean fallbackOriginal, Listener l) {
+        start(ctx, url, title, lang, outDir, fallbackOriginal, null, l);
+    }
+
+    /** Запускает загрузку в фоне. lang — код языка дорожки (ru), outDir — папка, net — сеть для загрузки (null: любая). */
     public static void start(final Context ctx, final String url, final String title, final String lang,
-                             final String outDir, final boolean fallbackOriginal, final Listener l) {
+                             final String outDir, final boolean fallbackOriginal, final Network net, final Listener l) {
         final Context app = ctx.getApplicationContext();
         Thread t = new Thread(new Runnable() {
             @Override public void run() {
+                NET.set(net);
                 try {
                     String path = doRun(app, url, title, lang, outDir, fallbackOriginal, l);
                     l.onDone(path, null);
                 } catch (UserError e) {
                     l.onDone(null, e.getMessage());
                 } catch (Throwable e) {
-                    l.onDone(null, "Ошибка: " + e);
+                    l.onDone(null, (netCause(e) ? "Нет сети: " : "Ошибка: ") + e);
                 }
             }
         }, "YtAudio");
@@ -213,7 +239,7 @@ public final class YtAudioBridge {
     }
 
     private static void fetchTo(String url, File f) throws IOException {
-        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        HttpURLConnection c = open(url);
         c.setConnectTimeout(15000);
         c.setReadTimeout(20000);
         c.setRequestProperty("User-Agent", FIREFOX_UA);
@@ -256,7 +282,7 @@ public final class YtAudioBridge {
                     rn++;
                     u += "&range=" + pos + "-" + end;
                 }
-                HttpURLConnection c = (HttpURLConnection) new URL(u).openConnection();
+                HttpURLConnection c = open(u);
                 c.setConnectTimeout(20000);
                 c.setReadTimeout(30000);
                 c.setInstanceFollowRedirects(true);
@@ -313,7 +339,7 @@ public final class YtAudioBridge {
     /** Запросы самого извлекателя (HttpURLConnection, как у простого загрузчика). */
     private static final class Dl extends Downloader {
         @Override public Response execute(Request request) throws IOException, ReCaptchaException {
-            HttpURLConnection c = (HttpURLConnection) new URL(request.url()).openConnection();
+            HttpURLConnection c = open(request.url());
             c.setConnectTimeout(20000);
             c.setReadTimeout(30000);
             c.setInstanceFollowRedirects(true);
