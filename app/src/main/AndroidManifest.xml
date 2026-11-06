@@ -48,6 +48,8 @@
         <!-- Приёмник «Поделиться» для модулей (PWA-стиль): виден в системном меню шаринга -->
         <activity android:name=".ModuleShareActivity" android:exported="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:taskAffinity=""
+            android:noHistory="true"
             android:excludeFromRecents="true">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
