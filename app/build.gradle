@@ -41,6 +41,8 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_11
         targetCompatibility JavaVersion.VERSION_11
+        // NewPipeExtractor использует java.time и другое из Java 11: на minSdk 24 нужна десахаризация
+        coreLibraryDesugaringEnabled true
     }
     kotlinOptions {
         jvmTarget = '11'
@@ -57,4 +59,9 @@ dependencies {
     // Клиентская часть Shizuku (сервер — приложение-форк thedjchi/Shizuku, API совместим с оригиналом)
     implementation 'dev.rikka.shizuku:api:13.1.5'
     implementation 'dev.rikka.shizuku:provider:13.1.5'
+
+    // Скачивание русской дорожки YouTube (модуль YouTubeAudio через YtAudioBridge). Версия без Java records
+    // в извлекателе: D8 из AGP 8.6 не умеет их сахарить (ошибка Record desugaring). Новее — после обновления AGP.
+    implementation 'com.github.TeamNewPipe:NewPipeExtractor:v0.26.5'
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs_nio:2.1.5'
 }

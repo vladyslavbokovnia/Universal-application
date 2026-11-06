@@ -22,6 +22,7 @@ import android.database.ContentObserver;
 import android.database.Cursor;
 import android.hardware.input.InputManager;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.media.AudioAttributes;
 import android.media.AudioDeviceCallback;
 import android.media.AudioDeviceInfo;
@@ -46,6 +47,9 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.provider.MediaStore;
+import android.text.TextUtils;
+import android.util.LruCache;
+import android.view.GestureDetector;
 import android.view.Gravity;
 import android.view.InputDevice;
 import android.view.KeyEvent;
@@ -59,6 +63,7 @@ import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -144,6 +149,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         String artist;
         long dur;
         Uri uri;
+        /** Путь к файлу из медиатеки (по нему ищется превью .jpg рядом); у песен из «Поделиться» его нет. */
+        String path;
     }
 
     private Context appCtx;
@@ -191,6 +198,9 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     }
 
     @Override public void stop() {
+        try { if (coverPool != null) coverPool.shutdownNow(); } catch (Throwable t) { }
+        coverPool = null;
+        coverCache.evictAll();
         unregisterFocusWatch();
         removeFocusCatcher();
         try {
@@ -295,6 +305,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         List<Track> shared = new ArrayList<Track>();
         for (Track t : tracks) if (t.id < 0) shared.add(t);
         tracks.clear();
+        noCover.clear();
         queue = null;
         tracks.addAll(shared);
         if (appCtx != null && hasPermission()) {
@@ -303,7 +314,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                     MediaStore.Audio.Media._ID,
                     MediaStore.Audio.Media.TITLE,
                     MediaStore.Audio.Media.ARTIST,
-                    MediaStore.Audio.Media.DURATION
+                    MediaStore.Audio.Media.DURATION,
+                    MediaStore.Audio.Media.DATA
             };
             String dir = newestFirst() ? " DESC" : " ASC";
             String order = MediaStore.Audio.Media.DATE_ADDED + dir + ", " + MediaStore.Audio.Media._ID + dir;
@@ -319,6 +331,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                     t.artist = c.getString(2);
                     if (t.artist == null || t.artist.length() == 0) t.artist = "Неизвестный исполнитель";
                     t.dur = c.getLong(3);
+                    t.path = c.getString(4);
                     t.uri = ContentUris.withAppendedId(uri, t.id);
                     tracks.add(t);
                 }
@@ -812,6 +825,71 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             NotificationManager nm =
                     (NotificationManager) appCtx.getSystemService(Context.NOTIFICATION_SERVICE);
             if (nm != null) nm.cancel(NOTIF_ID);
+        } catch (Throwable t) { }
+    }
+
+    // ---------------------------------------------------------- превью песен
+    //
+    // Превью лежит рядом с песней: то же имя, расширение .jpg (его кладёт модуль «YouTube аудио»). Картинки читаются
+    // в фоне, уменьшенными, и кэшируются; песни без превью показываются плиткой с названием.
+
+    private final LruCache<String, Bitmap> coverCache = new LruCache<String, Bitmap>(48);
+    private final HashSet<String> noCover = new HashSet<String>();
+    private java.util.concurrent.ExecutorService coverPool;
+
+    private File coverFile(String path) {
+        if (path == null) return null;
+        int dot = path.lastIndexOf('.');
+        if (dot < 0) return null;
+        File f = new File(path.substring(0, dot) + ".jpg");
+        return f.isFile() ? f : null;
+    }
+
+    private static Bitmap decodeCover(File f, int targetW) {
+        BitmapFactory.Options o = new BitmapFactory.Options();
+        o.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(f.getAbsolutePath(), o);
+        int s = 1;
+        while (o.outWidth / (s * 2) >= targetW) s *= 2;
+        BitmapFactory.Options o2 = new BitmapFactory.Options();
+        o2.inSampleSize = s;
+        o2.inPreferredConfig = Bitmap.Config.RGB_565;
+        return BitmapFactory.decodeFile(f.getAbsolutePath(), o2);
+    }
+
+    /** Выставляет превью в картинку; пока оно грузится (или его нет), поверх лежит placeholder с названием. */
+    void loadCover(final String path, final ImageView img, final View placeholder, final int targetW) {
+        if (path == null || h == null) return;
+        img.setTag(path);
+        Bitmap cached = coverCache.get(path);
+        if (cached != null) {
+            img.setImageBitmap(cached);
+            placeholder.setVisibility(View.GONE);
+            return;
+        }
+        if (noCover.contains(path)) return;
+        if (coverPool == null) coverPool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            coverPool.execute(new Runnable() {
+                @Override public void run() {
+                    Bitmap bm = null;
+                    try {
+                        File f = coverFile(path);
+                        if (f != null) bm = decodeCover(f, targetW);
+                    } catch (Throwable t) { }
+                    final Bitmap fb = bm;
+                    h.post(new Runnable() {
+                        @Override public void run() {
+                            if (fb == null) { noCover.add(path); return; }
+                            coverCache.put(path, fb);
+                            if (path.equals(img.getTag())) {
+                                img.setImageBitmap(fb);
+                                placeholder.setVisibility(View.GONE);
+                            }
+                        }
+                    });
+                }
+            });
         } catch (Throwable t) { }
     }
 
@@ -2227,7 +2305,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         private Button bLater;
         private Button bFav;
         // строки общего списка: чтобы менять пометку «▶» только у двух строк и не перерисовывать весь список
-        private final List<TextView> rowTitles = new ArrayList<TextView>();
+        private final List<TextView> rowMarks = new ArrayList<TextView>();   // значок «▶» на плитке
         private final List<View> rowViews = new ArrayList<View>();
         private final List<Integer> rowIdx = new ArrayList<Integer>();   // номер песни в tracks для каждой строки
         private int markedCur = -2;
@@ -2447,15 +2525,15 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         }
 
         /**
-         * Сменился текущий трек: пометка «▶» переносится только между двумя строками (остальной список не
-         * перерисовывается, e-ink не мигает), а новая строка выводится в окно.
+         * Сменился текущий трек: значок «▶» переносится только между двумя плитками (остальной список не
+         * перерисовывается, e-ink не мигает), а новая плитка выводится в окно.
          */
         private void markCurrent(boolean focus) {
             if (listMode != 0) return;
             int po = markedCur >= 0 ? rowIdx.indexOf(Integer.valueOf(markedCur)) : -1;
-            if (po >= 0 && markedCur < tracks.size()) rowTitles.get(po).setText(tracks.get(markedCur).title);
+            if (po >= 0 && po < rowMarks.size()) rowMarks.get(po).setVisibility(View.GONE);
             int pn = cur >= 0 ? rowIdx.indexOf(Integer.valueOf(cur)) : -1;
-            if (pn >= 0 && cur < tracks.size()) rowTitles.get(pn).setText("▶ " + tracks.get(cur).title);
+            if (pn >= 0 && pn < rowMarks.size()) rowMarks.get(pn).setVisibility(View.VISIBLE);
             markedCur = cur;
             if (focus && pn >= 0 && pn < rowViews.size()) focusRow(rowViews.get(pn));
         }
@@ -2512,65 +2590,162 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             buildTrackRows();
         }
 
+        /** Плитка 16:9: высота считается от ширины. */
+        private class Tile extends FrameLayout {
+            Tile(Context c) { super(c); }
+
+            @Override protected void onMeasure(int wSpec, int hSpec) {
+                int w = MeasureSpec.getSize(wSpec);
+                super.onMeasure(MeasureSpec.makeMeasureSpec(w, MeasureSpec.EXACTLY),
+                        MeasureSpec.makeMeasureSpec(w * 9 / 16, MeasureSpec.EXACTLY));
+            }
+        }
+
+        private TextView badge(Context ctx, String text) {
+            TextView b = new TextView(ctx);
+            b.setText(text);
+            b.setTextSize(16);
+            b.setTextColor(0xFFFFFFFF);
+            b.setBackgroundColor(0xAA000000);
+            b.setGravity(Gravity.CENTER);
+            b.setPadding(dp(8), dp(4), dp(8), dp(4));
+            return b;
+        }
+
         /**
-         * Строки плейлиста: нажатие играет его с этой записи, «↩» убирает запись из плейлиста (песня снова
+         * Плитка песни: превью на всю плитку, названия на ней нет. Один тап играет, двойной показывает название
+         * поверх картинки и озвучивает его. Песни без превью показывают название на плитке. Угловые значки
+         * (🗑, ↩) вызывают свои действия; markOut[0] получает значок «▶» (виден у играющей песни).
+         */
+        private View buildTile(Context ctx, Track tr, final String title, final Runnable onPlay,
+                               String[] badgeText, final Runnable[] badgeAct, TextView[] markOut) {
+            final Tile tile = new Tile(ctx);
+            tile.setContentDescription(title);
+            final ImageView img = new ImageView(ctx);
+            img.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            img.setBackgroundColor(0xFFE0E0E0);
+            tile.addView(img, new FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+
+            final TextView ph = new TextView(ctx);
+            ph.setText(title);
+            ph.setTextSize(14);
+            ph.setTextColor(0xFF000000);
+            ph.setGravity(Gravity.CENTER);
+            ph.setPadding(dp(10), dp(10), dp(10), dp(10));
+            ph.setMaxLines(4);
+            ph.setEllipsize(TextUtils.TruncateAt.END);
+            tile.addView(ph, new FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+            int targetW = Math.max(160, getResources().getDisplayMetrics().widthPixels / 2);
+            if (tr != null) loadCover(tr.path, img, ph, targetW);
+
+            final TextView over = badge(ctx, title);
+            over.setTextSize(15);
+            over.setBackgroundColor(0xCC000000);
+            over.setPadding(dp(10), dp(10), dp(10), dp(10));
+            over.setVisibility(View.GONE);
+            tile.addView(over, new FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+
+            TextView mark = badge(ctx, "▶");
+            mark.setVisibility(View.GONE);
+            tile.addView(mark, new FrameLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP | Gravity.START));
+            if (markOut != null) markOut[0] = mark;
+
+            LinearLayout bar = new LinearLayout(ctx);
+            bar.setOrientation(LinearLayout.HORIZONTAL);
+            for (int i = 0; i < badgeText.length; i++) {
+                final Runnable act = badgeAct[i];
+                TextView b = badge(ctx, badgeText[i]);
+                b.setOnClickListener(new OnClickListener() {
+                    @Override public void onClick(View v) { act.run(); }
+                });
+                bar.addView(b);
+            }
+            tile.addView(bar, new FrameLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP | Gravity.END));
+
+            final Runnable hide = new Runnable() {
+                @Override public void run() { over.setVisibility(View.GONE); }
+            };
+            final GestureDetector gd = new GestureDetector(ctx, new GestureDetector.SimpleOnGestureListener() {
+                @Override public boolean onDown(MotionEvent e) { return true; }
+
+                @Override public boolean onSingleTapConfirmed(MotionEvent e) {
+                    onPlay.run();
+                    return true;
+                }
+
+                @Override public boolean onDoubleTap(MotionEvent e) {
+                    over.setText(title);
+                    over.setVisibility(View.VISIBLE);
+                    over.removeCallbacks(hide);
+                    over.postDelayed(hide, 6000);
+                    speak(title);
+                    return true;
+                }
+            });
+            tile.setOnTouchListener(new View.OnTouchListener() {
+                @Override public boolean onTouch(View v, MotionEvent e) { return gd.onTouchEvent(e); }
+            });
+            return tile;
+        }
+
+        /** Плитки по две в ряд. */
+        private void fillTiles(Context ctx, List<View> tiles) {
+            for (int i = 0; i < tiles.size(); i += 2) {
+                LinearLayout row = new LinearLayout(ctx);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                for (int k = 0; k < 2; k++) {
+                    View v = i + k < tiles.size() ? tiles.get(i + k) : new View(ctx);
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f);
+                    lp.setMargins(dp(3), dp(3), dp(3), dp(3));
+                    row.addView(v, lp);
+                }
+                trackRows.addView(row);
+            }
+        }
+
+        /**
+         * Плитки плейлиста: тап играет его с этой записи, «↩» убирает запись из плейлиста (песня снова
          * появляется в общем списке), «🗑» удаляет песню с устройства.
          */
         private void buildPlaylistRows(final Context ctx) {
             final String key = listMode == 1 ? PL_LATER : PL_FAV;
             final List<String[]> pl = plLoad(key);
             trackHead.setText((listMode == 1 ? "🕓 " : "⭐ ") + pl.size());
+            List<View> tiles = new ArrayList<View>();
             for (int i = 0; i < pl.size(); i++) {
                 final int pos = i;
                 final String[] en = pl.get(i);
-                LinearLayout row = new LinearLayout(ctx);
-                row.setOrientation(LinearLayout.HORIZONTAL);
-                row.setGravity(Gravity.CENTER_VERTICAL);
-                row.setPadding(0, dp(6), 0, dp(6));
-                LinearLayout txt = new LinearLayout(ctx);
-                txt.setOrientation(LinearLayout.VERTICAL);
-                TextView tt = new TextView(ctx);
-                tt.setText(en[1]);
-                tt.setTextSize(15);
-                TextView ta = new TextView(ctx);
-                ta.setText(en[2].length() == 0 ? "—" : en[2]);
-                ta.setTextSize(12);
-                txt.addView(tt);
-                txt.addView(ta);
-                row.addView(txt, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
-                Button back = new Button(ctx);
-                back.setText("↩");
-                back.setOnClickListener(new OnClickListener() {
-                    @Override public void onClick(View v) {
-                        plRemove(key, pos);
-                        buildTrackRows();
-                    }
-                });
-                row.addView(back);
-                Button rm = new Button(ctx);
-                rm.setText("🗑");
-                rm.setOnClickListener(new OnClickListener() {
-                    @Override public void onClick(View v) {
-                        int idx = findTrack(en);
-                        if (idx >= 0) {
-                            askDelete(getContext(), idx);      // файл удаляется, запись уходит из плейлистов
-                        } else {
-                            plRemove(key, pos);                // трека нет на устройстве: убираем запись
-                            buildTrackRows();
-                        }
-                    }
-                });
-                row.addView(rm);
-                row.setOnClickListener(new OnClickListener() {
-                    @Override public void onClick(View v) { playFromList(key, pos); }
-                });
-                trackRows.addView(row);
+                int ti = findTrack(en);
+                Track tr = ti >= 0 ? tracks.get(ti) : null;
+                tiles.add(buildTile(ctx, tr, en[1], new Runnable() {
+                    @Override public void run() { playFromList(key, pos); }
+                }, new String[]{"↩", "🗑"}, new Runnable[]{
+                        new Runnable() {
+                            @Override public void run() {
+                                plRemove(key, pos);
+                                buildTrackRows();
+                            }
+                        },
+                        new Runnable() {
+                            @Override public void run() {
+                                int idx = findTrack(en);
+                                if (idx >= 0) {
+                                    askDelete(getContext(), idx);      // файл удаляется, запись уходит из плейлистов
+                                } else {
+                                    plRemove(key, pos);                // трека нет на устройстве: убираем запись
+                                    buildTrackRows();
+                                }
+                            }
+                        }}, null));
             }
+            fillTiles(ctx, tiles);
         }
 
         private void buildTrackRows() {
             trackRows.removeAllViews();
-            rowTitles.clear();
+            rowMarks.clear();
             rowViews.clear();
             rowIdx.clear();
             final Context ctx = getContext();
@@ -2582,44 +2757,23 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             }
             int[] gen = generalArray();               // песни из плейлистов в общем списке не показываем
             trackHead.setText("♫ " + gen.length);
+            List<View> tiles = new ArrayList<View>();
             for (int g = 0; g < gen.length; g++) {
                 final int idx = gen[g];
                 Track tr = tracks.get(idx);
-                LinearLayout row = new LinearLayout(ctx);
-                row.setOrientation(LinearLayout.HORIZONTAL);
-                row.setGravity(Gravity.CENTER_VERTICAL);
-                row.setPadding(0, dp(6), 0, dp(6));
-
-                LinearLayout txt = new LinearLayout(ctx);
-                txt.setOrientation(LinearLayout.VERTICAL);
-                TextView tt = new TextView(ctx);
-                tt.setText((idx == cur ? "▶ " : "") + tr.title);
-                tt.setTextSize(15);
-                TextView ta = new TextView(ctx);
-                String sub = tr.artist;
-                String d = fmtDur(tr.dur);
-                if (d.length() > 0) sub += " · " + d;
-                ta.setText(sub);
-                ta.setTextSize(12);
-                txt.addView(tt);
-                txt.addView(ta);
-                row.addView(txt, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
-
-                Button del = new Button(ctx);
-                del.setText("Удалить");
-                del.setOnClickListener(new OnClickListener() {
-                    @Override public void onClick(View v) { askDelete(getContext(), idx); }
-                });
-                row.addView(del);
-
-                row.setOnClickListener(new OnClickListener() {
-                    @Override public void onClick(View v) { playFromGeneral(idx); }
-                });
-                trackRows.addView(row);
-                rowTitles.add(tt);
-                rowViews.add(row);
+                TextView[] mk = new TextView[1];
+                View tile = buildTile(ctx, tr, tr.title, new Runnable() {
+                    @Override public void run() { playFromGeneral(idx); }
+                }, new String[]{"🗑"}, new Runnable[]{new Runnable() {
+                    @Override public void run() { askDelete(getContext(), idx); }
+                }}, mk);
+                if (idx == cur) mk[0].setVisibility(View.VISIBLE);
+                tiles.add(tile);
+                rowMarks.add(mk[0]);
+                rowViews.add(tile);
                 rowIdx.add(Integer.valueOf(idx));
             }
+            fillTiles(ctx, tiles);
             markedCur = cur;
         }
     }
