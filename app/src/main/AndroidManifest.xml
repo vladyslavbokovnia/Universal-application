@@ -4,6 +4,7 @@
     package="im.manus.universalhost">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.VIBRATE" />
@@ -45,7 +46,9 @@
 
         <activity android:name=".ModuleSettingsActivity" android:exported="false" />
         <!-- Приёмник «Поделиться» для модулей (PWA-стиль): виден в системном меню шаринга -->
-        <activity android:name=".ModuleShareActivity" android:exported="true">
+        <activity android:name=".ModuleShareActivity" android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />

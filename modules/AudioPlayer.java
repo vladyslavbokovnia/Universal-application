@@ -306,6 +306,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         for (Track t : tracks) if (t.id < 0) shared.add(t);
         tracks.clear();
         noCover.clear();
+        linkCache.clear();
         queue = null;
         tracks.addAll(shared);
         if (appCtx != null && hasPermission()) {
@@ -837,6 +838,54 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     private final HashSet<String> noCover = new HashSet<String>();
     private java.util.concurrent.ExecutorService coverPool;
 
+    // Ссылка на видео лежит рядом с песней: то же имя, расширение .url (кладёт модуль «YouTube аудио»).
+    private final java.util.HashMap<String, String> linkCache = new java.util.HashMap<String, String>();   // путь -> ссылка, "" = нет
+
+    /** Показывает значок 🔗 у песни, для которой сохранена ссылка; файл читается в фоне. */
+    void loadLink(final String path, final View badge) {
+        if (path == null || h == null) return;
+        String c = linkCache.get(path);
+        if (c != null) {
+            if (c.length() > 0) { badge.setTag(c); badge.setVisibility(View.VISIBLE); }
+            return;
+        }
+        if (coverPool == null) coverPool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            coverPool.execute(new Runnable() {
+                @Override public void run() {
+                    String u = "";
+                    try {
+                        int dot = path.lastIndexOf('.');
+                        File f = dot < 0 ? null : new File(path.substring(0, dot) + ".url");
+                        if (f != null && f.isFile() && f.length() < 4096) {
+                            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(new java.io.FileInputStream(f), "UTF-8"));
+                            try { String line = r.readLine(); if (line != null) u = line.trim(); } finally { r.close(); }
+                        }
+                    } catch (Throwable t) { }
+                    final String fu = u;
+                    h.post(new Runnable() {
+                        @Override public void run() {
+                            linkCache.put(path, fu);
+                            if (fu.length() > 0) { badge.setTag(fu); badge.setVisibility(View.VISIBLE); }
+                        }
+                    });
+                }
+            });
+        } catch (Throwable t) { }
+    }
+
+    /** Открывает ссылку в браузере этого приложения (мини-приложение «Браузер»). */
+    void openInBrowser(Context c, String url) {
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            i.setClassName(c.getPackageName(), c.getPackageName() + ".BrowserApp");
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            c.startActivity(i);
+        } catch (Throwable t) {
+            toast("Не открыть ссылку: " + t.getMessage());
+        }
+    }
+
     private File coverFile(String path) {
         if (path == null) return null;
         int dot = path.lastIndexOf('.');
@@ -1301,13 +1350,16 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         }
         int[] arr = new int[q.size()];
         for (int i = 0; i < arr.length; i++) arr[i] = q.get(i).intValue();
+        int src = key.equals(PL_FAV) ? 2 : 1;
+        if (arr[start] == cur && listSrc == src && mp != null && prepared) { toggle(); return; }   // тап по играющей: пауза/продолжить
         queue = arr;
-        listSrc = key.equals(PL_FAV) ? 2 : 1;
+        listSrc = src;
         playAt(arr[start]);
     }
 
     /** Играть общий список с выбранной песни. */
     void playFromGeneral(int idx) {
+        if (idx == cur && listSrc == 0 && mp != null && prepared) { toggle(); return; }   // тап по играющей: пауза/продолжить
         queue = null;
         listSrc = 0;
         playAt(idx);
@@ -2653,6 +2705,16 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
             LinearLayout bar = new LinearLayout(ctx);
             bar.setOrientation(LinearLayout.HORIZONTAL);
+            final TextView link = badge(ctx, "\uD83D\uDD17");
+            link.setVisibility(View.GONE);
+            link.setOnClickListener(new OnClickListener() {
+                @Override public void onClick(View v) {
+                    Object u = v.getTag();
+                    if (u != null) openInBrowser(getContext(), u.toString());
+                }
+            });
+            bar.addView(link);
+            if (tr != null) loadLink(tr.path, link);
             for (int i = 0; i < badgeText.length; i++) {
                 final Runnable act = badgeAct[i];
                 TextView b = badge(ctx, badgeText[i]);

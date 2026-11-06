@@ -38,6 +38,7 @@ class ModuleShareActivity : Activity() {
             try { Toast.makeText(this, "Нечем принять", Toast.LENGTH_SHORT).show() } catch (t: Throwable) { }
         }
         finish()
+        overridePendingTransition(0, 0)
     }
 
     private fun mimeMatch(pattern: String, type: String): Boolean {

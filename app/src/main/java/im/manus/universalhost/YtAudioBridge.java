@@ -174,6 +174,10 @@ public final class YtAudioBridge {
         } catch (Throwable ignore) {
             jpg.delete();
         }
+        try {
+            OutputStream lo = new FileOutputStream(new File(dir, base + ".url"));
+            try { lo.write(url.getBytes("UTF-8")); } finally { lo.close(); }
+        } catch (Throwable ignore) { }
         MediaScannerConnection.scanFile(ctx, new String[]{out.getAbsolutePath()}, null, null);
         return out.getAbsolutePath();
     }
