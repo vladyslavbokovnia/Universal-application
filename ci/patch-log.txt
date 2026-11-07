@@ -1,0 +1,6 @@
+Checking ci/patches/a2-ytaudio-view.patch
+Applying ci/patches/a2-ytaudio-view.patch
+Checking ci/patches/a3-ytaudio-module.patch
+Applying ci/patches/a3-ytaudio-module.patch
+Checking ci/patches/a4-settings-icons.patch
+error: corrupt patch at ci/patches/a4-settings-icons.patch:184
