@@ -29,7 +29,8 @@ import java.util.Set;
  */
 public final class YtAudioQueue {
 
-    public static final String PREFS = "module_YouTube аудио";
+    // Хост хранит настройки модуля под именем module_ + ModuleStorage.safe(имя): всё, кроме латиницы, цифр и _.-, становится «_».
+    public static final String PREFS = "module_" + "YouTube аудио".replaceAll("[^A-Za-z0-9_.-]", "_");
     public static final String QUEUED = "q";      // ждёт загрузки
     public static final String NO_TRACK = "n";    // нет нужной дорожки (остаётся в списке)
     public static final String ERROR = "e";       // ошибка (остаётся в списке)
