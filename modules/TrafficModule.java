@@ -143,15 +143,15 @@ public class TrafficModule implements IPlugin, ISettingsProvider {
     @Override
     public List<SettingItem> getSettingsSchema() {
         List<SettingItem> l = new ArrayList<SettingItem>();
-        l.add(SettingItem.section("Цифры мобильного трафика"));
-        l.add(SettingItem.choice("digits_corner", "Где показывать", "",
+        l.add(SettingItem.section("📶 Цифры мобильного трафика"));
+        l.add(SettingItem.choice("digits_corner", "📍 Где показывать", "",
                 Arrays.asList("Сверху по центру", "Сверху слева", "Сверху справа",
                         "Снизу по центру", "Снизу слева", "Снизу справа"), 0));
-        l.add(SettingItem.slider("digits_size", "Размер цифр", "sp", 12, 48, 2, 27));
-        l.add(SettingItem.choice("digits_weight", "Толщина цифр", "",
+        l.add(SettingItem.slider("digits_size", "🔠 Размер цифр", "sp", 12, 48, 2, 27));
+        l.add(SettingItem.choice("digits_weight", "💪 Толщина цифр", "",
                 Arrays.asList("Тонкие", "Лёгкие", "Обычные"), 0));
-        l.add(SettingItem.slider("digits_outline", "Толщина контура", "%", 2, 20, 1, 8));
-        l.add(SettingItem.slider("traffic_start_day", "День начала учётного периода", "", 1, 31, 1, 1));
+        l.add(SettingItem.slider("digits_outline", "🖍 Толщина контура", "%", 2, 20, 1, 8));
+        l.add(SettingItem.slider("traffic_start_day", "📅 День начала учётного периода", "", 1, 31, 1, 1));
         return l;
     }
 

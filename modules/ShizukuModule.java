@@ -65,12 +65,12 @@ public class ShizukuModule implements IPlugin, ISettingsProvider {
     @Override
     public List<SettingItem> getSettingsSchema() {
         List<SettingItem> l = new ArrayList<SettingItem>();
-        l.add(SettingItem.section("Shizuku"));
-        l.add(SettingItem.action("status", "Состояние Shizuku", "Нажмите, чтобы проверить"));
-        l.add(SettingItem.action("request", "Запросить доступ у Shizuku", "Откроется окно подтверждения"));
-        l.add(SettingItem.section("Служба специальных возможностей"));
-        l.add(SettingItem.action("grant_secure", "Выдать WRITE_SECURE_SETTINGS", "Через Shizuku, один раз"));
-        l.add(SettingItem.toggle("keep_accessibility", "Включать службу самому",
+        l.add(SettingItem.section("🛡 Shizuku"));
+        l.add(SettingItem.action("status", "🩺 Состояние Shizuku", "Нажмите, чтобы проверить"));
+        l.add(SettingItem.action("request", "🔑 Запросить доступ у Shizuku", "Откроется окно подтверждения"));
+        l.add(SettingItem.section("♿ Служба специальных возможностей"));
+        l.add(SettingItem.action("grant_secure", "🔓 Выдать WRITE_SECURE_SETTINGS", "Через Shizuku, один раз"));
+        l.add(SettingItem.toggle("keep_accessibility", "🔁 Включать службу самому",
                 "После перезагрузки, обновления приложения и запуска Shizuku", false));
         return l;
     }

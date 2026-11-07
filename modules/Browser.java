@@ -353,53 +353,53 @@ public class Browser implements IPlugin, ISettingsProvider {
     @Override
     public List<SettingItem> getSettingsSchema() {
         List<SettingItem> l = new ArrayList<SettingItem>();
-        l.add(SettingItem.section("Браузер"));
-        l.add(SettingItem.action("open", "Открыть браузер",
+        l.add(SettingItem.section("🌐 Браузер"));
+        l.add(SettingItem.action("open", "🚀 Открыть браузер",
                 "Окно с вкладками, отдельными сессиями и скриптами. Назад: по истории, потом закрывает окно, вкладки сохраняются"));
-        l.add(SettingItem.text("home_url", "Домашняя страница", "Открывается в новой вкладке", DEF_HOME));
-        l.add(SettingItem.text("search_url", "Поиск", "Адрес поискового запроса, %s подставляется вместо запроса", DEF_SEARCH));
-        l.add(SettingItem.text("user_agent", "User-Agent",
+        l.add(SettingItem.text("home_url", "🏠 Домашняя страница", "Открывается в новой вкладке", DEF_HOME));
+        l.add(SettingItem.text("search_url", "🔎 Поиск", "Адрес поискового запроса, %s подставляется вместо запроса", DEF_SEARCH));
+        l.add(SettingItem.text("user_agent", "🕵 User-Agent",
                 "Пусто: стандартный (без метки «wv»). Если сайт, например вход Google, не пускает во встроенный браузер, впишите строку мобильного Chrome", ""));
-        l.add(SettingItem.toggle("restore_tabs", "Восстанавливать вкладки", "При следующем открытии вернуть вкладки, которые были открыты", true));
-        l.add(SettingItem.toggle("keep_screen_on", "Не гасить экран", "Пока открыт браузер", false));
-        l.add(SettingItem.toggle("fullscreen", "Полноэкранный режим",
+        l.add(SettingItem.toggle("restore_tabs", "♻ Восстанавливать вкладки", "При следующем открытии вернуть вкладки, которые были открыты", true));
+        l.add(SettingItem.toggle("keep_screen_on", "💡 Не гасить экран", "Пока открыт браузер", false));
+        l.add(SettingItem.toggle("fullscreen", "⛶ Полноэкранный режим",
                 "Системные панели скрыты", false));
-        l.add(SettingItem.toggle("autohide_dock", "Прятать кнопку при прокрутке",
+        l.add(SettingItem.toggle("autohide_dock", "👻 Прятать кнопку при прокрутке",
                 "Кнопка прячется, когда страницу листают вниз, и возвращается при прокрутке вверх или в начале страницы", true));
-        l.add(SettingItem.toggle("force_zoom", "Масштабирование на всех сайтах",
+        l.add(SettingItem.toggle("force_zoom", "🔍 Масштабирование на всех сайтах",
                 "Разрешает масштаб щипком и там, где страница запретила его (user-scalable=no); применяется при загрузке страницы", true));
-        l.add(SettingItem.toggle("links_by_scripts", "Ссылки только через скрипты",
+        l.add(SettingItem.toggle("links_by_scripts", "🔗 Ссылки только через скрипты",
                 "Браузер сам не обрабатывает нажатие и долгое нажатие на ссылках: не переходит по ним и не показывает свои меню, всё делают пользовательские скрипты. Применяется к новым вкладкам и при загрузке страницы", true));
-        l.add(SettingItem.toggle("open_tabs_first", "Открывать с панели вкладок", "При запуске браузера сначала показывать панель вкладок", true));
-        l.add(SettingItem.choice("close_mode", "Закрытие вкладок на панели", "Как закрыть карточку вкладки или группы",
+        l.add(SettingItem.toggle("open_tabs_first", "🗂 Открывать с панели вкладок", "При запуске браузера сначала показывать панель вкладок", true));
+        l.add(SettingItem.choice("close_mode", "❌ Закрытие вкладок на панели", "Как закрыть карточку вкладки или группы",
                 java.util.Arrays.asList("Двойное нажатие на карточку", "Двойное нажатие на карточку или нажатие на значок сайта",
                         "Только нажатие на значок сайта", "Двойное нажатие на значок сайта"), 0));
-        l.add(SettingItem.choice("badge_style", "Значки на карточках вкладок", "Вид значков сайта и профиля поверх снимка",
+        l.add(SettingItem.choice("badge_style", "🏷 Значки на карточках вкладок", "Вид значков сайта и профиля поверх снимка",
                 java.util.Arrays.asList("Непрозрачные", "Полупрозрачные", "На тёмном градиенте"), 1));
-        l.add(SettingItem.action("pin_shortcut", "Ярлык на рабочий стол",
+        l.add(SettingItem.action("pin_shortcut", "📌 Ярлык на рабочий стол",
                 "Отдельный значок «Браузер»: окно открывается как самостоятельное приложение со своей карточкой в недавних"));
-        l.add(SettingItem.toggle("tts_bridge", "Озвучка для скриптов",
+        l.add(SettingItem.toggle("tts_bridge", "🗣 Озвучка для скриптов",
                 "Подставляет в страницы speechSynthesis поверх голоса Android, иначе скрипты в WebView молчат. Применяется при следующей загрузке страницы", true));
-        l.add(SettingItem.toggle("ms_bridge", "Кнопки наушников и шторка для скриптов",
+        l.add(SettingItem.toggle("ms_bridge", "🎧 Кнопки наушников и шторка для скриптов",
                 "Подставляет в страницы navigator.mediaSession поверх системной медиа-сессии: озвучка скриптов слушается на кнопки наушников и часов. Применяется при следующей загрузке страницы", true));
 
-        l.add(SettingItem.section("Профили: отдельные сессии для входа в разные аккаунты"));
+        l.add(SettingItem.section("👤 Профили: отдельные сессии для входа в разные аккаунты"));
         for (int i = 0; i < PROFILES; i++) {
             l.add(SettingItem.text("profile_name_" + i, "Профиль " + (i + 1),
                     i == 0 ? "Обычное хранилище WebView, работает всегда" : "Свои cookies и хранилище, нужна поддержка изоляции",
                     PROFILE_DEFAULT_NAMES[i]));
         }
-        l.add(SettingItem.action("isolation_status", "Проверить изоляцию сессий", "Покажет, работают ли профили 2-6 на этом устройстве"));
+        l.add(SettingItem.action("isolation_status", "🧱 Проверить изоляцию сессий", "Покажет, работают ли профили 2-6 на этом устройстве"));
 
-        l.add(SettingItem.section("Скрипты"));
+        l.add(SettingItem.section("📜 Скрипты"));
         File dir = ScriptStore.dir();
         List<UserScript> scripts = ScriptStore.list();
-        l.add(SettingItem.action("scripts_info", "Папка скриптов",
+        l.add(SettingItem.action("scripts_info", "📂 Папка скриптов",
                 dir.getPath() + ", найдено скриптов: " + scripts.size() + ". Файлы *.user.js можно править любым редактором"));
-        l.add(SettingItem.text("install_url", "Ссылка на скрипт", "Адрес файла .user.js, например raw.githubusercontent.com/…", ""));
-        l.add(SettingItem.action("install", "Установить или обновить по ссылке", "Скачивает скрипт по ссылке выше в папку скриптов"));
-        l.add(SettingItem.action("update_all", "Обновить все скрипты", "По @downloadURL / @updateURL, только https"));
-        l.add(SettingItem.toggle("auto_update", "Обновлять скрипты сами", "Раз в сутки при открытии браузера", true));
+        l.add(SettingItem.text("install_url", "🔗 Ссылка на скрипт", "Адрес файла .user.js, например raw.githubusercontent.com/…", ""));
+        l.add(SettingItem.action("install", "⬇ Установить или обновить по ссылке", "Скачивает скрипт по ссылке выше в папку скриптов"));
+        l.add(SettingItem.action("update_all", "🔄 Обновить все скрипты", "По @downloadURL / @updateURL, только https"));
+        l.add(SettingItem.toggle("auto_update", "🤖 Обновлять скрипты сами", "Раз в сутки при открытии браузера", true));
         for (UserScript s : scripts) {
             StringBuilder sum = new StringBuilder(s.runAt);
             List<String> where = s.match.isEmpty() ? s.include : s.match;
