@@ -1,0 +1,77 @@
+diff --git a/app/src/main/kotlin/im/manus/universalhost/ModuleSettingsActivity.kt b/app/src/main/kotlin/im/manus/universalhost/ModuleSettingsActivity.kt
+index c9ed835..aa33823 100644
+--- a/app/src/main/kotlin/im/manus/universalhost/ModuleSettingsActivity.kt
++++ b/app/src/main/kotlin/im/manus/universalhost/ModuleSettingsActivity.kt
+@@ -10,6 +10,7 @@ import android.graphics.drawable.GradientDrawable
+ import android.os.Bundle
+ import android.os.Handler
+ import android.os.Looper
++import android.speech.tts.TextToSpeech
+ import android.view.Gravity
+ import android.view.View
+ import android.widget.EditText
+@@ -20,6 +21,7 @@ import android.widget.SeekBar
+ import android.widget.Switch
+ import android.widget.TextView
+ import android.widget.Toast
++import java.util.Locale
+ 
+ /**
+  * Экран настроек модуля (или папки). Здесь единственное место, где у модулей есть текст:
+@@ -119,6 +121,8 @@ class ModuleSettingsActivity : Activity() {
+ 
+     override fun onDestroy() {
+         ui.removeCallbacks(tick)
++        tts?.shutdown()
++        tts = null
+         super.onDestroy()
+     }
+ 
+@@ -156,7 +160,7 @@ class ModuleSettingsActivity : Activity() {
+         header(IconFactory.forModule(this, plugin, target, 192), target,
+             plugin?.let { "v" + it.version + "  " + it.description } ?: "Модуль не найден")
+ 
+-        val enabled = switchRow("Модуль включён", "Выключенный модуль не запускается", ModuleStorage.isEnabled(this, target)) { on ->
++        val enabled = switchRow("⏻ Модуль включён", "Выключенный модуль не запускается", ModuleStorage.isEnabled(this, target)) { on ->
+             ModuleStorage.setEnabled(this, target, on)
+             CoreAccessibilityService.instance?.refreshPlugins()
+         }
+@@ -185,7 +189,7 @@ class ModuleSettingsActivity : Activity() {
+         val icon = custom?.let { ModuleStorage.loadBitmap(it, 192) } ?: IconFactory.monogram(node.name.ifEmpty { "Папка" }, 192)
+         header(icon, node.name.ifEmpty { "Папка" }, "Модулей в папке: " + node.items.size)
+ 
+-        content.addView(clickRow("Название папки", node.name.ifEmpty { "не задано" }) {
++        content.addView(valueRow("✏️ Название папки", "", node.name.ifEmpty { "не задано" }) {
+             askText("Название папки", node.name) { value ->
+                 val l = ModuleStorage.loadLayout(this)
+                 l.rename(id, value)
+@@ -193,7 +197,7 @@ class ModuleSettingsActivity : Activity() {
+                 build()
+             }
+         })
+-        content.addView(clickRow("Расформировать папку", "Модули вернутся на главный экран") {
++        content.addView(valueRow("📤 Расформировать папку", "Модули вернутся на главный экран", "") {
+             val l = ModuleStorage.loadLayout(this)
+             l.dissolve(id)
+             ModuleStorage.saveLayout(this, l)
+@@ -209,33 +213,137 @@ class ModuleSettingsActivity : Activity() {
+         iv.setImageBitmap(icon)
+         iv.setBackgroundColor(Color.rgb(26, 26, 26))
+         iv.setPadding(dp(8), dp(8), dp(8), dp(8))
+-        iv.setOnClickListener { pickImage(ModuleStorage.KEY_ICON) }
++        iv.setOnClickListener { speak("$title. $subtitle") }
+         row.addView(iv, LinearLayout.LayoutParams(dp(80), dp(80)))
+-        val col = LinearLayout(this)
+-        col.orientation = LinearLayout.COLUDX
+-        col.setPadding(dp(16), 0, 0, 0)
+-        col.addView(text(title, 24f, Color.WHITE, true))
+-        col.addView(text(subtitle, 14f, Color.LTGRAY, false))
+-        row.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
+-        content.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+-
+-        val buttons = LinearLayout(this)
+-        buttons.orientation = LinearLayout.HORIZONTAL
+-        buttons.addView(button("Заменить иконку") { pickImage(ModuleStorage.KEY_ICON) })
+-        buttons.addView(button("Сбросить иконку") {
++        row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
++        row.addView(smallBtn("🖼") { 
