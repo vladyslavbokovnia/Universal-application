@@ -28,6 +28,7 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -158,11 +159,18 @@ public final class YtAudioBridge {
             if (lo != null) langs.add(lo.getDisplayLanguage(new Locale("ru")));
             if (sameLang(s, lang)) wanted.add(s);
         }
+        if (wanted.isEmpty() && looksLike(info, lang)) {
+            // единственная дорожка (язык в потоках не указан) или оригинал: язык видео совпал по тексту
+            Set<String> ids = new HashSet<String>();
+            for (AudioStream s : all) ids.add(s.getAudioTrackId() == null ? "" : s.getAudioTrackId());
+            if (ids.size() <= 1) wanted.addAll(all);
+            else for (AudioStream s : all) if (isOriginal(s)) wanted.add(s);
+        }
         boolean original = false;
         AudioStream pick = best(wanted);
         if (pick == null) {
             if (!fallbackOriginal) {
-                throw new UserError("Нет дорожки «" + lang + "»" + (langs.isEmpty() ? " (у видео одна дорожка)"
+                throw new UserError("Нет дорожки «" + lang + "»" + (langs.isEmpty() ? " (единственная дорожка не русская)"
                         : ". Есть: " + join(langs)));
             }
             List<AudioStream> orig = new ArrayList<AudioStream>();
@@ -206,6 +214,27 @@ public final class YtAudioBridge {
         } catch (Throwable ignore) { }
         MediaScannerConnection.scanFile(ctx, new String[]{out.getAbsolutePath()}, null, null);
         return out.getAbsolutePath();
+    }
+
+    /** Язык видео по тексту (название, канал, начало описания): пока умеем только русский (кириллица без украинских букв). */
+    private static boolean looksLike(StreamInfo info, String lang) {
+        if (!"ru".equalsIgnoreCase(lang)) return false;
+        StringBuilder sb = new StringBuilder();
+        try { sb.append(info.getName()).append(' ').append(info.getUploaderName()).append(' '); } catch (Throwable t) { }
+        try {
+            String d = info.getDescription() == null ? null : info.getDescription().getContent();
+            if (d != null) sb.append(d.length() > 300 ? d.substring(0, 300) : d);
+        } catch (Throwable t) { }
+        String s = sb.toString();
+        int letters = 0, cyr = 0, ukr = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (!Character.isLetter(c)) continue;
+            letters++;
+            if (c >= 0x0400 && c <= 0x04FF) cyr++;
+            if ("\u0456\u0457\u0454\u0491\u0406\u0407\u0404\u0490".indexOf(c) >= 0) ukr++;
+        }
+        return letters >= 3 && cyr * 2 >= letters && ukr == 0;
     }
 
     private static String join(Set<String> s) {
