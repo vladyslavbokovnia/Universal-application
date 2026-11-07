@@ -1193,6 +1193,11 @@ public class Browser implements IPlugin, ISettingsProvider {
         private final List<Bookmark> bookmarks = new ArrayList<Bookmark>();
         private boolean bookmarksLoaded;
         private int bmProfile = -1;                 // профиль, в котором открываются закладки; -1: профиль текущей вкладки
+        private final Map<Long, Long> bmDead = new HashMap<Long, Long>();   // удалённые закладки: id и время удаления (нужно для синхронизации)
+        private long bmOrderStamp;                  // когда порядок закладок менялся в последний раз
+        private long bmOpenFolder;                  // открытая папка закладок; 0: верхний уровень
+        private boolean bmSyncing, bmDragging;
+        private Runnable bmSyncJob;
         private final Map<Integer, Bitmap> profileImgs = new HashMap<Integer, Bitmap>();
         private int scrollAccum;
         private long dockToggleAt;
@@ -2272,6 +2277,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             final Tab t = cur;
             if (t == null) return;
             loadBookmarks();
+            if (keyboard) bmOpenFolder = 0;         // свежее открытие начинается с верхнего уровня закладок
             LinearLayout root = new LinearLayout(act);
             root.setOrientation(LinearLayout.VERTICAL);
             root.setPadding(dp(12), dp(16), dp(12), 0);
@@ -2349,14 +2355,37 @@ public class Browser implements IPlugin, ISettingsProvider {
             });
             cells.add(pb);
 
-            for (final Bookmark b : new ArrayList<Bookmark>(bookmarks)) {
+            final BmDrag drag = new BmDrag(new Runnable() {
+                @Override public void run() { showStart(forNew, false); }
+            });
+            if (bmOpenFolder != 0) {            // внутри папки: «‹» ведёт наверх, и на него же можно бросить закладку, чтобы вынуть её
+                TextView up = glyph("‹", C_TEXT);
+                up.setTextSize(30);
+                up.setBackground(round(C_SURFACE2, 28, 0, 0));
+                up.setClickable(true);
+                up.setFocusable(true);
+                up.setContentDescription("Из папки наверх. Сюда можно перетащить закладку, чтобы вынуть её из папки");
+                up.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        bmOpenFolder = 0;
+                        showStart(forNew, false);
+                    }
+                });
+                drag.addTarget(up, null);
+                cells.add(up);
+            }
+            for (final Bookmark b : visibleBookmarks()) {
                 View ic = bookmarkIcon(b, 56);
                 ic.setClickable(true);
                 ic.setFocusable(true);
-                ic.setContentDescription("Закладка: " + b.title + ", " + hostOf(b.url) + ", профиль " + profileName(sel));
-                ic.setOnClickListener(new View.OnClickListener() {
-                    @Override public void onClick(View v) {
-                        if (forNew && cur != null) {
+                ic.setContentDescription(b.folder ? "Папка: " + b.title
+                        : "Закладка: " + b.title + ", " + hostOf(b.url) + ", профиль " + profileName(sel));
+                Runnable tap = new Runnable() {
+                    @Override public void run() {
+                        if (b.folder) {
+                            bmOpenFolder = b.id;
+                            showStart(forNew, false);
+                        } else if (forNew && cur != null) {
                             closeLayer(false);
                             applyStartProfile();
                             navigate(cur, b.url);         // новая вкладка сразу открывает закладку, пустой вкладки не остаётся
@@ -2364,14 +2393,14 @@ public class Browser implements IPlugin, ISettingsProvider {
                             openBookmark(b, bookmarkTargetProfile(), true);
                         }
                     }
-                });
-                ic.setOnLongClickListener(new View.OnLongClickListener() {
-                    @Override public boolean onLongClick(View v) {
+                };
+                Runnable menu = new Runnable() {
+                    @Override public void run() {
                         startForNew = forNew;
-                        showBookmarkMenu(b);
-                        return true;
+                        if (b.folder) showFolderMenu(b); else showBookmarkMenu(b);
                     }
-                });
+                };
+                drag.bind(ic, b, tap, menu);
                 cells.add(ic);
             }
 
@@ -2387,18 +2416,6 @@ public class Browser implements IPlugin, ISettingsProvider {
                 }
             });
             cells.add(plus);
-
-            if (!forNew) {
-                TextView np = glyph("＋", C_TEXT);
-                np.setBackground(round(C_SURFACE2, 28, 0, 0));
-                np.setClickable(true);
-                np.setFocusable(true);
-                np.setContentDescription("Новая вкладка с выбранным профилем и введённым адресом или запросом");
-                np.setOnClickListener(new View.OnClickListener() {
-                    @Override public void onClick(View v) { openNewTabFromStart(box.getText().toString()); }
-                });
-                cells.add(np);
-            }
 
             ScrollView sv = new ScrollView(act);
             LinearLayout grid = new LinearLayout(act);
@@ -5146,6 +5163,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 applyFullscreen();
             } });
             addG(items, "bookmark", "⭐", "Добавить в закладки", new Runnable() { @Override public void run() { addBookmark(t); } });
+            addG(items, "bmsync", "☁", "Синхронизация закладок…", new Runnable() { @Override public void run() { showBookmarkSync(); } });
             addG(items, "copy", "🔗", "Скопировать ссылку", new Runnable() { @Override public void run() {
                 try {
                     ((ClipboardManager) act.getSystemService(Context.CLIPBOARD_SERVICE))
@@ -5631,6 +5649,9 @@ public class Browser implements IPlugin, ISettingsProvider {
             String url;
             String title;
             int profile;
+            boolean folder;         // папка: в ней лежат закладки (один уровень)
+            long parent;            // id папки; 0: верхний уровень
+            long mod;               // время последнего изменения, по нему сливаются правки с разных устройств
             Bitmap icon;
             boolean iconTried;
 
@@ -5639,40 +5660,139 @@ public class Browser implements IPlugin, ISettingsProvider {
                 this.url = url;
                 this.title = title;
                 this.profile = profile;
+                this.mod = id;
             }
         }
 
         private File bookmarkIconFile(Bookmark b) { return new File(thumbDir(), "bm_" + b.id + ".png"); }
 
+        private Bookmark bookmarkFromJson(JSONObject o, int i) {
+            boolean folder = o.optInt("f", 0) == 1;
+            String u = o.optString("u", "");
+            if (u.length() == 0 && !folder) return null;
+            long id = o.optLong("i", System.currentTimeMillis() + i);
+            Bookmark b = new Bookmark(id, u, o.optString("t", ""), Math.max(0, Math.min(PROFILES - 1, o.optInt("p", 0))));
+            b.folder = folder;
+            b.parent = o.optLong("par", 0);
+            b.mod = o.optLong("m", id);
+            return b;
+        }
+
+        private JSONObject bookmarkToJson(Bookmark b) throws JSONException {
+            JSONObject o = new JSONObject();
+            o.put("i", b.id);
+            o.put("u", b.url);
+            o.put("t", b.title);
+            o.put("p", b.profile);
+            if (b.folder) o.put("f", 1);
+            if (b.parent != 0) o.put("par", b.parent);
+            o.put("m", b.mod);
+            return o;
+        }
+
+        /** Все закладки одной строкой: так они лежат и в настройках, и в файле синхронизации. */
+        private String bookmarksJson() {
+            try {
+                JSONObject root = new JSONObject();
+                root.put("v", 2);
+                root.put("ot", bmOrderStamp);
+                JSONArray a = new JSONArray();
+                for (Bookmark b : bookmarks) a.put(bookmarkToJson(b));
+                root.put("items", a);
+                List<Long> ids = new ArrayList<Long>(bmDead.keySet());
+                Collections.sort(ids);
+                JSONArray d = new JSONArray();
+                for (Long id : ids) {
+                    JSONObject o = new JSONObject();
+                    o.put("i", id.longValue());
+                    o.put("m", bmDead.get(id).longValue());
+                    d.put(o);
+                }
+                root.put("dead", d);
+                return root.toString();
+            } catch (Throwable e) {
+                return "{}";
+            }
+        }
+
+        /** Разбор строки закладок: и старый формат (просто список), и новый (закладки, папки, удалённые, время порядка). */
+        private void parseBookmarks(String raw, List<Bookmark> items, Map<Long, Long> dead, long[] orderStamp) throws JSONException {
+            JSONArray a;
+            if (raw.trim().startsWith("{")) {
+                JSONObject root = new JSONObject(raw);
+                a = root.optJSONArray("items");
+                if (a == null) a = new JSONArray();
+                orderStamp[0] = root.optLong("ot", 0);
+                JSONArray d = root.optJSONArray("dead");
+                if (d != null) {
+                    for (int i = 0; i < d.length(); i++) {
+                        JSONObject o = d.getJSONObject(i);
+                        dead.put(o.optLong("i"), o.optLong("m"));
+                    }
+                }
+            } else {
+                a = new JSONArray(raw);
+            }
+            for (int i = 0; i < a.length(); i++) {
+                Bookmark b = bookmarkFromJson(a.getJSONObject(i), i);
+                if (b != null) items.add(b);
+            }
+        }
+
         private void loadBookmarks() {
             if (bookmarksLoaded) return;
             bookmarksLoaded = true;
             bookmarks.clear();
+            bmDead.clear();
             try {
-                JSONArray a = new JSONArray(sp.getString("bookmarks", "[]"));
-                for (int i = 0; i < a.length(); i++) {
-                    JSONObject o = a.getJSONObject(i);
-                    String u = o.optString("u", "");
-                    if (u.length() == 0) continue;
-                    bookmarks.add(new Bookmark(o.optLong("i", System.currentTimeMillis() + i), u, o.optString("t", ""),
-                            Math.max(0, Math.min(PROFILES - 1, o.optInt("p", 0)))));
-                }
+                long[] ot = new long[1];
+                parseBookmarks(sp.getString("bookmarks", "[]"), bookmarks, bmDead, ot);
+                bmOrderStamp = ot[0];
             } catch (Throwable ignored) { }
+            fixBookmarkParents();
+            scheduleBookmarkSync(2500);
+        }
+
+        /** Папки только на одном уровне: закладка с несуществующей папкой или папка внутри папки уходит на верхний уровень. */
+        private void fixBookmarkParents() {
+            Set<Long> folders = new HashSet<Long>();
+            for (Bookmark b : bookmarks) if (b.folder) folders.add(b.id);
+            for (Bookmark b : bookmarks) {
+                if (b.parent != 0 && (!folders.contains(b.parent) || b.folder || b.parent == b.id)) b.parent = 0;
+            }
+            if (bmOpenFolder != 0 && !folders.contains(bmOpenFolder)) bmOpenFolder = 0;
+        }
+
+        private Bookmark findBookmark(long id) {
+            for (Bookmark b : bookmarks) if (b.id == id) return b;
+            return null;
+        }
+
+        /** Закладки открытого уровня: верхнего или внутри открытой папки. */
+        private List<Bookmark> visibleBookmarks() {
+            fixBookmarkParents();
+            List<Bookmark> out = new ArrayList<Bookmark>();
+            for (Bookmark b : bookmarks) if (b.parent == bmOpenFolder) out.add(b);
+            return out;
+        }
+
+        private void saveBookmarksLocal() {
+            long cut = System.currentTimeMillis() - 90L * 24 * 3600 * 1000;
+            java.util.Iterator<Map.Entry<Long, Long>> it = bmDead.entrySet().iterator();
+            while (it.hasNext()) if (it.next().getValue().longValue() < cut) it.remove();
+            try { sp.edit().putString("bookmarks", bookmarksJson()).apply(); } catch (Throwable ignored) { }
         }
 
         private void saveBookmarks() {
-            try {
-                JSONArray a = new JSONArray();
-                for (Bookmark b : bookmarks) {
-                    JSONObject o = new JSONObject();
-                    o.put("i", b.id);
-                    o.put("u", b.url);
-                    o.put("t", b.title);
-                    o.put("p", b.profile);
-                    a.put(o);
-                }
-                sp.edit().putString("bookmarks", a.toString()).apply();
-            } catch (Throwable ignored) { }
+            saveBookmarksLocal();
+            scheduleBookmarkSync(5000);
+        }
+
+        /** Удалить закладку или папку; время удаления запоминается, чтобы синхронизация не вернула её с другого устройства. */
+        private void removeBookmark(Bookmark b) {
+            bookmarks.remove(b);
+            bmDead.put(b.id, System.currentTimeMillis());
+            try { bookmarkIconFile(b).delete(); } catch (Throwable ignored) { }
         }
 
         private void addBookmark(Tab t) {
@@ -5681,6 +5801,8 @@ public class Browser implements IPlugin, ISettingsProvider {
             if (u == null || !(u.startsWith("http://") || u.startsWith("https://"))) { toast("Эту страницу в закладки не добавить"); return; }
             for (Bookmark x : bookmarks) if (x.url.equals(u)) { toast("Уже в закладках"); return; }
             Bookmark b = new Bookmark(System.currentTimeMillis(), u, tabTitle(t), t.profile);
+            b.parent = bmOpenFolder;            // в открытую папку, если она открыта
+            bmOrderStamp = b.id;
             Bitmap ic = iconOf(t);
             if (ic != null) {
                 b.icon = ic;
@@ -5694,6 +5816,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         private Bitmap bookmarkIconOf(Bookmark b) {
+            if (b.folder) return null;
             if (b.icon == null && !b.iconTried) {
                 b.iconTried = true;
                 b.icon = loadBitmap(bookmarkIconFile(b));
@@ -5739,6 +5862,14 @@ public class Browser implements IPlugin, ISettingsProvider {
         }
 
         private View bookmarkIcon(Bookmark b, int sizeDp) {
+            if (b.folder) {
+                TextView f = new TextView(act);
+                f.setText("📁");
+                f.setTextSize(Math.max(10, sizeDp * 0.46f));
+                f.setGravity(Gravity.CENTER);
+                f.setBackground(round(C_SURFACE2, sizeDp / 2, C_TEXT2, 1));
+                return f;
+            }
             Bitmap ic = bookmarkIconOf(b);
             if (ic != null) {
                 ImageView iv = new ImageView(act);
@@ -5858,15 +5989,26 @@ public class Browser implements IPlugin, ISettingsProvider {
                     @Override public void done(String value) {
                         if (value != null && value.trim().length() > 0) {
                             b.title = value.trim();
+                            b.mod = System.currentTimeMillis();
                             saveBookmarks();
                         }
                         afterBookmarkChange();
                     }
                 });
             } });
+            if (b.parent != 0) {
+                add(icons, labels, actions, "⇧", "Вынуть из папки", new Runnable() { @Override public void run() {
+                    b.parent = 0;
+                    b.mod = System.currentTimeMillis();
+                    bmOrderStamp = b.mod;
+                    saveBookmarks();
+                    afterBookmarkChange();
+                } });
+            }
             add(icons, labels, actions, "⇤", "Переместить в начало", new Runnable() { @Override public void run() {
                 bookmarks.remove(b);
                 bookmarks.add(0, b);
+                bmOrderStamp = System.currentTimeMillis();
                 saveBookmarks();
                 afterBookmarkChange();
             } });
@@ -5887,12 +6029,519 @@ public class Browser implements IPlugin, ISettingsProvider {
                 afterBookmarkChange();
             } });
             add(icons, labels, actions, "✕", "Удалить закладку", new Runnable() { @Override public void run() {
-                bookmarks.remove(b);
-                try { bookmarkIconFile(b).delete(); } catch (Throwable ignored) { }
+                removeBookmark(b);
                 saveBookmarks();
                 afterBookmarkChange();
             } });
             showList(b.title.length() > 0 ? b.title : hostOf(b.url), icons, labels, actions);
+        }
+
+        /** Долгое нажатие на папку без перетаскивания. */
+        private void showFolderMenu(final Bookmark f) {
+            List<View> icons = new ArrayList<View>();
+            List<String> labels = new ArrayList<String>();
+            List<Runnable> actions = new ArrayList<Runnable>();
+            add(icons, labels, actions, "📂", "Открыть папку", new Runnable() { @Override public void run() {
+                bmOpenFolder = f.id;
+                afterBookmarkChange();
+            } });
+            add(icons, labels, actions, "✎", "Переименовать", new Runnable() { @Override public void run() {
+                showPrompt("Название папки", null, f.title, new PromptDone() {
+                    @Override public void done(String value) {
+                        if (value != null && value.trim().length() > 0) {
+                            f.title = value.trim();
+                            f.mod = System.currentTimeMillis();
+                            saveBookmarks();
+                        }
+                        afterBookmarkChange();
+                    }
+                });
+            } });
+            add(icons, labels, actions, "⤢", "Расформировать папку", new Runnable() { @Override public void run() {
+                long now = System.currentTimeMillis();
+                for (Bookmark b : new ArrayList<Bookmark>(bookmarks)) {
+                    if (b.parent == f.id) { b.parent = f.parent; b.mod = now; }
+                }
+                removeBookmark(f);
+                if (bmOpenFolder == f.id) bmOpenFolder = 0;
+                bmOrderStamp = now;
+                saveBookmarks();
+                afterBookmarkChange();
+            } });
+            add(icons, labels, actions, "✕", "Удалить папку и закладки в ней", new Runnable() { @Override public void run() {
+                for (Bookmark b : new ArrayList<Bookmark>(bookmarks)) if (b.parent == f.id) removeBookmark(b);
+                removeBookmark(f);
+                if (bmOpenFolder == f.id) bmOpenFolder = 0;
+                saveBookmarks();
+                afterBookmarkChange();
+            } });
+            showList(f.title.length() > 0 ? f.title : "Папка", icons, labels, actions);
+        }
+
+        // ------------------------------------------------------------ закладки: перетаскивание значков и папки
+
+        /**
+         * Перетаскивание значков на экране «поиск и закладки». Долгое нажатие поднимает значок.
+         * Отпустили на середине другого значка: в папку (на обычной закладке получится новая папка из двух).
+         * На левой или правой четверти: перед ним или после него. На «‹»: вынуть из открытой папки наверх.
+         * Значок не сдвинули: открывается меню закладки или папки.
+         */
+        private final class BmDrag {
+            private final List<View> views = new ArrayList<View>();
+            private final List<Bookmark> items = new ArrayList<Bookmark>();      // null: ячейка «наверх»
+            private final List<Runnable> menus = new ArrayList<Runnable>();
+            private final Runnable refresh;
+            private View curView;
+            private Bookmark curItem;
+            private View ghost;
+            private float startX, startY, lastX, lastY, ghostX, ghostY;
+            private boolean moved;
+            private int hot = -1, hotZone;
+            private boolean hotGroup;
+
+            BmDrag(Runnable refresh) { this.refresh = refresh; }
+
+            /** Ячейка, на которую можно бросить значок, но которую саму не перетащить. */
+            void addTarget(View v, Bookmark b) {
+                views.add(v);
+                items.add(b);
+                menus.add(null);
+            }
+
+            void bind(final View v, final Bookmark b, final Runnable onTap, final Runnable onMenu) {
+                views.add(v);
+                items.add(b);
+                menus.add(onMenu);
+                v.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View x) { onTap.run(); }
+                });
+                v.setOnLongClickListener(new View.OnLongClickListener() {
+                    @Override public boolean onLongClick(View x) {
+                        begin(x, b);
+                        return true;
+                    }
+                });
+                v.setOnTouchListener(new View.OnTouchListener() {
+                    @Override public boolean onTouch(View x, MotionEvent e) {
+                        lastX = e.getRawX();
+                        lastY = e.getRawY();
+                        if (curView != x) return false;
+                        int a = e.getActionMasked();
+                        if (a == MotionEvent.ACTION_MOVE) move();
+                        else if (a == MotionEvent.ACTION_UP) end(true);
+                        else if (a == MotionEvent.ACTION_CANCEL) end(false);
+                        return true;
+                    }
+                });
+            }
+
+            private void begin(View v, Bookmark b) {
+                if (curView != null) return;
+                curView = v;
+                curItem = b;
+                moved = false;
+                hot = -1;
+                startX = lastX;
+                startY = lastY;
+                bmDragging = true;
+                try { v.getParent().requestDisallowInterceptTouchEvent(true); } catch (Throwable ignored) { }
+                try { v.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS); } catch (Throwable ignored) { }
+                ViewGroup decor = (ViewGroup) act.getWindow().getDecorView();
+                int px = v.getWidth() > 0 ? v.getWidth() : dp(56);
+                int sizeDp = Math.max(24, Math.round(px / act.getResources().getDisplayMetrics().density));
+                ghost = bookmarkIcon(b, sizeDp);
+                int spec = View.MeasureSpec.makeMeasureSpec(px, View.MeasureSpec.EXACTLY);
+                ghost.measure(spec, spec);
+                ghost.layout(0, 0, px, px);
+                int[] vl = new int[2];
+                int[] dl = new int[2];
+                v.getLocationOnScreen(vl);
+                decor.getLocationOnScreen(dl);
+                ghostX = vl[0] - dl[0];
+                ghostY = vl[1] - dl[1];
+                ghost.setTranslationX(ghostX);
+                ghost.setTranslationY(ghostY);
+                ghost.setAlpha(0.92f);
+                ghost.setScaleX(1.12f);
+                ghost.setScaleY(1.12f);
+                decor.getOverlay().add(ghost);
+                v.setAlpha(0.25f);
+            }
+
+            private void move() {
+                if (ghost == null) return;
+                float dx = lastX - startX, dy = lastY - startY;
+                ghost.setTranslationX(ghostX + dx);
+                ghost.setTranslationY(ghostY + dy);
+                if (!moved && Math.abs(dx) + Math.abs(dy) > dp(10)) moved = true;
+                if (!moved) return;
+                int idx = -1, zone = 1;
+                boolean group = false;
+                int[] loc = new int[2];
+                for (int i = 0; i < views.size(); i++) {
+                    View t = views.get(i);
+                    if (t == curView) continue;
+                    View box = t.getParent() instanceof View ? (View) t.getParent() : t;      // попадание считается по всей ячейке, а не только по значку
+                    box.getLocationOnScreen(loc);
+                    if (lastX < loc[0] || lastX > loc[0] + box.getWidth() || lastY < loc[1] || lastY > loc[1] + box.getHeight()) continue;
+                    idx = i;
+                    float fx = (lastX - loc[0]) / Math.max(1f, box.getWidth());
+                    zone = fx < 0.25f ? 0 : (fx > 0.75f ? 2 : 1);
+                    Bookmark it = items.get(i);
+                    group = zone == 1 && (it == null || (!curItem.folder && (it.folder || bmOpenFolder == 0)));
+                    if (zone == 1 && !group) zone = fx < 0.5f ? 0 : 2;
+                    break;
+                }
+                if (idx == hot && zone == hotZone && group == hotGroup) return;
+                clearHot();
+                hot = idx;
+                hotZone = zone;
+                hotGroup = group;
+                if (idx >= 0) {
+                    View t = views.get(idx);
+                    if (group) {
+                        t.setScaleX(1.2f);
+                        t.setScaleY(1.2f);
+                    } else {
+                        t.setTranslationX(zone == 0 ? -dp(10) : dp(10));       // сдвиг в сторону вставки
+                    }
+                    try { t.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK); } catch (Throwable ignored) { }
+                }
+            }
+
+            private void clearHot() {
+                if (hot >= 0 && hot < views.size()) {
+                    View t = views.get(hot);
+                    t.setScaleX(1f);
+                    t.setScaleY(1f);
+                    t.setTranslationX(0f);
+                }
+                hot = -1;
+            }
+
+            private void end(boolean commit) {
+                View v = curView;
+                Bookmark d = curItem;
+                boolean was = moved;
+                int idx = hot, zone = hotZone;
+                boolean group = hotGroup;
+                clearHot();
+                try { ((ViewGroup) act.getWindow().getDecorView()).getOverlay().remove(ghost); } catch (Throwable ignored) { }
+                ghost = null;
+                curView = null;
+                curItem = null;
+                moved = false;
+                bmDragging = false;
+                if (v != null) {
+                    v.setAlpha(1f);
+                    v.setPressed(false);
+                }
+                if (!commit || d == null) return;
+                if (!was) {                         // значок не сдвинули: меню
+                    int me = views.indexOf(v);
+                    Runnable m = me >= 0 ? menus.get(me) : null;
+                    if (m != null) m.run();
+                    return;
+                }
+                if (idx < 0) return;                // бросили мимо значков: ничего не меняется
+                long now = System.currentTimeMillis();
+                Bookmark t = items.get(idx);
+                if (t == null) {                    // «наверх»: вынуть из папки, значок встаёт сразу за ней
+                    if (d.parent == 0) return;
+                    Bookmark folder = findBookmark(d.parent);
+                    d.parent = 0;
+                    d.mod = now;
+                    if (folder != null) {
+                        bookmarks.remove(d);
+                        bookmarks.add(Math.min(bookmarks.indexOf(folder) + 1, bookmarks.size()), d);
+                    }
+                } else if (group && t.folder) {
+                    d.parent = t.id;
+                    d.mod = now;
+                } else if (group) {
+                    Bookmark f = new Bookmark(now, "", "Папка", 0);
+                    f.folder = true;
+                    f.parent = t.parent;
+                    f.mod = now;
+                    bookmarks.add(Math.max(0, bookmarks.indexOf(t)), f);
+                    t.parent = f.id;
+                    t.mod = now;
+                    d.parent = f.id;
+                    d.mod = now;
+                } else {
+                    bookmarks.remove(d);
+                    int ti = bookmarks.indexOf(t);
+                    if (zone == 2) ti++;
+                    bookmarks.add(Math.max(0, Math.min(ti, bookmarks.size())), d);
+                    d.parent = t.parent;
+                    d.mod = now;
+                }
+                bmOrderStamp = now;
+                saveBookmarks();
+                refresh.run();
+            }
+        }
+
+        // ------------------------------------------------------------ закладки: синхронизация через GitHub
+
+        private boolean ghConfigured() {
+            return sp.getString("gh_repo", "").trim().contains("/") && sp.getString("gh_token", "").trim().length() > 0;
+        }
+
+        /** Синхронизация через небольшую паузу после правки и при первом открытии закладок. */
+        private void scheduleBookmarkSync(long delayMs) {
+            if (closed || !ghConfigured()) return;
+            if (bmSyncJob != null) h.removeCallbacks(bmSyncJob);
+            bmSyncJob = new Runnable() {
+                @Override public void run() {
+                    bmSyncJob = null;
+                    syncBookmarks(false);
+                }
+            };
+            h.postDelayed(bmSyncJob, delayMs);
+        }
+
+        private String ghError(int code, String body) {
+            String msg = "";
+            try { msg = new JSONObject(body).optString("message", ""); } catch (Throwable ignored) { }
+            if (code == 401) return "GitHub: токен не подходит (401)";
+            if (code == 403) return "GitHub: нет доступа или лимит запросов (403) " + msg;
+            if (code == 404) return "GitHub: репозиторий не найден (404). Токену нужен доступ Contents: Read and write к этому репозиторию";
+            return "GitHub: HTTP " + code + (msg.length() > 0 ? " " + msg : "");
+        }
+
+        /** Один запрос к API GitHub: {код ответа, тело}. */
+        private String[] ghRequest(String method, String url, String token, String body) throws IOException {
+            HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+            try {
+                c.setRequestMethod(method);
+                c.setConnectTimeout(15000);
+                c.setReadTimeout(25000);
+                c.setRequestProperty("Authorization", "Bearer " + token);
+                c.setRequestProperty("Accept", "application/vnd.github+json");
+                c.setRequestProperty("X-GitHub-Api-Version", "2022-11-28");
+                c.setRequestProperty("User-Agent", "UniversalBrowser/1");
+                if (body != null) {
+                    c.setDoOutput(true);
+                    c.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                    OutputStream os = c.getOutputStream();
+                    try {
+                        os.write(body.getBytes("UTF-8"));
+                    } finally {
+                        os.close();
+                    }
+                }
+                int code = c.getResponseCode();
+                InputStream is = code >= 400 ? c.getErrorStream() : c.getInputStream();
+                String text = is == null ? "" : new String(Net.readAll(is, 2 * 1024 * 1024), "UTF-8");
+                return new String[]{String.valueOf(code), text};
+            } finally {
+                c.disconnect();
+            }
+        }
+
+        /**
+         * Слить закладки из файла в GitHub с локальными: у каждой закладки и папки побеждает более поздняя правка,
+         * удалённое остаётся удалённым, если после удаления её не правили. Порядок берётся с той стороны, где его меняли позже.
+         * Вызывается на главном потоке. Возвращает итоговый текст файла.
+         */
+        private String mergeRemoteBookmarks(String remoteRaw) throws JSONException {
+            loadBookmarks();
+            if (remoteRaw != null && remoteRaw.trim().length() > 0) {
+                List<Bookmark> ri = new ArrayList<Bookmark>();
+                Map<Long, Long> rd = new HashMap<Long, Long>();
+                long[] rot = new long[1];
+                parseBookmarks(remoteRaw, ri, rd, rot);
+                Map<Long, Bookmark> local = new HashMap<Long, Bookmark>();
+                for (Bookmark b : bookmarks) local.put(b.id, b);
+                Map<Long, Bookmark> remote = new HashMap<Long, Bookmark>();
+                for (Bookmark b : ri) remote.put(b.id, b);
+                for (Map.Entry<Long, Long> e : rd.entrySet()) {
+                    Long mine = bmDead.get(e.getKey());
+                    if (mine == null || mine.longValue() < e.getValue().longValue()) bmDead.put(e.getKey(), e.getValue());
+                }
+                Set<Long> ids = new HashSet<Long>(local.keySet());
+                ids.addAll(remote.keySet());
+                Map<Long, Bookmark> res = new HashMap<Long, Bookmark>();
+                for (Long id : ids) {
+                    Bookmark l = local.get(id);
+                    Bookmark r = remote.get(id);
+                    Bookmark win;
+                    if (l != null && r != null) {
+                        if (r.mod > l.mod) {            // поля берутся из удалённой записи, а значок остаётся у локальной
+                            l.url = r.url;
+                            l.title = r.title;
+                            l.profile = r.profile;
+                            l.folder = r.folder;
+                            l.parent = r.parent;
+                            l.mod = r.mod;
+                        }
+                        win = l;
+                    } else {
+                        win = l != null ? l : r;
+                    }
+                    Long dm = bmDead.get(id);
+                    if (dm != null) {
+                        if (dm.longValue() >= win.mod) continue;
+                        bmDead.remove(id);
+                    }
+                    res.put(id, win);
+                }
+                List<Bookmark> first = rot[0] > bmOrderStamp ? ri : bookmarks;
+                List<Bookmark> second = first == ri ? bookmarks : ri;
+                Set<Long> seen = new HashSet<Long>();
+                List<Bookmark> out = new ArrayList<Bookmark>();
+                for (Bookmark b : first) if (res.containsKey(b.id) && seen.add(b.id)) out.add(res.get(b.id));
+                for (Bookmark b : second) if (res.containsKey(b.id) && seen.add(b.id)) out.add(res.get(b.id));
+                bookmarks.clear();
+                bookmarks.addAll(out);
+                bmOrderStamp = Math.max(bmOrderStamp, rot[0]);
+                fixBookmarkParents();
+            }
+            saveBookmarksLocal();
+            return bookmarksJson();
+        }
+
+        private void syncBookmarks(final boolean manual) {
+            if (closed) return;
+            if (!ghConfigured()) {
+                if (manual) toast("Синхронизация не настроена");
+                return;
+            }
+            if (bmSyncing) {
+                if (manual) toast("Синхронизация уже идёт");
+                return;
+            }
+            loadBookmarks();
+            bmSyncing = true;
+            final String repo = sp.getString("gh_repo", "").trim();
+            final String token = sp.getString("gh_token", "").trim();
+            final String path = sp.getString("gh_path", "bookmarks.json").trim();
+            final String branch = sp.getString("gh_branch", "").trim();
+            try {
+                pool.execute(new Runnable() {
+                    @Override public void run() { syncWorker(manual, repo, token, path, branch); }
+                });
+            } catch (Throwable e) {
+                bmSyncing = false;
+            }
+        }
+
+        /** Работа в фоновом потоке: прочитать файл, слить на главном потоке, записать обратно, если что-то изменилось. */
+        private void syncWorker(final boolean manual, String repo, String token, String path, String branch) {
+            String err = null;
+            boolean pushed = false;
+            try {
+                String api = "https://api.github.com/repos/" + repo + "/contents/" + path;
+                String q = branch.length() > 0 ? "?ref=" + URLEncoder.encode(branch, "UTF-8") : "";
+                for (int attempt = 0; attempt < 2; attempt++) {
+                    String[] r = ghRequest("GET", api + q, token, null);
+                    int code = Integer.parseInt(r[0]);
+                    String sha = null;
+                    String remoteRaw = null;
+                    if (code == 200) {
+                        JSONObject o = new JSONObject(r[1]);
+                        sha = o.optString("sha", "");
+                        if (sha.length() == 0) sha = null;
+                        remoteRaw = new String(Base64.decode(o.optString("content", ""), Base64.DEFAULT), "UTF-8");
+                    } else if (code != 404) {
+                        throw new IOException(ghError(code, r[1]));
+                    }
+                    final String remote = remoteRaw;
+                    final String[] merged = new String[1];
+                    final String[] fail = new String[1];
+                    final java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+                    h.post(new Runnable() {
+                        @Override public void run() {
+                            try {
+                                merged[0] = mergeRemoteBookmarks(remote);
+                            } catch (Throwable e) {
+                                fail[0] = String.valueOf(e);
+                            }
+                            done.countDown();
+                        }
+                    });
+                    if (!done.await(20, java.util.concurrent.TimeUnit.SECONDS)) throw new IOException("браузер не ответил");
+                    if (merged[0] == null) throw new IOException("файл закладок в репозитории повреждён: " + fail[0]);
+                    if (merged[0].equals(remote)) break;          // уже одинаково
+                    JSONObject body = new JSONObject();
+                    body.put("message", "Синхронизация закладок");
+                    body.put("content", Base64.encodeToString(merged[0].getBytes("UTF-8"), Base64.NO_WRAP));
+                    if (sha != null) body.put("sha", sha);
+                    if (branch.length() > 0) body.put("branch", branch);
+                    String[] w = ghRequest("PUT", api, token, body.toString());
+                    int wc = Integer.parseInt(w[0]);
+                    if (wc == 200 || wc == 201) {
+                        pushed = true;
+                        break;
+                    }
+                    if ((wc == 409 || wc == 422) && attempt == 0) continue;     // файл успели изменить: прочитать заново и слить ещё раз
+                    throw new IOException(ghError(wc, w[1]));
+                }
+            } catch (Throwable e) {
+                err = e.getMessage() != null ? e.getMessage() : String.valueOf(e);
+            }
+            final String fe = err;
+            final boolean fp = pushed;
+            h.post(new Runnable() {
+                @Override public void run() {
+                    bmSyncing = false;
+                    if (closed) return;
+                    if (fe != null) {
+                        if (manual || fe.startsWith("GitHub")) toast("Синхронизация закладок: " + fe);     // сетевые сбои без ручного запуска молчат
+                        return;
+                    }
+                    if (manual) toast(fp ? "Закладки синхронизированы" : "Закладки актуальны");
+                }
+            });
+        }
+
+        private void showBookmarkSync() {
+            List<View> icons = new ArrayList<View>();
+            List<String> labels = new ArrayList<String>();
+            List<Runnable> actions = new ArrayList<Runnable>();
+            final String repo = sp.getString("gh_repo", "").trim();
+            boolean hasToken = sp.getString("gh_token", "").trim().length() > 0;
+            if (ghConfigured()) {
+                add(icons, labels, actions, "⟳", "Синхронизировать сейчас", new Runnable() { @Override public void run() {
+                    closeLayer(false);
+                    syncBookmarks(true);
+                } });
+            }
+            add(icons, labels, actions, "🗂", "Репозиторий: " + (repo.length() > 0 ? repo : "не задан"), new Runnable() { @Override public void run() {
+                showPrompt("Репозиторий GitHub", "Приватный репозиторий в виде логин/имя. Закладки лягут в нём в файл bookmarks.json.", repo, new PromptDone() {
+                    @Override public void done(String value) {
+                        if (value != null) {
+                            String v = value.trim();
+                            if (v.startsWith("https://github.com/")) v = v.substring("https://github.com/".length());
+                            if (v.endsWith("/")) v = v.substring(0, v.length() - 1);
+                            if (v.endsWith(".git")) v = v.substring(0, v.length() - 4);
+                            sp.edit().putString("gh_repo", v).apply();
+                        }
+                        showBookmarkSync();
+                    }
+                });
+            } });
+            add(icons, labels, actions, "🔑", "Токен: " + (hasToken ? "задан" : "не задан"), new Runnable() { @Override public void run() {
+                showPrompt("Токен GitHub", "Fine-grained токен только к этому репозиторию, право Contents: Read and write. Хранится только в этом приложении.", "", new PromptDone() {
+                    @Override public void done(String value) {
+                        if (value != null && value.trim().length() > 0) sp.edit().putString("gh_token", value.trim()).apply();
+                        if (value != null && value.trim().length() > 0 && ghConfigured()) {
+                            closeLayer(false);
+                            syncBookmarks(true);
+                        } else {
+                            showBookmarkSync();
+                        }
+                    }
+                });
+            } });
+            if (hasToken) {
+                add(icons, labels, actions, "⏏", "Отключить синхронизацию", new Runnable() { @Override public void run() {
+                    sp.edit().remove("gh_token").apply();
+                    showBookmarkSync();
+                } });
+            }
+            showList("Синхронизация закладок", icons, labels, actions);
         }
 
         // ------------------------------------------------------------ панель вкладок: снимок, значок сайта, значок профиля; группы
