@@ -10,6 +10,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.speech.tts.TextToSpeech
 import android.view.Gravity
 import android.view.View
 import android.widget.EditText
@@ -20,6 +21,7 @@ import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import java.util.Locale
 
 /**
  * Экран настроек модуля (или папки). Здесь единственное место, где у модулей есть текст:
@@ -119,6 +121,8 @@ class ModuleSettingsActivity : Activity() {
 
     override fun onDestroy() {
         ui.removeCallbacks(tick)
+        tts?.shutdown()
+        tts = null
         super.onDestroy()
     }
 
@@ -209,33 +213,137 @@ class ModuleSettingsActivity : Activity() {
         iv.setImageBitmap(icon)
         iv.setBackgroundColor(Color.rgb(26, 26, 26))
         iv.setPadding(dp(8), dp(8), dp(8), dp(8))
-        iv.setOnClickListener { pickImage(ModuleStorage.KEY_ICON) }
+        iv.setOnClickListener { speak("$title. $subtitle") }
         row.addView(iv, LinearLayout.LayoutParams(dp(80), dp(80)))
-        val col = LinearLayout(this)
-        col.orientation = LinearLayout.VERTICAL
-        col.setPadding(dp(16), 0, 0, 0)
-        col.addView(text(title, 24f, Color.WHITE, true))
-        col.addView(text(subtitle, 14f, Color.LTGRAY, false))
-        row.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
-        content.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
-
-        val buttons = LinearLayout(this)
-        buttons.orientation = LinearLayout.HORIZONTAL
-        buttons.addView(button("Заменить иконку") { pickImage(ModuleStorage.KEY_ICON) })
-        buttons.addView(button("Сбросить иконку") {
+        row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        row.addView(smallBtn("🖼") { pickImage(ModuleStorage.KEY_ICON) })
+        row.addView(smallBtn("↺") {
             ModuleStorage.clearImage(this, target, ModuleStorage.KEY_ICON)
             build()
         })
-        content.addView(buttons, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(16) })
+        content.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
+    }
+
+    // ------------------------------------------------------------ логотипы и озвучка
+    // Экран настроек без текста: у каждой настройки логотип и элемент управления. Текст настройки
+    // озвучивается по нажатию на логотип. Логотип берётся из эмодзи в начале заголовка, иначе это монограмма.
+
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+
+    private fun speak(text: String) {
+        val s = text.trim()
+        if (s.isEmpty()) return
+        val t = tts
+        if (t == null) {
+            tts = TextToSpeech(applicationContext) { st ->
+                if (st == TextToSpeech.SUCCESS) {
+                    tts?.language = Locale("ru", "RU")
+                    ttsReady = true
+                    tts?.speak(s, TextToSpeech.QUEUE_FLUSH, null, "setting")
+                }
+            }
+        } else if (ttsReady) {
+            t.speak(s, TextToSpeech.QUEUE_FLUSH, null, "setting")
+        }
+    }
+
+    /** Эмодзи в начале заголовка («🎧 Дорожка» даёт «🎧»); null, если заголовок начинается с буквы или цифры. */
+    private fun logoOf(title: String): String? {
+        val first = title.trimStart().substringBefore(' ')
+        if (first.isEmpty()) return null
+        val cp = first.codePointAt(0)
+        return if (cp >= 0x2190 && !Character.isLetterOrDigit(cp)) first else null
+    }
+
+    private fun plain(title: String): String {
+        val t = title.trim()
+        val logo = logoOf(t) ?: return t
+        return t.removePrefix(logo).trim()
+    }
+
+    private fun logoView(title: String, sizeDp: Int, say: () -> String): View {
+        val logo = logoOf(title)
+        val v: View
+        if (logo != null) {
+            val tv = TextView(this)
+            tv.text = logo
+            tv.textSize = sizeDp * 0.5f
+            tv.gravity = Gravity.CENTER
+            tv.setTextColor(Color.WHITE)
+            val bg = GradientDrawable()
+            bg.setColor(Color.rgb(34, 34, 34))
+            bg.setStroke(dp(1), Color.GRAY)
+            bg.cornerRadius = dp(12).toFloat()
+            tv.background = bg
+            v = tv
+        } else {
+            val iv = ImageView(this)
+            iv.setImageBitmap(IconFactory.monogram(plain(title), 128))
+            iv.setPadding(dp(4), dp(4), dp(4), dp(4))
+            v = iv
+        }
+        v.layoutParams = LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp))
+        v.contentDescription = plain(title)
+        v.setOnClickListener { speak(say()) }
+        return v
+    }
+
+    /** Строка настройки: слева логотип, дальше элементы управления. */
+    private fun iconCard(title: String, say: () -> String): LinearLayout {
+        val c = card()
+        c.orientation = LinearLayout.HORIZONTAL
+        c.gravity = Gravity.CENTER_VERTICAL
+        c.addView(logoView(title, 52, say))
+        return c
+    }
+
+    private fun smallBtn(glyph: String, onClick: () -> Unit): TextView {
+        val b = text(glyph, 24f, Color.WHITE, false)
+        b.gravity = Gravity.CENTER
+        val bg = GradientDrawable()
+        bg.setColor(Color.rgb(34, 34, 34))
+        bg.setStroke(dp(1), Color.GRAY)
+        bg.cornerRadius = dp(12).toFloat()
+        b.background = bg
+        b.setOnClickListener { onClick() }
+        b.layoutParams = LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(8) }
+        return b
+    }
+
+    private fun sectionRow(title: String): View {
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.setPadding(dp(4), dp(14), dp(4), dp(4))
+        row.addView(logoView(title, 32) { plain(title) })
+        val line = View(this)
+        line.setBackgroundColor(Color.DKGRAY)
+        row.addView(line, LinearLayout.LayoutParams(0, dp(1), 1f).apply { leftMargin = dp(10) })
+        return row
+    }
+
+    /** Строка с кнопкой: [value] показывается на кнопке, пустое значение даёт «▶». */
+    private fun valueRow(title: String, summary: String, value: String, onClick: () -> Unit): View {
+        val c = iconCard(title) {
+            plain(title) + (if (summary.isNotEmpty()) ". $summary" else "") +
+                (if (value.isNotEmpty()) ". Сейчас: $value" else "")
+        }
+        c.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        val b = button(value.ifEmpty { "▶" }) { onClick() }
+        b.maxLines = 1
+        b.ellipsize = android.text.TextUtils.TruncateAt.END
+        b.maxWidth = dp(180)
+        c.addView(b)
+        c.setOnClickListener { onClick() }
+        return c
     }
 
     // ------------------------------------------------------------ элементы схемы
 
     private fun addItem(item: SettingItem, prefs: SharedPreferences) {
         when (item.type) {
-            SettingItem.SECTION -> content.addView(
-                text(item.title, 14f, Color.GRAY, true).apply { setPadding(dp(4), dp(16), 0, dp(6)) }
-            )
+            SettingItem.SECTION -> content.addView(sectionRow(item.title))
             SettingItem.SWITCH -> content.addView(
                 switchRow(item.title, item.summary, prefs.getBoolean(item.key, item.defInt == 1)) { on ->
                     prefs.edit().putBoolean(item.key, on).apply()

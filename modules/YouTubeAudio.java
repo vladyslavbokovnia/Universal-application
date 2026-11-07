@@ -1,30 +1,18 @@
 package im.manus.plugins;
 
 import android.accessibilityservice.AccessibilityService;
-import android.content.ClipData;
-import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.graphics.Bitmap;
-import android.net.ConnectivityManager;
-import android.net.Network;
-import android.net.NetworkCapabilities;
-import android.net.NetworkRequest;
-import android.os.Environment;
-import android.os.Handler;
-import android.os.Looper;
-import android.widget.Toast;
+import android.view.View;
 import im.manus.universalhost.IPlugin;
 import im.manus.universalhost.ISettingsProvider;
+import im.manus.universalhost.ISettingsViewProvider;
 import im.manus.universalhost.IShareHandler;
 import im.manus.universalhost.SettingItem;
-import im.manus.universalhost.YtAudioBridge;
+import im.manus.universalhost.YtAudioQueue;
+import im.manus.universalhost.YtQueueView;
 
-import org.json.JSONArray;
-import org.json.JSONObject;
-
-import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -32,61 +20,36 @@ import java.util.Map;
 /**
  * Скачивание аудиодорожки YouTube на нужном языке (по умолчанию русская).
  *
- * Запускается кнопкой 🎧 в скрипте YouTube TTS: скрипт шлёт «Поделиться» с типом text/x-ytaudio (ссылка в тексте,
- * название в теме), хост передаёт его сюда. Файл и превью (.jpg с тем же именем) попадают в папку Music/YouTube;
- * плеер показывает превью плитками. Саму загрузку делает хост (YtAudioBridge, библиотека NewPipeExtractor).
- * Если нужной дорожки нет, модуль об этом говорит (оригинал качается только при включённой настройке).
+ * Кнопка 🎧 в скрипте YouTube TTS шлёт «Поделиться» с типом text/x-ytaudio (ссылка в тексте, название в теме).
+ * Ссылка попадает в список (YtAudioQueue в хосте) и качается автоматически или вручную, как выбрано в настройках.
+ * Ролики без русской дорожки остаются в списке со ссылкой. Файл и превью кладутся в Music/YouTube,
+ * плеер показывает превью плитками. Модуль только принимает ссылки, описывает настройки и показывает список.
  */
-public class YouTubeAudio implements IPlugin, ISettingsProvider, IShareHandler {
+public class YouTubeAudio implements IPlugin, ISettingsProvider, ISettingsViewProvider, IShareHandler {
 
-    private static final String PREFS = "module_YouTube аудио";
     static final String MIME = "text/x-ytaudio";
 
-    private static final String KEY_PENDING = "pending";
-
     private Context appCtx;
-    private Handler h;
-    private boolean loaded;
-    private ConnectivityManager.NetworkCallback netCb;
-    /** Загрузки, ждущие Wi-Fi: {ссылка, название}. */
-    private final List<String[]> pending = new ArrayList<String[]>();
 
     @Override public String getName() { return "YouTube аудио"; }
-    @Override public int getVersion() { return 3; }
+    @Override public int getVersion() { return 4; }
     @Override public String getDescription() {
-        return "Скачивает русскую аудиодорожку YouTube по кнопке 🎧 из скрипта YouTube TTS; превью видно в плеере.";
+        return "Скачивает русскую аудиодорожку YouTube по кнопке 🎧 из скрипта YouTube TTS; список ссылок с превью.";
     }
     @Override public String getIconName() { return "ic_launcher"; }
 
     @Override public void init(Context context) {
         appCtx = context.getApplicationContext();
-        h = new Handler(Looper.getMainLooper());
-        loadPending();
+        YtAudioQueue.get(appCtx).tryDrain();      // ссылки, дожидавшиеся сети до перезапуска
     }
 
-    @Override public void stop() { unwatchNet(); }
+    @Override public void stop() {
+        if (appCtx != null) YtAudioQueue.get(appCtx).unwatchNet();
+    }
+
     @Override public Object execute(Map<String, ?> data) { return null; }
     @Override public void onAccessibilityEvent(android.view.accessibility.AccessibilityEvent event, AccessibilityService service) { }
     @Override public Bitmap createIcon(int sizePx) { return null; }
-
-    private void ensure(Context c) {
-        if (appCtx == null) appCtx = c.getApplicationContext();
-        if (h == null) h = new Handler(Looper.getMainLooper());
-        loadPending();
-    }
-
-    private SharedPreferences prefs() {
-        return appCtx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-    }
-
-    private void toast(final String s) {
-        if (h == null || appCtx == null) return;
-        h.post(new Runnable() {
-            @Override public void run() {
-                try { Toast.makeText(appCtx, s, Toast.LENGTH_LONG).show(); } catch (Throwable t) { }
-            }
-        });
-    }
 
     private static boolean isYoutube(String u) {
         if (u == null) return false;
@@ -104,233 +67,46 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IShareHandler {
 
     @Override public boolean onShare(Context ctx, Intent intent) {
         try {
-            ensure(ctx);
+            YtAudioQueue q = YtAudioQueue.get(ctx);
             String url = intent.getStringExtra(Intent.EXTRA_TEXT);
             String title = intent.getStringExtra(Intent.EXTRA_SUBJECT);
             if (url != null) url = url.trim();
             if (!isYoutube(url)) {
-                toast("Это не ссылка на YouTube");
+                q.toast("Это не ссылка на YouTube");
                 return false;
             }
-            submit(url, title);
+            q.submit(url, title);
             return true;
         } catch (Throwable t) {
             return false;
         }
     }
 
-    private String outDir() {
-        String rel = prefs().getString("out_dir", "Music/YouTube");
-        if (rel == null || rel.trim().length() == 0) rel = "Music/YouTube";
-        File root = Environment.getExternalStorageDirectory();
-        return new File(root, rel.trim()).getAbsolutePath();
-    }
-
-    // ---------------------------------------------------------- очередь и сеть
-    //
-    // Ссылка попадает в очередь (она хранится в настройках и переживает перезапуск), если нет подходящей сети:
-    // совсем нет интернета, а при «только Wi-Fi» ещё и если подключена только мобильная сеть.
-    // Очередь сама уходит в загрузку, когда сеть появляется. Оборвалась сеть во время загрузки: ссылка тоже в очередь.
-
-    private ConnectivityManager cm() {
-        return (ConnectivityManager) appCtx.getSystemService(Context.CONNECTIVITY_SERVICE);
-    }
-
-    /** Сеть с рабочим интернетом (при wifiOnly: только Wi-Fi или Ethernet). VPN не считается: смотрим сети под ним. */
-    private Network findNetwork(boolean wifiOnly) {
-        try {
-            ConnectivityManager cm = cm();
-            Network best = null;
-            for (Network n : cm.getAllNetworks()) {
-                NetworkCapabilities c = cm.getNetworkCapabilities(n);
-                if (c == null || c.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue;
-                if (!c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                        || !c.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) continue;
-                boolean wifi = c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                        || c.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET);
-                if (wifiOnly && !wifi) continue;
-                if (best == null || wifi) best = n;
-            }
-            return best;
-        } catch (Throwable t) {
-            return null;
-        }
-    }
-
-    private String netName() {
-        if (findNetwork(true) != null) return "Wi-Fi";
-        return findNetwork(false) != null ? "мобильная сеть" : "нет сети";
-    }
-
-    /** Качает сразу или, если подходящей сети нет, ставит в очередь. */
-    private void submit(String url, String title) {
-        boolean wifiOnly = prefs().getBoolean("wifi_only", false);
-        Network n = findNetwork(wifiOnly);
-        if (n == null) {
-            int q = addPending(url, title);
-            toast("📵 Сейчас: " + netName() + (wifiOnly ? ", а нужен Wi-Fi" : "") + ". В очереди: " + q
-                    + ". Скачаю, когда сеть появится");
-            watchNet();
-            return;
-        }
-        startDownload(url, title, wifiOnly ? n : null);
-    }
-
-    private synchronized int addPending(String url, String title) {
-        for (String[] p : pending) if (p[0].equals(url)) return pending.size();
-        pending.add(new String[]{url, title == null ? "" : title});
-        savePending();
-        return pending.size();
-    }
-
-    private synchronized void savePending() {
-        try {
-            JSONArray a = new JSONArray();
-            for (String[] p : pending) a.put(new JSONObject().put("u", p[0]).put("t", p[1]));
-            prefs().edit().putString(KEY_PENDING, a.toString()).apply();
-        } catch (Throwable t) { }
-    }
-
-    /** После перезапуска очередь читается из настроек и ждёт сеть. */
-    private synchronized void loadPending() {
-        if (loaded || appCtx == null) return;
-        loaded = true;
-        try {
-            JSONArray a = new JSONArray(prefs().getString(KEY_PENDING, "[]"));
-            for (int i = 0; i < a.length(); i++) {
-                JSONObject o = a.getJSONObject(i);
-                pending.add(new String[]{o.getString("u"), o.optString("t", "")});
-            }
-        } catch (Throwable t) { }
-        if (!pending.isEmpty()) tryDrain();
-    }
-
-    /** Если подходящая сеть уже есть, запускает очередь; иначе ждёт её. */
-    private synchronized void tryDrain() {
-        if (pending.isEmpty()) { unwatchNet(); return; }
-        boolean wifiOnly = prefs().getBoolean("wifi_only", false);
-        Network n = findNetwork(wifiOnly);
-        if (n == null) { watchNet(); return; }
-        drainPending(wifiOnly ? n : null);
-    }
-
-    /** Запускает всё, что ждало (net: сеть для загрузки или null), и выключает наблюдение за сетью. */
-    private synchronized void drainPending(Network net) {
-        unwatchNet();
-        List<String[]> copy = new ArrayList<String[]>(pending);
-        pending.clear();
-        savePending();
-        for (String[] p : copy) startDownload(p[0], p[1].length() == 0 ? null : p[1], net);
-    }
-
-    private synchronized void watchNet() {
-        if (netCb != null || appCtx == null) return;
-        try {
-            NetworkRequest rq = new NetworkRequest.Builder()
-                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    .addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED).build();
-            netCb = new ConnectivityManager.NetworkCallback() {
-                @Override public void onAvailable(Network network) { later(); }
-                @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) { later(); }
-                private void later() {
-                    h.postDelayed(new Runnable() {
-                        @Override public void run() { tryDrain(); }
-                    }, 1500);   // даём сети стать основной
-                }
-            };
-            cm().registerNetworkCallback(rq, netCb);
-        } catch (Throwable t) {
-            netCb = null;
-        }
-    }
-
-    private synchronized void unwatchNet() {
-        if (netCb == null || appCtx == null) return;
-        try { cm().unregisterNetworkCallback(netCb); } catch (Throwable t) { }
-        netCb = null;
-    }
-
-    private void startDownload(final String url, final String title, Network net) {
-        SharedPreferences p = prefs();
-        String lang = p.getString("lang", "ru");
-        boolean fb = p.getBoolean("fallback_original", false);
-        toast("🎧 Начинаю: " + (title == null || title.length() == 0 ? url : title));
-        YtAudioBridge.start(appCtx, url, title, lang, outDir(), fb, net, new YtAudioBridge.Listener() {
-            @Override public void onStatus(String text) { toast(text); }
-            @Override public void onDone(String audioPath, String error) {
-                if (error == null) {
-                    toast("✅ Готово: " + new File(audioPath).getName());
-                } else if (error.startsWith("Нет сети")) {
-                    int q = addPending(url, title);
-                    toast("📵 Сеть пропала. В очереди: " + q + ". Скачаю, когда она появится");
-                    watchNet();
-                } else {
-                    toast("🎧 " + error);
-                }
-            }
-        });
-    }
-
     // ---------------------------------------------------------- настройки
 
     @Override public List<SettingItem> getSettingsSchema() {
         List<SettingItem> r = new ArrayList<SettingItem>();
-        r.add(SettingItem.section("🎧 Дорожка"));
-        r.add(SettingItem.text("lang", "Язык дорожки", "Код языка: ru, en, uk…", "ru"));
-        r.add(SettingItem.toggle("fallback_original", "Оригинал, если нужной нет",
-                "Выключено: нет русской дорожки — ничего не качается, модуль скажет об этом", false));
-        r.add(SettingItem.toggle("wifi_only", "Только по Wi-Fi",
-                "Нет Wi-Fi: ссылка ждёт в очереди и скачается, когда он появится", false));
-        r.add(SettingItem.text("out_dir", "Папка", "Внутри памяти телефона; рядом кладётся превью .jpg", "Music/YouTube"));
-        r.add(SettingItem.section("🧪 Проверка"));
-        r.add(SettingItem.section("📋 Очередь"));
-        r.add(SettingItem.action("show_queue", "📋 Что в очереди" + (appCtx == null ? "" : " (" + pending.size() + ")"),
-                "Показать ссылки, которые ждут сеть"));
-        r.add(SettingItem.action("force_pending", "▶ Качать очередь сейчас", "Запустить ждущие загрузки, не дожидаясь сети"));
-        r.add(SettingItem.action("clear_pending", "🗑 Очистить очередь", "Убрать все ждущие ссылки"));
-        r.add(SettingItem.action("from_clip", "📋 Скачать по ссылке из буфера", "Скопируй ссылку на видео YouTube и нажми"));
+        r.add(SettingItem.section("🎧 Загрузка"));
+        r.add(SettingItem.toggle("auto_mode", "🤖 Загружать автоматически",
+                "Включено: ссылки качаются сами, как только есть подходящая сеть. Выключено: ссылки ждут в списке, пока не нажмёшь на плитку.", true));
+        r.add(SettingItem.toggle("wifi_only", "📶 Только по Wi-Fi",
+                "Мобильная сеть не используется: ссылки ждут Wi-Fi.", false));
+        r.add(SettingItem.toggle("fallback_original", "🎙 Оригинал, если русской нет",
+                "Выключено: ролик без русской дорожки остаётся в списке со ссылкой.", false));
+        r.add(SettingItem.text("lang", "🌐 Язык дорожки", "Код языка: ru, en, uk.", "ru"));
+        r.add(SettingItem.text("out_dir", "📁 Папка", "Внутри памяти телефона. Рядом с аудио кладутся превью и ссылка.", "Music/YouTube"));
+        r.add(SettingItem.section("📋 Список"));
+        r.add(SettingItem.custom("queue", "📋 Список ссылок",
+                "Тап по плитке качает, двойной тап читает название. Значки: ссылка в браузере, удалить."));
         return r;
     }
 
     @Override public void onSettingChanged(String key) {
-        if (!"from_clip".equals(key) && !"force_pending".equals(key) && !"show_queue".equals(key)
-                && !"clear_pending".equals(key)) return;
-        try {
-            Context c = appCtx;
-            if (c == null) return;
-            ensure(c);
-            if ("show_queue".equals(key)) {
-                if (pending.isEmpty()) { toast("Очередь пуста"); return; }
-                StringBuilder sb = new StringBuilder("📋 В очереди:");
-                int i = 1;
-                for (String[] q : pending) sb.append("\n").append(i++).append(". ").append(q[1].length() == 0 ? q[0] : q[1]);
-                toast(sb.toString());
-                return;
-            }
-            if ("clear_pending".equals(key)) {
-                pending.clear();
-                savePending();
-                unwatchNet();
-                toast("Очередь очищена");
-                return;
-            }
-            if ("force_pending".equals(key)) {
-                int n = pending.size();
-                toast(n == 0 ? "Очередь пуста" : "Качаю очередь: " + n);
-                drainPending(null);
-                return;
-            }
-            ClipboardManager cm = (ClipboardManager) c.getSystemService(Context.CLIPBOARD_SERVICE);
-            ClipData d = cm == null ? null : cm.getPrimaryClip();
-            CharSequence t = (d == null || d.getItemCount() == 0) ? null : d.getItemAt(0).getText();
-            String url = t == null ? null : t.toString().trim();
-            if (!isYoutube(url)) {
-                toast("В буфере нет ссылки на YouTube");
-                return;
-            }
-            submit(url, null);
-        } catch (Throwable e) {
-            toast("Не вышло: " + e);
-        }
+        if (appCtx == null) return;
+        if ("auto_mode".equals(key) || "wifi_only".equals(key)) YtAudioQueue.get(appCtx).tryDrain();
+    }
+
+    @Override public View createSettingsView(Context context, String key) {
+        return YtQueueView.create(context);
     }
 }
