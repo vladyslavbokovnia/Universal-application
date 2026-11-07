@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.content.pm.PackageInstaller
 import android.net.Uri
 import android.os.Build
@@ -28,8 +29,8 @@ import java.security.MessageDigest
  * Нужно ли обновлять само приложение (APK), определяется так: сборка кладёт в приложение и в релиз файл
  * host_hash.txt, хэш исходников хоста (без модулей), и если хэши разные, значит хост изменился. Для сборок без
  * этого файла сравнивается контрольная сумма установленного APK с APK в релизе (тогда любая пересборка считается
- * новой версией). Само обновление (долгое нажатие): APK скачивается и ставится через системный установщик,
- * подтверждение за пользователем.
+ * новой версией). Само обновление (нажатие на значок приложения): APK скачивается и ставится через системный
+ * установщик, подтверждение за пользователем.
  */
 object ModuleUpdater {
 
@@ -51,6 +52,9 @@ object ModuleUpdater {
         /** true: в релизе новая версия приложения; false: актуальна; null: узнать не удалось. */
         val hostNeedsUpdate: Boolean?
     )
+
+    /** Что есть нового: приложение (true/false), число модулей и число скриптов. null: узнать не удалось. */
+    class Status(val host: Boolean?, val modules: Int?, val scripts: Int?)
 
     private fun prefs(c: Context) = c.getSharedPreferences("module_updater", Context.MODE_PRIVATE)
 
@@ -75,13 +79,7 @@ object ModuleUpdater {
         for (a in assets) {
             val label = a.name.removeSuffix(".dex")
             try {
-                val local = File(dir, a.name)
-                val need = when {
-                    !local.exists() -> true
-                    a.digest != null -> !sha256(local).equals(a.digest, ignoreCase = true)
-                    else -> local.length() != a.size || p.getString("id_" + a.name, "") != a.id
-                }
-                if (!need) {
+                if (!moduleNeeded(a, dir, p)) {
                     same++
                     continue
                 }
@@ -92,7 +90,18 @@ object ModuleUpdater {
                 failed.add(label + ": " + (t.message ?: t.javaClass.simpleName))
             }
         }
+        storeCount(context, "mod_pending", failed.size)
         return Result(updated, same, failed, null, host)
+    }
+
+    /** Нужно ли скачивать модуль: нет файла, или контрольная сумма (а без неё размер и номер файла релиза) другие. */
+    private fun moduleNeeded(a: Asset, dir: File, p: SharedPreferences): Boolean {
+        val local = File(dir, a.name)
+        return when {
+            !local.exists() -> true
+            a.digest != null -> !sha256(local).equals(a.digest, ignoreCase = true)
+            else -> local.length() != a.size || p.getString("id_" + a.name, "") != a.id
+        }
     }
 
     /** Текст для всплывающей подсказки. */
@@ -105,7 +114,7 @@ object ModuleUpdater {
             sb.append("Не скачалось: ").append(r.failed.joinToString("; "))
         }
         if (sb.isEmpty()) sb.append("Модули актуальны (").append(r.same).append(")")
-        if (r.hostNeedsUpdate == true) sb.append("\nЕсть новая версия приложения: подержи стрелку")
+        if (r.hostNeedsUpdate == true) sb.append("\nЕсть новая версия приложения: нажми значок приложения")
         return sb.toString()
     }
 
@@ -135,6 +144,55 @@ object ModuleUpdater {
         val need = hostNeedsUpdate(context, all)
         storeHost(context, need)
         return need
+    }
+
+    /** Последнее известное число модулей, которые отличаются от релиза; null: не знаем. */
+    fun cachedModules(context: Context): Int? {
+        val p = prefs(context)
+        return if (p.contains("mod_pending")) p.getInt("mod_pending", 0) else null
+    }
+
+    /** Последнее известное число скриптов, у которых на сервере версия выше; null: не знаем. */
+    fun cachedScripts(context: Context): Int? {
+        val p = prefs(context)
+        return if (p.contains("scr_pending")) p.getInt("scr_pending", 0) else null
+    }
+
+    fun storeScriptsPending(context: Context, n: Int) = storeCount(context, "scr_pending", n)
+
+    private fun storeCount(c: Context, key: String, n: Int?) {
+        if (n == null) return
+        prefs(c).edit().putInt(key, n).apply()
+    }
+
+    /**
+     * Блокирующий вызов: ничего не скачивая, узнать, что устарело. Приложение и модули сверяются по одному запросу
+     * к GitHub, скрипты по одному запросу на каждый скрипт с адресом обновления.
+     */
+    fun checkAll(context: Context): Status {
+        var host: Boolean? = null
+        var modules: Int? = null
+        try {
+            val all = fetchAssets()
+            host = hostNeedsUpdate(context, all)
+            storeHost(context, host)
+            val dir = PluginRegistry.pluginDir()
+            val p = prefs(context)
+            modules = all.count { NAME.matches(it.name) && moduleNeeded(it, dir, p) }
+            storeCount(context, "mod_pending", modules)
+        } catch (t: Throwable) {
+        }
+        var scripts: Int? = null
+        try {
+            val r = ScriptUpdater.check()
+            if (r.total == 0 || r.failed.size < r.total) scripts = r.updated.size
+            storeCount(context, "scr_pending", scripts)
+        } catch (t: Throwable) {
+        }
+        if (host != null || modules != null || scripts != null) {
+            prefs(context).edit().putLong("host_checked", System.currentTimeMillis()).apply()
+        }
+        return Status(host, modules, scripts)
     }
 
     private fun hostStamp(c: Context): String = try {
@@ -192,7 +250,7 @@ object ModuleUpdater {
                 )
             } catch (t: Throwable) {
             }
-            return "разреши установку из этого приложения и подержи стрелку ещё раз"
+            return "разреши установку из этого приложения и нажми значок приложения ещё раз"
         }
         val apk = try {
             fetchAssets().firstOrNull { it.name == APK_NAME }
