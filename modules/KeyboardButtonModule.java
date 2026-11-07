@@ -182,16 +182,16 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
     @Override
     public List<SettingItem> getSettingsSchema() {
         List<SettingItem> l = new ArrayList<SettingItem>();
-        l.add(SettingItem.section("Кнопка"));
-        l.add(SettingItem.slider("button_size", "Размер кнопки", "dp", 32, 96, 4, 52));
-        l.add(SettingItem.slider("button_alpha", "Непрозрачность кнопки", "%", 20, 100, 5, 55));
-        l.add(SettingItem.choice("visibility", "Когда показывать", "",
+        l.add(SettingItem.section("🔘 Кнопка"));
+        l.add(SettingItem.slider("button_size", "📏 Размер кнопки", "dp", 32, 96, 4, 52));
+        l.add(SettingItem.slider("button_alpha", "🌫 Непрозрачность кнопки", "%", 20, 100, 5, 55));
+        l.add(SettingItem.choice("visibility", "👁 Когда показывать", "",
                 Arrays.asList("Всегда", "Только когда есть поле ввода или клавиатура"), 0));
-        l.add(SettingItem.toggle("haptic", "Виброотклик", "При долгом нажатии", true));
-        l.add(SettingItem.slider("menu_timeout", "Автозакрытие меню, сек", "", 2, 15, 1, 6));
-        l.add(SettingItem.section("Проверка"));
-        l.add(SettingItem.action("diag", "Какие значки видит модуль", "Подписи кнопок в окне клавиатуры; открой клавиатуру и нажми"));
-        l.add(SettingItem.action("reset_pos", "Вернуть кнопку на место", ""));
+        l.add(SettingItem.toggle("haptic", "📳 Виброотклик", "При долгом нажатии", true));
+        l.add(SettingItem.slider("menu_timeout", "⏱ Автозакрытие меню, сек", "", 2, 15, 1, 6));
+        l.add(SettingItem.section("🧪 Проверка"));
+        l.add(SettingItem.action("diag", "🔍 Какие значки видит модуль", "Подписи кнопок в окне клавиатуры; открой клавиатуру и нажми"));
+        l.add(SettingItem.action("reset_pos", "↩ Вернуть кнопку на место", ""));
         return l;
     }
 

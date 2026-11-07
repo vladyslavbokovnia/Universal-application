@@ -146,22 +146,22 @@ public class KeyboardModule implements IPlugin, ISettingsProvider {
     @Override
     public List<SettingItem> getSettingsSchema() {
         List<SettingItem> l = new ArrayList<SettingItem>();
-        l.add(SettingItem.section("Вид"));
-        l.add(SettingItem.slider("key_height", "Высота клавиш", "dp", 36, 64, 2, 46));
-        l.add(SettingItem.slider("key_alpha", "Непрозрачность клавиш", "%", 10, 100, 5, 45));
-        l.add(SettingItem.choice("theme", "Клавиши", "", Arrays.asList("Тёмные", "Светлые"), 0));
-        l.add(SettingItem.toggle("number_row", "Цифровой ряд", "", true));
-        l.add(SettingItem.slider("collapsed_size", "Размер кнопки в свёрнутом виде", "dp", 32, 72, 4, 44));
-        l.add(SettingItem.toggle("haptic", "Виброотклик", "", true));
-        l.add(SettingItem.section("Режим"));
-        l.add(SettingItem.toggle("overlay_mode", "Поверх содержимого", "Приложение под клавиатурой не сдвигается и не сжимается", true));
-        l.add(SettingItem.section("Языки"));
-        l.add(SettingItem.toggle("lang_ru", "Русский", "", true));
-        l.add(SettingItem.toggle("lang_uk", "Украинский", "", false));
-        l.add(SettingItem.toggle("lang_en", "Английский", "", true));
-        l.add(SettingItem.section("Клавиатуры"));
-        l.add(SettingItem.action("enable", "Включить клавиатуру в системе", "Откроет системные настройки способов ввода"));
-        l.add(SettingItem.action("pick", "Выбрать клавиатуру", "Системное окно выбора (Gboard, эта и другие)"));
+        l.add(SettingItem.section("🎨 Вид"));
+        l.add(SettingItem.slider("key_height", "📏 Высота клавиш", "dp", 36, 64, 2, 46));
+        l.add(SettingItem.slider("key_alpha", "🌫 Непрозрачность клавиш", "%", 10, 100, 5, 45));
+        l.add(SettingItem.choice("theme", "🌗 Клавиши", "", Arrays.asList("Тёмные", "Светлые"), 0));
+        l.add(SettingItem.toggle("number_row", "🔢 Цифровой ряд", "", true));
+        l.add(SettingItem.slider("collapsed_size", "🔘 Размер кнопки в свёрнутом виде", "dp", 32, 72, 4, 44));
+        l.add(SettingItem.toggle("haptic", "📳 Виброотклик", "", true));
+        l.add(SettingItem.section("🧩 Режим"));
+        l.add(SettingItem.toggle("overlay_mode", "🪟 Поверх содержимого", "Приложение под клавиатурой не сдвигается и не сжимается", true));
+        l.add(SettingItem.section("🌐 Языки"));
+        l.add(SettingItem.toggle("lang_ru", "🇷🇺 Русский", "", true));
+        l.add(SettingItem.toggle("lang_uk", "🇺🇦 Украинский", "", false));
+        l.add(SettingItem.toggle("lang_en", "🇬🇧 Английский", "", true));
+        l.add(SettingItem.section("⌨ Клавиатуры"));
+        l.add(SettingItem.action("enable", "✅ Включить клавиатуру в системе", "Откроет системные настройки способов ввода"));
+        l.add(SettingItem.action("pick", "🔀 Выбрать клавиатуру", "Системное окно выбора (Gboard, эта и другие)"));
         return l;
     }
 

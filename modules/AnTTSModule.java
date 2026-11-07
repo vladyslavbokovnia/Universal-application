@@ -265,21 +265,21 @@ public class AnTTSModule implements IPlugin, ISettingsProvider {
     @Override
     public List<SettingItem> getSettingsSchema() {
         List<SettingItem> l = new ArrayList<SettingItem>();
-        l.add(SettingItem.section("Полоса (сенсор и прогресс)"));
-        l.add(SettingItem.choice("bar_position", "Положение полосы", "", Arrays.asList("Сверху", "Снизу"), 0));
-        l.add(SettingItem.slider("bar_height_dp", "Высота полосы", "dp", 16, 64, 2, 28));
-        l.add(SettingItem.slider("bar_width_percent", "Ширина полосы", "%", 10, 100, 5, 100));
-        l.add(SettingItem.slider("background_alpha", "Непрозрачность фона", "%", 0, 100, 5, 82));
-        l.add(SettingItem.slider("progress_alpha", "Непрозрачность полосы прогресса", "%", 10, 100, 5, 90));
-        l.add(SettingItem.section("Чтение"));
-        l.add(SettingItem.choice("extract_mode", "Какой текст читать", "",
+        l.add(SettingItem.section("📏 Полоса (сенсор и прогресс)"));
+        l.add(SettingItem.choice("bar_position", "↕ Положение полосы", "", Arrays.asList("Сверху", "Снизу"), 0));
+        l.add(SettingItem.slider("bar_height_dp", "📐 Высота полосы", "dp", 16, 64, 2, 28));
+        l.add(SettingItem.slider("bar_width_percent", "↔ Ширина полосы", "%", 10, 100, 5, 100));
+        l.add(SettingItem.slider("background_alpha", "🌫 Непрозрачность фона", "%", 0, 100, 5, 82));
+        l.add(SettingItem.slider("progress_alpha", "📊 Непрозрачность полосы прогресса", "%", 10, 100, 5, 90));
+        l.add(SettingItem.section("📖 Чтение"));
+        l.add(SettingItem.choice("extract_mode", "📝 Какой текст читать", "",
                 Arrays.asList("Основной текст страницы", "Весь текст экрана (как TalkBack)"), 0));
-        l.add(SettingItem.choice("order_mode", "Порядок блоков", "",
+        l.add(SettingItem.choice("order_mode", "🔢 Порядок блоков", "",
                 Arrays.asList("По дереву приложения (как TalkBack)", "По положению на экране"), 0));
-        l.add(SettingItem.choice("scroll_mode", "Прокрутка", "",
+        l.add(SettingItem.choice("scroll_mode", "📜 Прокрутка", "",
                 Arrays.asList("Постоянная медленная", "По страницам", "Без прокрутки"), 0));
-        l.add(SettingItem.slider("scroll_speed", "Скорость прокрутки", "dp/с", 10, 200, 5, 40));
-        l.add(SettingItem.toggle("speak_input", "Озвучивать поле ввода",
+        l.add(SettingItem.slider("scroll_speed", "⏩ Скорость прокрутки", "dp/с", 10, 200, 5, 40));
+        l.add(SettingItem.toggle("speak_input", "⌨ Озвучивать поле ввода",
                 "Читает предложение у курсора (по тапу на полосу, когда выбрано поле ввода)", true));
         return l;
     }
