@@ -1,0 +1,163 @@
+diff --git a/app/src/main/kotlin/im/manus/universalhost/ModuleSettingsActivity.kt b/app/src/main/kotlin/im/manus/universalhost/ModuleSettingsActivity.kt
+index c9ed835..aa33823 100644
+--- a/app/src/main/kotlin/im/manus/universalhost/ModuleSettingsActivity.kt
++++ b/app/src/main/kotlin/im/manus/universalhost/ModuleSettingsActivity.kt
+@@ -156,7 +160,7 @@ class ModuleSettingsActivity : Activity() {
+         header(IconFactory.forModule(this, plugin, target, 192), target,
+             plugin?.let { "v" + it.version + "  " + it.description } ?: "Модуль не найден")
+ 
+-        val enabled = switchRow("Модуль включён", "Выключенный модуль не запускается", ModuleStorage.isEnabled(this, target)) { on ->
++        val enabled = switchRow("⏻ Модуль включён", "Выключенный модуль не запускается", ModuleStorage.isEnabled(this, target)) { on ->
+             ModuleStorage.setEnabled(this, target, on)
+             CoreAccessibilityService.instance?.refreshPlugins()
+         }
+@@ -185,7 +189,7 @@ class ModuleSettingsActivity : Activity() {
+         val icon = custom?.let { ModuleStorage.loadBitmap(it, 192) } ?: IconFactory.monogram(node.name.ifEmpty { "Папка" }, 192)
+         header(icon, node.name.ifEmpty { "Папка" }, "Модулей в папке: " + node.items.size)
+ 
+-        content.addView(clickRow("Название папки", node.name.ifEmpty { "не задано" }) {
++        content.addView(valueRow("✏️ Название папки", "", node.name.ifEmpty { "не задано" }) {
+             askText("Название папки", node.name) { value ->
+                 val l = ModuleStorage.loadLayout(this)
+                 l.rename(id, value)
+@@ -193,7 +197,7 @@ class ModuleSettingsActivity : Activity() {
+                 build()
+             }
+         })
+-        content.addView(clickRow("Расформировать папку", "Модули вернутся на главный экран") {
++        content.addView(valueRow("📤 Расформировать папку", "Модули вернутся на главный экран", "") {
+             val l = ModuleStorage.loadLayout(this)
+             l.dissolve(id)
+             ModuleStorage.saveLayout(this, l)
+@@ -245,21 +353,20 @@ class ModuleSettingsActivity : Activity() {
+             SettingItem.SLIDER -> content.addView(sliderRow(item, prefs))
+             SettingItem.CHOICE -> {
+                 val current = prefs.getInt(item.key, item.defInt).coerceIn(0, maxOf(0, item.options.size - 1))
+-                val row = clickRow(item.title, item.options.getOrElse(current) { "" }) {
++                content.addView(valueRow(item.title, item.summary, item.options.getOrElse(current) { "" }) {
+                     AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+-                        .setTitle(item.title)
++                        .setTitle(plain(item.title))
+                         .setItems(item.options.toTypedArray()) { _, which ->
+                             prefs.edit().putInt(item.key, which).apply()
+                             notifyModule(item.key)
+                             build()
+                         }.show()
+-                }
+-                content.addView(row)
++                })
+             }
+             SettingItem.TEXT -> {
+                 val cur = prefs.getString(item.key, item.defStr) ?: item.defStr
+-                content.addView(clickRow(item.title, cur.ifEmpty { item.summary }) {
+-                    askText(item.title, cur) { value ->
++                content.addView(valueRow(item.title, item.summary, cur) {
++                    askText(plain(item.title), cur) { value ->
+                         prefs.edit().putString(item.key, value).apply()
+                         notifyModule(item.key)
+                         build()
+@@ -267,7 +374,7 @@ class ModuleSettingsActivity : Activity() {
+                 })
+             }
+             SettingItem.IMAGE -> content.addView(imageRow(item))
+-            SettingItem.APP_IMAGES -> content.addView(clickRow(item.title, item.summary) {
++            SettingItem.APP_IMAGES -> content.addView(valueRow(item.title, item.summary, "") {
+                 startActivity(
+                     Intent(this, AppImagesActivity::class.java)
+                         .putExtra(AppImagesActivity.EXTRA_MODULE, target)
+@@ -276,7 +383,7 @@ class ModuleSettingsActivity : Activity() {
+             })
+             SettingItem.APP_PICKER -> {
+                 val cur = prefs.getString(item.key, item.defStr) ?: item.defStr
+-                content.addView(clickRow(item.title, pickerSummary(cur, item.summary)) {
++                content.addView(valueRow(item.title, item.summary, pickerSummary(cur, "")) {
+                     pickApps(item, prefs)
+                 })
+             }
+@@ -293,7 +400,7 @@ class ModuleSettingsActivity : Activity() {
+                     content.addView(hint("Не удалось построить вид: " + t.message))
+                 }
+             }
+-            SettingItem.ACTION -> content.addView(clickRow(item.title, item.summary) {
++            SettingItem.ACTION -> content.addView(valueRow(item.title, item.summary, "") {
+                 notifyModule(item.key)
+                 Toast.makeText(this, "Готово", Toast.LENGTH_SHORT).show()
+             })
+@@ -358,6 +465,9 @@ class ModuleSettingsActivity : Activity() {
+         val steps = (item.max - item.min) / item.step
+         val cur = prefs.getInt(item.key, item.defInt).coerceIn(item.min, item.max)
+         val valueText = text(cur.toString(), 16f, Color.WHITE, true)
++        val c = iconCard(item.title) {
++            plain(item.title) + (if (item.summary.isNotEmpty()) ". " + item.summary else "") + ". Сейчас: " + valueText.text
++        }
+         val bar = SeekBar(this)
+         bar.max = steps
+         bar.progress = (cur - item.min) / item.step
+@@ -373,28 +483,24 @@ class ModuleSettingsActivity : Activity() {
+                 notifyModule(item.key)      // применяем один раз, когда палец отпущен
+             }
+         })
+-        val top = LinearLayout(this)
+-        top.orientation = LinearLayout.HORIZONTAL
+-        top.addView(labels(item.title, item.summary), LinearLayout.LayoutParams(0, -2, 1f))
+-        top.addView(valueText)
+-        val col = card()
+-        col.addView(top)
+-        col.addView(bar)
+-        return col
++        c.addView(bar, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(8); rightMargin = dp(8) })
++        c.addView(valueText)
++        return c
+     }
+ 
+     private fun imageRow(item: SettingItem): View {
+         val path = ModuleStorage.imagePath(this, target, item.key)
+-        val row = card()
+-        row.orientation = LinearLayout.HORIZONTAL
+-        row.gravity = Gravity.CENTER_VERTICAL
++        val row = iconCard(item.title) {
++            plain(item.title) + (if (item.summary.isNotEmpty()) ". " + item.summary else "")
++        }
+         val thumb = ImageView(this)
+         thumb.setBackgroundColor(Color.rgb(40, 40, 40))
+         path?.let { ModuleStorage.loadBitmap(it, 96) }?.let { thumb.setImageBitmap(it) }
+-        row.addView(thumb, LinearLayout.LayoutParams(dp(48), dp(48)).apply { rightMargin = dp(12) })
+-        row.addView(labels(item.title, item.summary), LinearLayout.LayoutParams(0, -2, 1f))
++        thumb.setOnClickListener { pickImage(item.key) }
++        row.addView(thumb, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(12) })
++        row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+         if (path != null) {
+-            row.addView(button("Сбросить") {
++            row.addView(button("↺") {
+                 ModuleStorage.clearImage(this, target, item.key)
+                 notifyModule(item.key)
+                 build()
+@@ -434,21 +540,16 @@ class ModuleSettingsActivity : Activity() {
+         return col
+     }
+ 
+-    private fun clickRow(title: String, summary: String, onClick: () -> Unit): View {
+-        val c = card()
+-        c.addView(labels(title, summary))
+-        c.setOnClickListener { onClick() }
+-        return c
+-    }
+-
+     private fun switchRow(title: String, summary: String, checked: Boolean, onChange: (Boolean) -> Unit): View {
+-        val c = card()
+-        c.orientation = LinearLayout.HORIZONTAL
+-        c.gravity = Gravity.CENTER_VERTICAL
+-        c.addView(labels(title, summary), LinearLayout.LayoutParams(0, -2, 1f))
+-        val sw = Switch(this)
++        lateinit var sw: Switch
++        val c = iconCard(title) {
++            plain(title) + (if (summary.isNotEmpty()) ". $summary" else "") +
++                ". " + (if (sw.isChecked) "Включено" else "Выключено")
++        }
++        sw = Switch(this)
+         sw.isChecked = checked
+         sw.setOnCheckedChangeListener { _, on -> onChange(on) }
++        c.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+         c.addView(sw)
+         c.setOnClickListener { sw.toggle() }
+         return c
