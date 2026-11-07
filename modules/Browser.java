@@ -6546,8 +6546,17 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         // ------------------------------------------------------------ панель вкладок: снимок, значок сайта, значок профиля; группы
 
+        /**
+         * Кнопка вкладок. Со страницы открывает группу этой вкладки (нет группы: верх панели).
+         * Когда панель уже открыта, каждое нажатие уходит на уровень выше: из вложенной группы в группу, из группы на верхний уровень.
+         */
         private void openTabsRoot() {
-            openGroup = null;
+            if (layer != null && tabsPanel) {
+                if (openGroup != null) openGroup = groupById(openGroup.parent);
+                showTabs();
+                return;
+            }
+            openGroup = cur != null && cur.group != 0 ? groupById(cur.group) : null;
             if (layer != null) {
                 showTabs();
                 return;
@@ -6644,7 +6653,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 line.setStrokeCap(Paint.Cap.ROUND);
                 line.setStrokeJoin(Paint.Join.ROUND);
                 line.setColor(0xFFFFFFFF);
-                line.setStrokeWidth(dp(3));
+                line.setStrokeWidth(dp(6));
                 setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
                 setClickable(false);
             }
