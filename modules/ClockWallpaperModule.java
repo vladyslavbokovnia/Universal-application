@@ -216,29 +216,29 @@ public class ClockWallpaperModule implements IPlugin, ISettingsProvider {
     @Override
     public List<SettingItem> getSettingsSchema() {
         List<SettingItem> l = new ArrayList<SettingItem>();
-        l.add(SettingItem.section("Заставка"));
-        l.add(SettingItem.toggle("clockEnabled", "Работать", "Датчики, таймер и будильник", true));
-        l.add(SettingItem.toggle("enabled", "Пробуждение каждые 5 минут", "Включает экран и показывает заставку", true));
-        l.add(SettingItem.toggle("flip", "Показ при перевороте экраном вниз", "Заставка и погасание экрана", true));
-        l.add(SettingItem.toggle("vibrateOnWake", "Виброотклик при включении экрана", "Только когда экран включил пользователь", true));
-        l.add(SettingItem.toggle("bootHome", "На рабочий стол после загрузки", "Работает, когда модуль запустился в первые минуты после загрузки", true));
-        l.add(SettingItem.section("Датчики"));
-        l.add(SettingItem.toggle("proximity", "Не будить при закрытом датчике приближения", "В кармане или под чехлом", true));
-        l.add(SettingItem.toggle("faceDown", "Не будить, когда экран смотрит вниз", "Таймерные пробуждения пропускаются", true));
-        l.add(SettingItem.toggle("plugProximity", "Гасить экран, включившийся от зарядки", "Подключение и отключение питания", true));
-        l.add(SettingItem.section("Фон"));
-        l.add(SettingItem.image("wallpaper_image", "Картинка циферблата", "clock_wallpaper.png из репозитория clock; стрелки рассчитаны на неё"));
-        l.add(SettingItem.toggle("wallpaperUpsideDown", "Перевёрнутая картинка", "Поворачивает картинку и стрелки на 180°", false));
-        l.add(SettingItem.toggle("normalOrientation", "Всегда обычная ориентация", "Игнорирует «Перевёрнутая картинка»", false));
-        l.add(SettingItem.section("Музыкальный будильник"));
-        l.add(SettingItem.toggle("musicAlarm", "Ежедневно нажимать Play", "Запускает активный плеер в заданное время", false));
-        l.add(SettingItem.slider("alarmHour", "Час", "", 0, 23, 1, 8));
-        l.add(SettingItem.slider("alarmMinute", "Минута", "", 0, 59, 1, 0));
-        l.add(SettingItem.section("Разрешения и проверка"));
-        l.add(SettingItem.action("admin", "Администратор устройства", "Нужен только для выключения экрана после заставки"));
-        l.add(SettingItem.action("overlay_permission", "Показ поверх других приложений", "Нужно, чтобы заставка открывалась из фона"));
-        l.add(SettingItem.action("test", "Показать заставку сейчас", "Без погасания экрана"));
-        l.add(SettingItem.action("diag", "Состояние", "Следующее пробуждение, последняя причина, датчики"));
+        l.add(SettingItem.section("🕰 Заставка"));
+        l.add(SettingItem.toggle("clockEnabled", "⏻ Работать", "Датчики, таймер и будильник", true));
+        l.add(SettingItem.toggle("enabled", "⏰ Пробуждение каждые 5 минут", "Включает экран и показывает заставку", true));
+        l.add(SettingItem.toggle("flip", "🙃 Показ при перевороте экраном вниз", "Заставка и погасание экрана", true));
+        l.add(SettingItem.toggle("vibrateOnWake", "📳 Виброотклик при включении экрана", "Только когда экран включил пользователь", true));
+        l.add(SettingItem.toggle("bootHome", "🏠 На рабочий стол после загрузки", "Работает, когда модуль запустился в первые минуты после загрузки", true));
+        l.add(SettingItem.section("📡 Датчики"));
+        l.add(SettingItem.toggle("proximity", "🤚 Не будить при закрытом датчике приближения", "В кармане или под чехлом", true));
+        l.add(SettingItem.toggle("faceDown", "⬇ Не будить, когда экран смотрит вниз", "Таймерные пробуждения пропускаются", true));
+        l.add(SettingItem.toggle("plugProximity", "🔌 Гасить экран, включившийся от зарядки", "Подключение и отключение питания", true));
+        l.add(SettingItem.section("🖼 Фон"));
+        l.add(SettingItem.image("wallpaper_image", "🖼 Картинка циферблата", "clock_wallpaper.png из репозитория clock; стрелки рассчитаны на неё"));
+        l.add(SettingItem.toggle("wallpaperUpsideDown", "🔄 Перевёрнутая картинка", "Поворачивает картинку и стрелки на 180°", false));
+        l.add(SettingItem.toggle("normalOrientation", "📱 Всегда обычная ориентация", "Игнорирует «Перевёрнутая картинка»", false));
+        l.add(SettingItem.section("⏰ Музыкальный будильник"));
+        l.add(SettingItem.toggle("musicAlarm", "▶ Ежедневно нажимать Play", "Запускает активный плеер в заданное время", false));
+        l.add(SettingItem.slider("alarmHour", "🕐 Час", "", 0, 23, 1, 8));
+        l.add(SettingItem.slider("alarmMinute", "🕑 Минута", "", 0, 59, 1, 0));
+        l.add(SettingItem.section("🔐 Разрешения и проверка"));
+        l.add(SettingItem.action("admin", "👮 Администратор устройства", "Нужен только для выключения экрана после заставки"));
+        l.add(SettingItem.action("overlay_permission", "🪟 Показ поверх других приложений", "Нужно, чтобы заставка открывалась из фона"));
+        l.add(SettingItem.action("test", "🧪 Показать заставку сейчас", "Без погасания экрана"));
+        l.add(SettingItem.action("diag", "🩺 Состояние", "Следующее пробуждение, последняя причина, датчики"));
         return l;
     }
 

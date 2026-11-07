@@ -671,32 +671,32 @@ public class RadioGesturesModule implements IPlugin, ISettingsProvider {
         for (BluetoothDevice d : bondedSorted()) options.add(label(d));
 
         List<SettingItem> l = new ArrayList<SettingItem>();
-        l.add(SettingItem.section("Жест play/pause"));
-        l.add(SettingItem.toggle("gesture_enabled", "Жест включён",
+        l.add(SettingItem.section("👆 Жест play/pause"));
+        l.add(SettingItem.toggle("gesture_enabled", "✅ Жест включён",
                 "Кнопка play/pause на наушнике: кратковременное отключение и возврат", true));
-        l.add(SettingItem.choice("device", "Устройство",
+        l.add(SettingItem.choice("device", "🎧 Устройство",
                 "Если список пуст, выдайте Bluetooth-разрешения ниже", options, 0));
-        l.add(SettingItem.slider("reconnect_delay", "Пауза до возврата, мс",
+        l.add(SettingItem.slider("reconnect_delay", "⏳ Пауза до возврата, мс",
                 "Сколько наушник остаётся отключённым", 500, 10000, 500, 2500));
 
-        l.add(SettingItem.section("Мониторинг RSSI"));
-        l.add(SettingItem.monitor("rssi_monitor", "RSSI в реальном времени",
+        l.add(SettingItem.section("📡 Мониторинг RSSI"));
+        l.add(SettingItem.monitor("rssi_monitor", "📈 RSSI в реальном времени",
                 "BLE, Classic discovery и Shizuku (dumpsys)"));
-        l.add(SettingItem.toggle("monitor_after_gesture", "Мониторить после отключения",
+        l.add(SettingItem.toggle("monitor_after_gesture", "🔁 Мониторить после отключения",
                 "Запускать мониторинг в момент отключения наушника жестом", true));
-        l.add(SettingItem.slider("monitor_seconds", "Длительность мониторинга, с",
+        l.add(SettingItem.slider("monitor_seconds", "⏱ Длительность мониторинга, с",
                 "Отсчёт от начала мониторинга", 5, 300, 5, 30));
-        l.add(SettingItem.action("monitor_start", "Запустить мониторинг", "Для выбранного или подключённого устройства"));
-        l.add(SettingItem.action("monitor_stop", "Остановить мониторинг", "Выключит сканирование"));
+        l.add(SettingItem.action("monitor_start", "▶ Запустить мониторинг", "Для выбранного или подключённого устройства"));
+        l.add(SettingItem.action("monitor_stop", "⏹ Остановить мониторинг", "Выключит сканирование"));
 
-        l.add(SettingItem.section("Диагностика"));
-        l.add(SettingItem.action("test", "Проверить жест сейчас", "Отключит и вернёт наушник"));
-        l.add(SettingItem.action("rssi", "Показать RSSI", "Разовое чтение через Shizuku"));
-        l.add(SettingItem.action("log", "Показать лог подключений", "Последние события ACL"));
-        l.add(SettingItem.action("status", "Состояние модуля", "Профили, MediaSession, мониторинг"));
+        l.add(SettingItem.section("🧪 Диагностика"));
+        l.add(SettingItem.action("test", "🧪 Проверить жест сейчас", "Отключит и вернёт наушник"));
+        l.add(SettingItem.action("rssi", "📶 Показать RSSI", "Разовое чтение через Shizuku"));
+        l.add(SettingItem.action("log", "📜 Показать лог подключений", "Последние события ACL"));
+        l.add(SettingItem.action("status", "🩺 Состояние модуля", "Профили, MediaSession, мониторинг"));
 
-        l.add(SettingItem.section("Разрешения"));
-        l.add(SettingItem.action("grant_bt", "Выдать Bluetooth-разрешения",
+        l.add(SettingItem.section("🔐 Разрешения"));
+        l.add(SettingItem.action("grant_bt", "🔑 Выдать Bluetooth-разрешения",
                 "BLUETOOTH_CONNECT и BLUETOOTH_SCAN через Shizuku, один раз"));
         return l;
     }

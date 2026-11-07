@@ -1443,30 +1443,30 @@ public class GamepadModule implements IPlugin, ISettingsProvider, ISettingsViewP
     @Override
     public List<SettingItem> getSettingsSchema() {
         List<SettingItem> l = new ArrayList<SettingItem>();
-        l.add(SettingItem.section("Раскладка геймпада"));
-        l.add(SettingItem.custom("pad", "Геймпад",
+        l.add(SettingItem.section("🎮 Раскладка геймпада"));
+        l.add(SettingItem.custom("pad", "🎮 Геймпад",
                 "Выбери профиль, коснись кнопки на картинке или нажми её на геймпаде, стик подвигай. Приложения профилей выбираются тут же"));
-        l.add(SettingItem.section("Источники ввода"));
-        l.add(SettingItem.toggle("evdev", "Читать геймпад напрямую (Shizuku)",
+        l.add(SettingItem.section("🔌 Источники ввода"));
+        l.add(SettingItem.toggle("evdev", "🧲 Читать геймпад напрямую (Shizuku)",
                 "Стики, курки, крестовина и все кнопки при любом экране и любой версии Android. Нужен запущенный Shizuku",
                 true));
-        l.add(SettingItem.toggle("axes_service", "Стики и курки через службу (Android 14+)",
+        l.add(SettingItem.toggle("axes_service", "🕹 Стики и курки через службу (Android 14+)",
                 "Пока включено, другие приложения не получают движения стиков", true));
-        l.add(SettingItem.section("Плеер"));
-        l.add(SettingItem.toggle("dial", "Стик-циферблат: место в треке по кругу",
+        l.add(SettingItem.section("🎵 Плеер"));
+        l.add(SettingItem.toggle("dial", "🕰 Стик-циферблат: место в треке по кругу",
                 "Стик отклонён: играет место, на которое он указывает (вверх 0%, вправо 25%, вниз 50%, влево 75%). Вернул в центр: остаёшься там. Четыре направления этого стика отключаются",
                 true));
-        l.add(SettingItem.toggle("dial_left", "Циферблат на левом стике", "Выключено: правый стик", false));
-        l.add(SettingItem.toggle("direct_control", "Управлять плеером напрямую",
+        l.add(SettingItem.toggle("dial_left", "👈 Циферблат на левом стике", "Выключено: правый стик", false));
+        l.add(SettingItem.toggle("direct_control", "🎛 Управлять плеером напрямую",
                 "Команды идут активной медиасессии (нужен доступ к уведомлениям), иначе медиаклавишами", true));
-        l.add(SettingItem.action("grant_notifications", "Доступ к уведомлениям",
+        l.add(SettingItem.action("grant_notifications", "🔔 Доступ к уведомлениям",
                 "Откроет системные настройки: включи Universal Host"));
-        l.add(SettingItem.slider("seek_s", "Шаг перемотки, с", "", 5, 60, 5, 10));
-        l.add(SettingItem.section("Тайминги"));
-        l.add(SettingItem.slider("long_ms", "Долгое нажатие, мс", "", 300, 1000, 50, 500));
-        l.add(SettingItem.slider("double_ms", "Окно двойного нажатия, мс", "", 150, 600, 50, 300));
-        l.add(SettingItem.section("Сброс"));
-        l.add(SettingItem.action("reset", "Вернуть раскладку по умолчанию", "Сбросит кнопки всех профилей и дополнительные кнопки; названия и приложения профилей останутся"));
+        l.add(SettingItem.slider("seek_s", "⏩ Шаг перемотки, с", "", 5, 60, 5, 10));
+        l.add(SettingItem.section("⏱ Тайминги"));
+        l.add(SettingItem.slider("long_ms", "👇 Долгое нажатие, мс", "", 300, 1000, 50, 500));
+        l.add(SettingItem.slider("double_ms", "✌ Окно двойного нажатия, мс", "", 150, 600, 50, 300));
+        l.add(SettingItem.section("♻ Сброс"));
+        l.add(SettingItem.action("reset", "↺ Вернуть раскладку по умолчанию", "Сбросит кнопки всех профилей и дополнительные кнопки; названия и приложения профилей останутся"));
         return l;
     }
 

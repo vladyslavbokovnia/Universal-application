@@ -265,25 +265,25 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
     @Override
     public List<SettingItem> getSettingsSchema() {
         List<SettingItem> l = new ArrayList<SettingItem>();
-        l.add(SettingItem.section("Вид панели"));
-        l.add(SettingItem.slider("icon_dp", "Ширина иконки", "dp", 64, 192, 8, 128));
-        l.add(SettingItem.slider("columns", "Колонок в раскрытой панели", "", 2, 5, 1, 3));
-        l.add(SettingItem.slider("expanded_rows", "Строк в раскрытой панели", "по умолчанию 3", 1, 5, 1, 3));
-        l.add(SettingItem.slider("fade_alpha", "Прозрачность нижнего края иконок", "", 0, 255, 5, 128));
-        l.add(SettingItem.slider("icon_alpha", "Прозрачность всех иконок", "", 0, 255, 5, 0));
-        l.add(SettingItem.section("Поведение"));
-        l.add(SettingItem.toggle("pull_enabled", "Раскрытие свайпом вниз", "Список приложений сеткой", true));
-        l.add(SettingItem.toggle("edge_handle", "Боковая ручка", "Тап показывает или скрывает панель, свайп прокручивает, долгое нажатие раскрывает", true));
-        l.add(SettingItem.toggle("battery_bar", "Полоса заряда", "Тонкая полоса внизу экрана", true));
-        l.add(SettingItem.slider("menu_timeout", "Автозакрытие меню, сек", "", 2, 15, 1, 6));
-        l.add(SettingItem.choice("sort_mode", "Сортировка", "", Arrays.asList("По использованию", "По времени установки"), 0));
-        l.add(SettingItem.section("Картинки"));
-        l.add(SettingItem.appImages("app_icons", "Замена иконок приложений", "Выберите приложение и картинку"));
-        l.add(SettingItem.toggle("stretch_custom_images", "Растягивать картинки на ширину ячейки", "Только заменённые значки в узкой панели; обычные значки сохраняют прежнюю маску", true));
-        l.add(SettingItem.slider("custom_crop_top", "Обрезка заменённой картинки сверху", "%", 0, 20, 1, 5));
-        l.add(SettingItem.slider("custom_crop_bottom", "Обрезка заменённой картинки снизу", "%", 0, 20, 1, 5));
-        l.add(SettingItem.section("Скрытые приложения"));
-        l.add(SettingItem.action("unhide_all", "Вернуть все скрытые приложения", ""));
+        l.add(SettingItem.section("🎨 Вид панели"));
+        l.add(SettingItem.slider("icon_dp", "📏 Ширина иконки", "dp", 64, 192, 8, 128));
+        l.add(SettingItem.slider("columns", "▦ Колонок в раскрытой панели", "", 2, 5, 1, 3));
+        l.add(SettingItem.slider("expanded_rows", "☰ Строк в раскрытой панели", "по умолчанию 3", 1, 5, 1, 3));
+        l.add(SettingItem.slider("fade_alpha", "🌫 Прозрачность нижнего края иконок", "", 0, 255, 5, 128));
+        l.add(SettingItem.slider("icon_alpha", "👻 Прозрачность всех иконок", "", 0, 255, 5, 0));
+        l.add(SettingItem.section("⚙ Поведение"));
+        l.add(SettingItem.toggle("pull_enabled", "👇 Раскрытие свайпом вниз", "Список приложений сеткой", true));
+        l.add(SettingItem.toggle("edge_handle", "↔ Боковая ручка", "Тап показывает или скрывает панель, свайп прокручивает, долгое нажатие раскрывает", true));
+        l.add(SettingItem.toggle("battery_bar", "🔋 Полоса заряда", "Тонкая полоса внизу экрана", true));
+        l.add(SettingItem.slider("menu_timeout", "⏱ Автозакрытие меню, сек", "", 2, 15, 1, 6));
+        l.add(SettingItem.choice("sort_mode", "🔃 Сортировка", "", Arrays.asList("По использованию", "По времени установки"), 0));
+        l.add(SettingItem.section("🖼 Картинки"));
+        l.add(SettingItem.appImages("app_icons", "🖼 Замена иконок приложений", "Выберите приложение и картинку"));
+        l.add(SettingItem.toggle("stretch_custom_images", "↔ Растягивать картинки на ширину ячейки", "Только заменённые значки в узкой панели; обычные значки сохраняют прежнюю маску", true));
+        l.add(SettingItem.slider("custom_crop_top", "✂ Обрезка заменённой картинки сверху", "%", 0, 20, 1, 5));
+        l.add(SettingItem.slider("custom_crop_bottom", "✂ Обрезка заменённой картинки снизу", "%", 0, 20, 1, 5));
+        l.add(SettingItem.section("🙈 Скрытые приложения"));
+        l.add(SettingItem.action("unhide_all", "👁 Вернуть все скрытые приложения", ""));
         return l;
     }
 
