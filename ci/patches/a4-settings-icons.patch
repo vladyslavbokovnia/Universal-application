@@ -180,4 +180,5 @@ index c9ed835..aa33823 100644
 -            )
 +            SettingItem.SECTION -> content.addView(sectionRow(item.title))
              SettingItem.SWITCH -> content.addView(
-                 switchRow(item.title, item.summary, prefs.getBoolean(item.key, item.defInt == 1)) { on ->\n                     prefs.edit().putBoolean(item.key, on).apply()
+                 switchRow(item.title, item.summary, prefs.getBoolean(item.key, item.defInt == 1)) { on ->
+                     prefs.edit().putBoolean(item.key, on).apply()
