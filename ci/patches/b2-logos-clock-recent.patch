@@ -1,0 +1,98 @@
+diff --git a/modules/ClockWallpaperModule.java b/modules/ClockWallpaperModule.java
+index 76fa0fb..b581414 100644
+--- a/modules/ClockWallpaperModule.java
++++ b/modules/ClockWallpaperModule.java
+@@ -218,25 +218,25 @@ public class ClockWallpaperModule implements IPlugin, ISettingsProvider {
+         List<SettingItem> l = new ArrayList<SettingItem>();
+-        l.add(SettingItem.section("Заставка"));
+-        l.add(SettingItem.toggle("clockEnabled", "Работать", "Датчики, таймер и будильник", true));
+-        l.add(SettingItem.toggle("enabled", "Пробуждение каждые 5 минут", "Включает экран и показывает заставку", true));
+-        l.add(SettingItem.toggle("flip", "Показ при перевороте экраном вниз", "Заставка и погасание экрана", true));
+-        l.add(SettingItem.toggle("vibrateOnWake", "Виброотклик при включении экрана", "Только когда экран включил пользователь", true));
+-        l.add(SettingItem.toggle("bootHome", "На рабочий стол после загрузки", "Работает, когда модуль запустился в первые минуты после загрузки", true));
+-        l.add(SettingItem.section("Датчики"));
+-        l.add(SettingItem.toggle("proximity", "Не будить при закрытом датчике приближения", "В кармане или под чехлом", true));
+-        l.add(SettingItem.toggle("faceDown", "Не будить, когда экран смотрит вниз", "Таймерные пробуждения пропускаются", true));
+-        l.add(SettingItem.toggle("plugProximity", "Гасить экран, включившийся от зарядки", "Подключение и отключение питания", true));
+-        l.add(SettingItem.section("Фон"));
+-        l.add(SettingItem.image("wallpaper_image", "Картинка циферблата", "clock_wallpaper.png из репозитория clock; стрелки рассчитаны на неё"));
+-        l.add(SettingItem.toggle("wallpaperUpsideDown", "Перевёрнутая картинка", "Поворачивает картинку и стрелки на 180°", false));
+-        l.add(SettingItem.toggle("normalOrientation", "Всегда обычная ориентация", "Игнорирует «Перевёрнутая картинка»", false));
+-        l.add(SettingItem.section("Музыкальный будильник"));
+-        l.add(SettingItem.toggle("musicAlarm", "Ежедневно нажимать Play", "Запускает активный плеер в заданное время", false));
+-        l.add(SettingItem.slider("alarmHour", "Час", "", 0, 23, 1, 8));
+-        l.add(SettingItem.slider("alarmMinute", "Минута", "", 0, 59, 1, 0));
+-        l.add(SettingItem.section("Разрешения и проверка"));
+-        l.add(SettingItem.action("admin", "Администратор устройства", "Нужен только для выключения экрана после заставки"));
+-        l.add(SettingItem.action("overlay_permission", "Показ поверх других приложений", "Нужно, чтобы заставка открывалась из фона"));
+-        l.add(SettingItem.action("test", "Показать заставку сейчас", "Без погасания экрана"));
+-        l.add(SettingItem.action("diag", "Состояние", "Следующее пробуждение, последняя причина, датчики"));
++        l.add(SettingItem.section("🕰 Заставка"));
++        l.add(SettingItem.toggle("clockEnabled", "⏻ Работать", "Датчики, таймер и будильник", true));
++        l.add(SettingItem.toggle("enabled", "⏰ Пробуждение каждые 5 минут", "Включает экран и показывает заставку", true));
++        l.add(SettingItem.toggle("flip", "🙃 Показ при перевороте экраном вниз", "Заставка и погасание экрана", true));
++        l.add(SettingItem.toggle("vibrateOnWake", "📳 Виброотклик при включении экрана", "Только когда экран включил пользователь", true));
++        l.add(SettingItem.toggle("bootHome", "🏠 На рабочий стол после загрузки", "Работает, когда модуль запустился в первые минуты после загрузки", true));
++        l.add(SettingItem.section("📡 Датчики"));
++        l.add(SettingItem.toggle("proximity", "🤚 Не будить при закрытом датчике приближения", "В кармане или под чехлом", true));
++        l.add(SettingItem.toggle("faceDown", "⬇ Не будить, когда экран смотрит вниз", "Таймерные пробуждения пропускаются", true));
++        l.add(SettingItem.toggle("plugProximity", "🔌 Гасить экран, включившийся от зарядки", "Подключение и отключение питания", true));
++        l.add(SettingItem.section("🖼 Фон"));
++        l.add(SettingItem.image("wallpaper_image", "🖼 Картинка циферблата", "clock_wallpaper.png из репозитория clock; стрелки рассчитаны на неё"));
++        l.add(SettingItem.toggle("wallpaperUpsideDown", "🔄 Перевёрнутая картинка", "Поворачивает картинку и стрелки на 180°", false));
++        l.add(SettingItem.toggle("normalOrientation", "📱 Всегда обычная ориентация", "Игнорирует «Перевёрнутая картинка»", false));
++        l.add(SettingItem.section("⏰ Музыкальный будильник"));
++        l.add(SettingItem.toggle("musicAlarm", "▶ Ежедневно нажимать Play", "Запускает активный плеер в заданное время", false));
++        l.add(SettingItem.slider("alarmHour", "🕐 Час", "", 0, 23, 1, 8));
++        l.add(SettingItem.slider("alarmMinute", "🕑 Минута", "", 0, 59, 1, 0));
++        l.add(SettingItem.section("🔐 Разрешения и проверка"));
++        l.add(SettingItem.action("admin", "👮 Администратор устройства", "Нужен только для выключения экрана после заставки"));
++        l.add(SettingItem.action("overlay_permission", "🪟 Показ поверх других приложений", "Нужно, чтобы заставка открывалась из фона"));
++        l.add(SettingItem.action("test", "🧪 Показать заставку сейчас", "Без погасания экрана"));
++        l.add(SettingItem.action("diag", "🩺 Состояние", "Следующее пробуждение, последняя причина, датчики"));
+         return l;
+diff --git a/modules/RecentAppsPanelModule.java b/modules/RecentAppsPanelModule.java
+index 3a15523..7df5320 100644
+--- a/modules/RecentAppsPanelModule.java
++++ b/modules/RecentAppsPanelModule.java
+@@ -267,21 +267,21 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
+         List<SettingItem> l = new ArrayList<SettingItem>();
+-        l.add(SettingItem.section("Вид панели"));
+-        l.add(SettingItem.slider("icon_dp", "Ширина иконки", "dp", 64, 192, 8, 128));
+-        l.add(SettingItem.slider("columns", "Колонок в раскрытой панели", "", 2, 5, 1, 3));
+-        l.add(SettingItem.slider("expanded_rows", "Строк в раскрытой панели", "по умолчанию 3", 1, 5, 1, 3));
+-        l.add(SettingItem.slider("fade_alpha", "Прозрачность нижнего края иконок", "", 0, 255, 5, 128));
+-        l.add(SettingItem.slider("icon_alpha", "Прозрачность всех иконок", "", 0, 255, 5, 0));
+-        l.add(SettingItem.section("Поведение"));
+-        l.add(SettingItem.toggle("pull_enabled", "Раскрытие свайпом вниз", "Список приложений сеткой", true));
+-        l.add(SettingItem.toggle("edge_handle", "Боковая ручка", "Тап показывает или скрывает панель, свайп прокручивает, долгое нажатие раскрывает", true));
+-        l.add(SettingItem.toggle("battery_bar", "Полоса заряда", "Тонкая полоса внизу экрана", true));
+-        l.add(SettingItem.slider("menu_timeout", "Автозакрытие меню, сек", "", 2, 15, 1, 6));
+-        l.add(SettingItem.choice("sort_mode", "Сортировка", "", Arrays.asList("По использованию", "По времени установки"), 0));
+-        l.add(SettingItem.section("Картинки"));
+-        l.add(SettingItem.appImages("app_icons", "Замена иконок приложений", "Выберите приложение и картинку"));
+-        l.add(SettingItem.toggle("stretch_custom_images", "Растягивать картинки на ширину ячейки", "Только заменённые значки в узкой панели; обычные значки сохраняют прежнюю маску", true));
+-        l.add(SettingItem.slider("custom_crop_top", "Обрезка заменённой картинки сверху", "%", 0, 20, 1, 5));
+-        l.add(SettingItem.slider("custom_crop_bottom", "Обрезка заменённой картинки снизу", "%", 0, 20, 1, 5));
+-        l.add(SettingItem.section("Скрытые приложения"));
+-        l.add(SettingItem.action("unhide_all", "Вернуть все скрытые приложения", ""));
++        l.add(SettingItem.section("🎨 Вид панели"));
++        l.add(SettingItem.slider("icon_dp", "📏 Ширина иконки", "dp", 64, 192, 8, 128));
++        l.add(SettingItem.slider("columns", "▦ Колонок в раскрытой панели", "", 2, 5, 1, 3));
++        l.add(SettingItem.slider("expanded_rows", "☰ Строк в раскрытой панели", "по умолчанию 3", 1, 5, 1, 3));
++        l.add(SettingItem.slider("fade_alpha", "🌫 Прозрачность нижнего края иконок", "", 0, 255, 5, 128));
++        l.add(SettingItem.slider("icon_alpha", "👻 Прозрачность всех иконок", "", 0, 255, 5, 0));
++        l.add(SettingItem.section("⚙ Поведение"));
++        l.add(SettingItem.toggle("pull_enabled", "👇 Раскрытие свайпом вниз", "Список приложений сеткой", true));
++        l.add(SettingItem.toggle("edge_handle", "↔ Боковая ручка", "Тап показывает или скрывает панель, свайп прокручивает, долгое нажатие раскрывает", true));
++        l.add(SettingItem.toggle("battery_bar", "🔋 Полоса заряда", "Тонкая полоса внизу экрана", true));
++        l.add(SettingItem.slider("menu_timeout", "⏱ Автозакрытие меню, сек", "", 2, 15, 1, 6));
++        l.add(SettingItem.choice("sort_mode", "🔃 Сортировка", "", Arrays.asList("По использованию", "По времени установки"), 0));
++        l.add(SettingItem.section("🖼 Картинки"));
++        l.add(SettingItem.appImages("app_icons", "🖼 Замена иконок приложений", "Выберите приложение и картинку"));
++        l.add(SettingItem.toggle("stretch_custom_images", "↔ Растягивать картинки на ширину ячейки", "Только заменённые значки в узкой панели; обычные значки сохраняют прежнюю маску", true));
++        l.add(SettingItem.slider("custom_crop_top", "✂ Обрезка заменённой картинки сверху", "%", 0, 20, 1, 5));
++        l.add(SettingItem.slider("custom_crop_bottom", "✂ Обрезка заменённой картинки снизу", "%", 0, 20, 1, 5));
++        l.add(SettingItem.section("🙈 Скрытые приложения"));
++        l.add(SettingItem.action("unhide_all", "👁 Вернуть все скрытые приложения", ""));
+         return l;
