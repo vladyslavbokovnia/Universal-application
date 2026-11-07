@@ -179,7 +179,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     };
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 11; }
+    @Override public int getVersion() { return 12; }
     @Override public String getDescription() {
         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
@@ -572,6 +572,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             mp.reset();
             prepared = false;
             cur = i;
+            rememberLast(listSrc, tracks.get(i));   // последний трек этого списка: к нему вернёмся при «Сменить список»
             stopAfter = false;
             resumeTo = savedPos(tracks.get(i));
             mp.setDataSource(appCtx, tracks.get(i).uri);
@@ -1117,6 +1118,38 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         return v == null ? 0 : v.intValue();
     }
 
+    // ---------------------------------------------------------- последний трек каждого списка
+
+    private static String lastKey(int src) { return "last_uri_" + src; }
+
+    /** Запомнить, какой трек играл в списке src (0 все, 1 позже, 2 избранное). */
+    private void rememberLast(int src, Track t) {
+        SharedPreferences p = prefs();
+        if (p == null || t == null || t.uri == null || t.id < 0) return;   // песни из «Поделиться» пропускаем
+        p.edit().putString(lastKey(src), t.uri.toString()).apply();
+    }
+
+    /** Номер в tracks последнего трека списка src или -1. */
+    private int lastIndexFor(int src) {
+        SharedPreferences p = prefs();
+        String u = p == null ? null : p.getString(lastKey(src), null);
+        if (u == null) return -1;
+        for (int i = 0; i < tracks.size(); i++) {
+            Uri tu = tracks.get(i).uri;
+            if (tu != null && tu.toString().equals(u)) return i;
+        }
+        return -1;
+    }
+
+    /** Позиция записи в плейлисте key, которая соответствует последнему треку списка src, или -1. */
+    private int lastPosInList(String key, int src) {
+        int li = lastIndexFor(src);
+        if (li < 0) return -1;
+        List<String[]> pl = plLoad(key);
+        for (int i = 0; i < pl.size(); i++) if (findTrack(pl.get(i)) == li) return i;
+        return -1;
+    }
+
     private float speed() {
         SharedPreferences p = prefs();
         return p == null ? 1f : p.getFloat("speed", 1f);
@@ -1377,17 +1410,24 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         return s == 1 ? "Послушать позже" : (s == 2 ? "Избранное" : "Все песни");
     }
 
-    /** Кнопка геймпада: перейти на следующий непустой список (все, позже, избранное), начать с его первой песни и назвать его. */
+    /**
+     * Кнопка геймпада: перейти на следующий непустой список (все, позже, избранное) и назвать его. Играет тот трек,
+     * на котором остановились в этом списке в прошлый раз (с запомненного места); если его уже нет, то первая песня.
+     */
     private void switchList() {
         for (int step = 1; step <= 2; step++) {
             int s = (listSrc + step) % 3;
             if (s == 0) {
                 int[] g = generalArray();
                 if (g.length == 0) continue;
-                playFromGeneral(g[0]);
+                int pick = g[0];
+                int li = lastIndexFor(0);
+                for (int x : g) if (x == li) { pick = x; break; }
+                playFromGeneral(pick);
             } else {
                 String key = s == 1 ? PL_LATER : PL_FAV;
-                int pos = firstPlayable(key);
+                int pos = lastPosInList(key, s);
+                if (pos < 0) pos = firstPlayable(key);
                 if (pos < 0) continue;
                 playFromList(key, pos);
             }
