@@ -1301,7 +1301,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             btnTabs.setBackground(pressableFrame());
             btnTabs.setOnLongClickListener(new View.OnLongClickListener() {
                 @Override public boolean onLongClick(View v) {
-                    if (cur != null) newTab(home(), cur.profile, null, true);
+                    if (cur != null) newTab(home(), cur.profile, null, true, cur.group);
                     return true;
                 }
             });
@@ -2125,7 +2125,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             captureThumbThen(from, new Runnable() {
                 @Override public void run() {
                     // пустая вкладка: домашняя страница не грузится; назад из этого экрана вернёт на прежнюю вкладку
-                    Tab nt = newTab("about:blank", prof, null, true);
+                    Tab nt = newTab("about:blank", prof, null, true, from.group);
                     pendingNew = nt;
                     pendingFrom = from;
                     showStart(true, true);
@@ -2149,7 +2149,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             captureThumbThen(from, new Runnable() {
                 @Override public void run() {
                     closeLayer(false);
-                    newTab(url, prof, null, true);
+                    newTab(url, prof, null, true, from.group);        // в той же группе, что и вкладка, с которой открыли
                 }
             });
         }
@@ -2773,6 +2773,11 @@ public class Browser implements IPlugin, ISettingsProvider {
                 if (oi >= 0) {
                     at = oi + 1;
                     while (at < tabs.size() && descendsFrom(tabs.get(at), opener)) at++;
+                }
+            } else if (group != 0) {
+                // вкладка прямо в группу (новая вкладка из строки поиска или меню): за последней вкладкой этой группы, в том числе вложенных
+                for (int i = tabs.size() - 1; i >= 0; i--) {
+                    if (inGroup(tabs.get(i), group)) { at = i + 1; break; }
                 }
             }
             tabs.add(at, t);
@@ -5135,7 +5140,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             final List<GridItem> items = new ArrayList<GridItem>();
             addG(items, "new", "＋", "Новая вкладка…", new Runnable() { @Override public void run() {
                 chooseProfile("Новая вкладка: выберите профиль", new Pick() {
-                    @Override public void on(int idx) { newTab(home(), idx, null, true); }
+                    @Override public void on(int idx) { newTab(home(), idx, null, true, t.group); }
                 });
             } });
             addG(items, "group", "📁", "Группа этой вкладки…", new Runnable() { @Override public void run() { showTabMenu(t); } });
@@ -5903,7 +5908,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         private void openBookmark(Bookmark b, int profile, boolean select) {
             if (profile != 0 && !Profiles.supported()) { toast(Profiles.status()); return; }
             if (select) closeLayer(false);
-            newTab(b.url, profile, null, select);
+            newTab(b.url, profile, null, select, cur != null ? cur.group : 0);
             if (!select) { toast("Открыто в фоне: " + b.title); showTabs(); }
         }
 
