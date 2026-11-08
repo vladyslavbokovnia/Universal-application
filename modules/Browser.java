@@ -3649,6 +3649,20 @@ public class Browser implements IPlugin, ISettingsProvider {
             return sb.append(b).toString();
         }
 
+        /** Отдаёт ссылку открытой страницы модулю «VOT перевод» (приёмник «Поделиться» хоста, тип text/x-votaudio). */
+        private void sendToVot(Tab t) {
+            if (t == null || t.url == null || t.url.length() == 0) return;
+            try {
+                Intent i = new Intent(Intent.ACTION_SEND).setType("text/x-votaudio")
+                        .setClassName(act.getPackageName(), "im.manus.universalhost.ModuleShareActivity")
+                        .putExtra(Intent.EXTRA_TEXT, t.url)
+                        .putExtra(Intent.EXTRA_SUBJECT, t.title == null ? "" : t.title);
+                act.startActivity(i);
+            } catch (Throwable e) {
+                toast("Модуль «VOT перевод» не установлен или выключен: " + e);
+            }
+        }
+
         private void copyConsole(Tab t) {
             if (t == null) return;
             int n = consoleCount(t);
@@ -5240,6 +5254,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 if (t.wv != null) t.wv.reload();
             } });
             addG(items, "scripts", "🧩", "Скрипты", new Runnable() { @Override public void run() { showScripts(t); } });
+            addG(items, "vot", "🗣", "Перевод VOT: скачать русское аудио", new Runnable() { @Override public void run() { sendToVot(t); } });
             addG(items, "console", "🐞", "Копировать ошибки консоли страницы", new Runnable() { @Override public void run() { copyConsole(t); } });
             addG(items, "console_clear", "🧹", "Очистить журнал консоли", new Runnable() { @Override public void run() { clearConsole(t); } });
             addG(items, "profiles", "🎭", "Значки профилей…",new Runnable() { @Override public void run() { showProfileList(); } });

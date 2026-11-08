@@ -69,6 +69,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 import im.manus.universalhost.IKeyHandler;
+import im.manus.universalhost.IMainViewProvider;
 import im.manus.universalhost.IMotionHandler;
 import im.manus.universalhost.IPlugin;
 import im.manus.universalhost.ISettingsProvider;
@@ -102,7 +103,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * плейлист, из общего списка пропадает; вернуть его можно кнопкой «↩» в плейлисте. Следующий и предыдущий идут по
  * тому списку, с которого начали играть; кнопкой геймпада «Сменить список» можно перейти на следующий список.
  */
-public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewProvider, IKeyHandler,
+public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewProvider, IMainViewProvider, IKeyHandler,
         IMotionHandler, IShareHandler {
 
     private static final String PREFS = "module_Аудиоплеер";
@@ -2314,7 +2315,6 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     @Override public List<SettingItem> getSettingsSchema() {
         List<SettingItem> r = new ArrayList<SettingItem>();
         r.add(SettingItem.section("🎵 Плеер"));
-        r.add(SettingItem.custom("player", "🎵 Плеер", "Песни, плейлисты, кнопки геймпада и стик-циферблат на картинке 🎮"));
         r.add(SettingItem.toggle("newest_first", "🆕 Новые песни сверху",
                 "Список по порядку загрузки на устройство; выключено: старые сверху, новые внизу", false));
         r.add(SettingItem.toggle("resume", "📍 Помнить место в треке",
@@ -2375,6 +2375,12 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     }
 
     @Override public View createSettingsView(Context context, String key) {
+        mapper(context);
+        return new PlayerView(context);
+    }
+
+    /** Главное окно плеера (отдельная карточка в недавних): сетка треков и плейлисты сверху; настройки остаются в хосте. */
+    @Override public View createMainView(Context context) {
         mapper(context);
         return new PlayerView(context);
     }

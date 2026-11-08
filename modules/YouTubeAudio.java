@@ -5,9 +5,9 @@ import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.view.View;
+import im.manus.universalhost.IMainViewProvider;
 import im.manus.universalhost.IPlugin;
 import im.manus.universalhost.ISettingsProvider;
-import im.manus.universalhost.ISettingsViewProvider;
 import im.manus.universalhost.IShareHandler;
 import im.manus.universalhost.SettingItem;
 import im.manus.universalhost.YtAudioQueue;
@@ -25,7 +25,7 @@ import java.util.Map;
  * Ролики без русской дорожки остаются в списке со ссылкой. Файл и превью кладутся в Music/YouTube,
  * плеер показывает превью плитками. Модуль только принимает ссылки, описывает настройки и показывает список.
  */
-public class YouTubeAudio implements IPlugin, ISettingsProvider, ISettingsViewProvider, IShareHandler {
+public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvider, IShareHandler {
 
     static final String MIME = "text/x-ytaudio";
 
@@ -95,9 +95,6 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, ISettingsViewPr
                 "Выключено: ролик без русской дорожки остаётся в списке со ссылкой.", false));
         r.add(SettingItem.text("lang", "🌐 Язык дорожки", "Код языка: ru, en, uk.", "ru"));
         r.add(SettingItem.text("out_dir", "📁 Папка", "Внутри памяти телефона. Рядом с аудио кладутся превью и ссылка.", "Music/YouTube"));
-        r.add(SettingItem.section("📋 Список"));
-        r.add(SettingItem.custom("queue", "📋 Список ссылок",
-                "Тап по плитке качает, двойной тап читает название. Значки: ссылка в браузере, удалить."));
         return r;
     }
 
@@ -106,7 +103,8 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, ISettingsViewPr
         if ("auto_mode".equals(key) || "wifi_only".equals(key)) YtAudioQueue.get(appCtx).tryDrain();
     }
 
-    @Override public View createSettingsView(Context context, String key) {
+    /** Главное окно (отдельная карточка в недавних): сетка списка и кнопки обработки списка. */
+    @Override public View createMainView(Context context) {
         return YtQueueView.create(context);
     }
 }

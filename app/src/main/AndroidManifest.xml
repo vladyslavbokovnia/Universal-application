@@ -59,6 +59,8 @@
                 <data android:mimeType="audio/*" />
                 <!-- Ссылка на видео YouTube из скрипта YouTube TTS: модуль YouTubeAudio скачивает дорожку -->
                 <data android:mimeType="text/x-ytaudio" />
+                <!-- Ссылка на видео YouTube для модуля «VOT перевод» (перевод Яндекса) -->
+                <data android:mimeType="text/x-votaudio" />
             </intent-filter>
         </activity>
         <activity android:name=".AppImagesActivity" android:exported="false" />
