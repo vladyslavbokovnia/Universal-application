@@ -1,0 +1,152 @@
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 473411b..6d5f2ef 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -46,4 +46,6 @@
+ 
+         <activity android:name=".ModuleSettingsActivity" android:exported="false" />
++        <!-- Главное окно модуля (список загрузок, плеер): отдельная карточка в «Недавних», без остальных настроек -->
++        <activity android:name=".ModuleViewActivity" android:exported="false" />
+         <!-- Приёмник «Поделиться» для модулей (PWA-стиль): виден в системном меню шаринга -->
+         <activity android:name=".ModuleShareActivity" android:exported="true"
+diff --git a/app/src/main/kotlin/im/manus/universalhost/IMainViewProvider.kt b/app/src/main/kotlin/im/manus/universalhost/IMainViewProvider.kt
+new file mode 100644
+index 0000000..dd49c13
+--- /dev/null
++++ b/app/src/main/kotlin/im/manus/universalhost/IMainViewProvider.kt
+@@ -0,0 +1,13 @@
++package im.manus.universalhost
++
++import android.content.Context
++import android.view.View
++
++/**
++ * Необязательный интерфейс: у модуля есть главное окно (список загрузок, плеер). Оно открывается отдельной
++ * карточкой в недавних (ModuleViewActivity) и показывает только этот вид; остальные настройки модуля
++ * остаются в экране настроек хоста (кнопка-шестерёнка в окне).
++ */
++interface IMainViewProvider {
++    fun createMainView(context: Context): View
++}
+diff --git a/app/src/main/kotlin/im/manus/universalhost/MainActivity.kt b/app/src/main/kotlin/im/manus/universalhost/MainActivity.kt
+index ec66f99..9c27ac4 100644
+--- a/app/src/main/kotlin/im/manus/universalhost/MainActivity.kt
++++ b/app/src/main/kotlin/im/manus/universalhost/MainActivity.kt
+@@ -137,4 +137,11 @@ class MainActivity : Activity() {
+     }
+ 
++    /** Модуль с главным окном (список, плеер) открывается им отдельной карточкой; остальные: экраном настроек. */
++    private fun openModule(target: String) {
++        val plugin = try { PluginRegistry.find(this, target) } catch (e: Throwable) { null }
++        if (plugin is IMainViewProvider) startActivity(ModuleViewActivity.intentFor(this, target))
++        else openSettings(target)
++    }
++
+     private fun openSettings(target: String, folderId: String? = null) {
+         startActivity(
+@@ -343,5 +350,5 @@ class MainActivity : Activity() {
+                 render()
+             } else {
+-                openSettings(c.id)
++                openModule(c.id)
+             }
+         }
+diff --git a/app/src/main/kotlin/im/manus/universalhost/ModuleViewActivity.kt b/app/src/main/kotlin/im/manus/universalhost/ModuleViewActivity.kt
+new file mode 100644
+index 0000000..cef2bf6
+--- /dev/null
++++ b/app/src/main/kotlin/im/manus/universalhost/ModuleViewActivity.kt
+@@ -0,0 +1,93 @@
++package im.manus.universalhost
++
++import android.app.Activity
++import android.content.Context
++import android.content.Intent
++import android.graphics.Color
++import android.net.Uri
++import android.os.Bundle
++import android.view.Gravity
++import android.view.View
++import android.widget.FrameLayout
++import android.widget.LinearLayout
++import android.widget.ScrollView
++
++/**
++ * Главное окно модуля (PWA-стиль): отдельная карточка в недавних со значком и именем модуля, внутри только
++ * вид модуля (IMainViewProvider): сетка списка загрузок или сетка треков плеера. Настройки открываются
++ * шестерёнкой сверху. Окно записывается в реестр ModuleWindows, поэтому его видит и модуль «Недавние».
++ */
++class ModuleViewActivity : Activity() {
++
++    companion object {
++        const val EXTRA_TARGET = "target"
++
++        /** Интент, который открывает (или поднимает) окно модуля [name]: одна карточка в недавних на модуль. */
++        @JvmStatic
++        fun intentFor(context: Context, name: String): Intent =
++            Intent(context, ModuleViewActivity::class.java).apply {
++                action = Intent.ACTION_VIEW
++                data = Uri.parse("moduleview://" + Uri.encode(name))
++                putExtra(EXTRA_TARGET, name)
++                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
++            }
++    }
++
++    private var target: String = ""
++
++    @Suppress("DEPRECATION")
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++        val t = intent.getStringExtra(EXTRA_TARGET) ?: intent.data?.host?.let { Uri.decode(it) }
++        if (t == null) {
++            finish()
++            return
++        }
++        target = t
++        title = t
++        try {
++            setTaskDescription(android.app.ActivityManager.TaskDescription(t, ModuleWindows.icon(this, t, 192), Color.BLACK))
++        } catch (e: Throwable) { }
++
++        val plugin = try { PluginRegistry.find(this, t) } catch (e: Throwable) { null }
++        val view = try { (plugin as? IMainViewProvider)?.createMainView(this) } catch (e: Throwable) { null }
++        if (view == null) {
++            openSettings()
++            finish()
++            return
++        }
++
++        val d = resources.displayMetrics.density
++        val root = LinearLayout(this)
++        root.orientation = LinearLayout.VERTICAL
++        root.setBackgroundColor(Color.BLACK)
++
++        val bar = FrameLayout(this)
++        val gear = GlyphView(this, GlyphView.GEAR)
++        gear.alpha = 0.6f
++        gear.contentDescription = "Настройки модуля"
++        gear.setOnClickListener { openSettings() }
++        bar.addView(gear, FrameLayout.LayoutParams((56 * d).toInt(), (56 * d).toInt(), Gravity.END or Gravity.CENTER_VERTICAL))
++        root.addView(bar, LinearLayout.LayoutParams(-1, (56 * d).toInt()))
++
++        val body: View = if (view is ScrollView) view else ScrollView(this).apply { addView(view) }
++        root.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
++        setContentView(root)
++    }
++
++    private fun openSettings() {
++        startActivity(
++            Intent(this, ModuleSettingsActivity::class.java)
++                .putExtra(ModuleSettingsActivity.EXTRA_TARGET, target)
++        )
++    }
++
++    override fun onResume() {
++        super.onResume()
++        if (target.isNotEmpty()) {
++            ModuleWindows.record(this, target, Intent(intent).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
++        }
++        HostRecents.hideHostCard(this)
++        CoreAccessibilityService.instance?.refreshIfStale()
++    }
++}
