@@ -1,12 +1,16 @@
 package im.manus.plugins;
 
 import android.accessibilityservice.AccessibilityService;
+import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.media.MediaScannerConnection;
 import android.net.ConnectivityManager;
 import android.net.Network;
@@ -16,13 +20,24 @@ import android.net.Uri;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.TextUtils;
 import android.util.Base64;
+import android.view.GestureDetector;
+import android.view.Gravity;
+import android.view.MotionEvent;
+import android.view.View;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 import android.widget.Toast;
+import im.manus.universalhost.IMainViewProvider;
 import im.manus.universalhost.IPlugin;
 import im.manus.universalhost.ISettingsProvider;
 import im.manus.universalhost.IShareHandler;
 import im.manus.universalhost.SettingItem;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
@@ -67,7 +82,7 @@ import javax.crypto.spec.SecretKeySpec;
  * Протокол (protobuf-сообщения, подпись HMAC, заголовки) повторяет клиент vot.js; ключ подписи и версия компонента
  * Яндекса взяты оттуда же и со временем могут устареть: тогда пункт «Проверить подключение» покажет ошибку.
  */
-public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IShareHandler {
+public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainViewProvider, IShareHandler {
 
     static final String NAME = "VOT перевод";
     static final String MIME_AUDIO = "text/x-votaudio";
@@ -134,7 +149,7 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IShareH
     private Context appCtx;
 
     @Override public String getName() { return NAME; }
-    @Override public int getVersion() { return 2; }
+    @Override public int getVersion() { return 3; }
     @Override public String getDescription() {
         return "Закадровый перевод YouTube на русский (сервис Яндекса, как в VOT): скачивает озвучку в Music/VOT.";
     }
@@ -165,16 +180,23 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IShareH
                 toast(app, "Это не ссылка на видео YouTube");
                 return false;
             }
-            final Job job = new Job();
-            job.videoId = id;
-            job.videoUrl = "https://youtu.be/" + id;
+            ensureLoaded(app);
             String title = intent.getStringExtra(Intent.EXTRA_SUBJECT);
-            job.title = title == null || title.trim().length() == 0 ? "YouTube " + id : title.trim();
-            job.duration = intent.getDoubleExtra("vot_duration", 0);
-            toast(app, "🗣 В очереди на перевод: " + job.title);
-            EXEC.execute(new Runnable() {
-                @Override public void run() { runJob(app, job); }
-            });
+            Item it = findItem(id);
+            if (it == null) {
+                it = new Item();
+                it.videoId = id;
+                synchronized (ITEMS) { ITEMS.add(0, it); }
+            } else if (it.busy) {
+                toast(app, "Этот ролик уже переводится");
+                return true;
+            }
+            it.url = "https://youtu.be/" + id;
+            if (title != null && title.trim().length() > 0) it.title = title.trim();
+            else if (it.title.length() == 0) it.title = "YouTube " + id;
+            it.duration = intent.getDoubleExtra("vot_duration", 0);
+            toast(app, "🗣 В очереди на перевод: " + it.title);
+            startItem(app, it);
             return true;
         } catch (Throwable t) {
             return false;
@@ -231,7 +253,7 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IShareH
         r.add(SettingItem.toggle("fallback_standard", "🤖 Обычный голос, если живой недоступен",
                 "Выключено: без входа в Яндекс перевод с живым голосом не запускается.", true));
         r.add(SettingItem.toggle("wifi_only", "📶 Только по Wi-Fi",
-                "Перевод и скачивание ждут Wi-Fi (или Ethernet), по мобильной сети не идут.", false));
+                "Перевод и скачивание ждут Wi-Fi (или Ethernet), по мобильной сети не идут.", true));
         r.add(SettingItem.text("max_parallel", "⚡ Переводов одновременно",
                 "От 1 до 5. Яндекс переводит ролик не сразу, поэтому несколько роликов можно отправлять подряд.", "3"));
         r.add(SettingItem.text("out_dir", "📁 Папка", "Внутри памяти телефона.", "Music/VOT"));
@@ -258,7 +280,7 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IShareH
         final String text;
         synchronized (LOG) {
             StringBuilder sb = new StringBuilder();
-            sb.append("VOT перевод, версия модуля 2, Android ").append(android.os.Build.VERSION.RELEASE)
+            sb.append("VOT перевод, версия модуля 3, Android ").append(android.os.Build.VERSION.RELEASE)
               .append(" (API ").append(android.os.Build.VERSION.SDK_INT).append("), сеть: ").append(netKind(app)).append("\n\n");
             for (String l : LOG) sb.append(l).append('\n');
             text = sb.toString();
@@ -402,6 +424,7 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IShareH
         String videoId, videoUrl, title;
         double duration;
         int n = nextSeq();
+        Item it;
     }
 
     private static synchronized int nextSeq() { return ++jobSeq; }
@@ -419,6 +442,7 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IShareH
 
     private void say(Context app, Job job, String msg) {
         log("#" + job.n + " " + msg);
+        if (job.it != null) { job.it.msg = msg; changed(); }
         String t = job.title == null ? "" : job.title;
         if (t.length() > 24) t = t.substring(0, 24) + "…";
         toast(app, "«" + t + "»: " + msg);
@@ -426,18 +450,18 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IShareH
 
     /** Ждёт Wi-Fi, если включён режим «только по Wi-Fi». */
     private void waitWifi(Context app, Job job, SharedPreferences p) throws IOException {
-        if (!p.getBoolean("wifi_only", false)) return;
+        if (!p.getBoolean("wifi_only", true)) return;
         boolean told = false;
-        for (int i = 0; i < 2160; i++) {            // до 6 часов
-            if (netKind(app) == 2) return;
+        while (netKind(app) != 2) {                 // без ограничения по времени: ждём, пока ролик не уберут из списка
+            if (job.it != null && job.it.removed) throw new IOException("Убрано из списка");
             if (!told) { told = true; say(app, job, "жду Wi-Fi"); }
             try { Thread.sleep(10000); } catch (InterruptedException e) { throw new IOException("Ожидание Wi-Fi прервано"); }
         }
-        throw new IOException("Wi-Fi так и не появился");
     }
 
     private void runJob(Context app, Job job) {
         boolean entered = false;
+        Item it = job.it;
         try {
             SharedPreferences p = prefs(app);
             int limit = 3;
@@ -451,6 +475,7 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IShareH
                 running++;
                 entered = true;
             }
+            if (it != null) { it.status = "run"; it.msg = "перевод"; changed(); }
             log("#" + job.n + " старт " + job.videoUrl + " (" + job.title + ")");
             waitWifi(app, job, p);
             String src = pref(p, "src_lang", "en").toLowerCase(Locale.ROOT);
@@ -473,12 +498,16 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IShareH
             File out = download(tr.url, dir, safeName(job.title) + " [VOT " + dst + (tr.lively ? ", живой" : "") + "]");
             MediaScannerConnection.scanFile(app, new String[]{out.getAbsolutePath()}, null, null);
             say(app, job, "✅ Готово: " + out.getName());
+            if (it != null) { it.status = "done"; it.file = out.getName(); it.msg = "готово: " + out.getName(); changed(); }
         } catch (NeedLogin e) {
+            if (it != null) { it.status = "err"; it.msg = e.getMessage() + ": настройки модуля → «Войти в Яндекс»"; changed(); }
             say(app, job, "⚠️ " + e.getMessage() + ". Настройки модуля → «Войти в Яндекс»");
         } catch (Throwable t) {
             log("#" + job.n + " ОШИБКА " + stackTop(t));
+            if (it != null) { it.status = "err"; it.msg = t.getMessage() == null ? t.toString() : t.getMessage(); changed(); }
             say(app, job, "⚠️ " + (t.getMessage() == null ? t.toString() : t.getMessage()) + " (журнал: настройки модуля → «Копировать журнал»)");
         } finally {
+            if (it != null) { it.busy = false; changed(); }
             if (entered) synchronized (GATE) { running--; GATE.notifyAll(); }
         }
     }
@@ -543,6 +572,7 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IShareH
                 say(app, job, "⏳ Яндекс переводит" + (t.remaining > 0 ? ", осталось около " + t.remaining + " с" : "") + "…");
             }
             long delay = t.remaining > 0 ? Math.min(30, Math.max(5, t.remaining / 2)) : 10;
+            if (job.it != null && job.it.removed) throw new IOException("Убрано из списка");
             try {
                 Thread.sleep(delay * 1000L);
             } catch (InterruptedException e) {
@@ -785,6 +815,424 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IShareH
                 try { Toast.makeText(c, s, Toast.LENGTH_LONG).show(); } catch (Throwable ignored) { }
             }
         });
+    }
+
+    // ---------------------------------------------------------------- список (главное окно модуля)
+
+    static final class Item {
+        String url = "", videoId = "", title = "", status = "wait", msg = "", file = "";
+        double duration;
+        volatile boolean busy, removed;
+    }
+
+    private static final List<Item> ITEMS = new ArrayList<Item>();
+    private static final List<Runnable> LISTENERS = new ArrayList<Runnable>();
+    private static boolean loaded;
+    private static Context APP;
+
+    static synchronized void ensureLoaded(Context app) {
+        if (APP == null) APP = app.getApplicationContext();
+        if (loaded) return;
+        loaded = true;
+        try {
+            JSONArray a = new JSONArray(prefs(APP).getString("queue", "[]"));
+            for (int i = 0; i < a.length(); i++) {
+                JSONObject o = a.getJSONObject(i);
+                Item it = new Item();
+                it.url = o.optString("url");
+                it.videoId = o.optString("id");
+                it.title = o.optString("title");
+                it.status = o.optString("status", "wait");
+                it.msg = o.optString("msg");
+                it.file = o.optString("file");
+                it.duration = o.optDouble("duration", 0);
+                if ("run".equals(it.status)) { it.status = "wait"; it.msg = "прервано, нажмите, чтобы продолжить"; }
+                if (it.videoId.length() > 0) ITEMS.add(it);
+            }
+        } catch (Throwable t) {
+            log("загрузка списка: " + stackTop(t));
+        }
+    }
+
+    private static void saveQueue() {
+        Context app = APP;
+        if (app == null) return;
+        try {
+            JSONArray a = new JSONArray();
+            synchronized (ITEMS) {
+                for (Item it : ITEMS) {
+                    a.put(new JSONObject().put("url", it.url).put("id", it.videoId).put("title", it.title).put("status", it.status)
+                            .put("msg", it.msg).put("file", it.file).put("duration", it.duration));
+                }
+            }
+            prefs(app).edit().putString("queue", a.toString()).apply();
+        } catch (Throwable t) {
+            log("сохранение списка: " + stackTop(t));
+        }
+    }
+
+    static void changed() {
+        saveQueue();
+        MAIN.post(new Runnable() {
+            @Override public void run() {
+                List<Runnable> copy;
+                synchronized (LISTENERS) { copy = new ArrayList<Runnable>(LISTENERS); }
+                for (Runnable r : copy) r.run();
+            }
+        });
+    }
+
+    static Item findItem(String videoId) {
+        synchronized (ITEMS) {
+            for (Item it : ITEMS) if (it.videoId.equals(videoId)) return it;
+        }
+        return null;
+    }
+
+    /** Ставит ролик на перевод (повторно, если он уже в списке с ошибкой или ждёт). */
+    void startItem(final Context app, final Item it) {
+        if (it.busy) return;
+        it.busy = true;
+        it.removed = false;
+        it.status = "wait";
+        it.msg = "в очереди";
+        final Job job = new Job();
+        job.videoId = it.videoId;
+        job.videoUrl = "https://youtu.be/" + it.videoId;
+        job.title = it.title;
+        job.duration = it.duration;
+        job.it = it;
+        changed();
+        EXEC.execute(new Runnable() {
+            @Override public void run() { runJob(app, job); }
+        });
+    }
+
+    /** Главное окно (отдельная карточка в недавних): плитки роликов, как в «YouTube аудио». */
+    @Override public View createMainView(Context context) {
+        ensureLoaded(context);
+        return new ListView(context, this);
+    }
+
+    private static final class ListView extends LinearLayout {
+        private final VoiceOverTranslation mod;
+        private final Runnable onChange = new Runnable() {
+            @Override public void run() { rebuild(); }
+        };
+
+        ListView(Context ctx, VoiceOverTranslation mod) {
+            super(ctx);
+            this.mod = mod;
+            setOrientation(VERTICAL);
+            setPadding(dp(10), dp(6), dp(10), dp(6));
+            rebuild();
+        }
+
+        @Override protected void onAttachedToWindow() {
+            super.onAttachedToWindow();
+            synchronized (LISTENERS) { LISTENERS.add(onChange); }
+            rebuild();
+        }
+
+        @Override protected void onDetachedFromWindow() {
+            synchronized (LISTENERS) { LISTENERS.remove(onChange); }
+            super.onDetachedFromWindow();
+        }
+
+        private int dp(int v) {
+            return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
+        }
+
+        private void rebuild() {
+            removeAllViews();
+            addView(toolbar());
+            List<Item> items;
+            synchronized (ITEMS) { items = new ArrayList<Item>(ITEMS); }
+            if (items.isEmpty()) {
+                TextView empty = new TextView(getContext());
+                empty.setText("📭");
+                empty.setTextSize(40);
+                empty.setGravity(Gravity.CENTER);
+                empty.setPadding(0, dp(24), 0, dp(24));
+                addView(empty);
+                return;
+            }
+            for (int i = 0; i < items.size(); i += 2) {
+                LinearLayout row = new LinearLayout(getContext());
+                row.setOrientation(HORIZONTAL);
+                for (int k = 0; k < 2; k++) {
+                    View v = i + k < items.size() ? tile(items.get(i + k)) : new View(getContext());
+                    LayoutParams lp = new LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f);
+                    lp.setMargins(dp(3), dp(3), dp(3), dp(3));
+                    row.addView(v, lp);
+                }
+                addView(row);
+            }
+        }
+
+        private View button(String glyph, final Runnable act) {
+            TextView tv = new TextView(getContext());
+            tv.setText(glyph);
+            tv.setTextSize(24);
+            tv.setGravity(Gravity.CENTER);
+            tv.setTextColor(Color.WHITE);
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(Color.rgb(34, 34, 34));
+            bg.setStroke(dp(1), Color.GRAY);
+            bg.setCornerRadius(dp(12));
+            tv.setBackground(bg);
+            tv.setOnClickListener(new OnClickListener() {
+                @Override public void onClick(View v) { act.run(); }
+            });
+            LayoutParams lp = new LayoutParams(dp(52), dp(52));
+            lp.setMargins(0, 0, dp(8), dp(8));
+            tv.setLayoutParams(lp);
+            return tv;
+        }
+
+        private View toolbar() {
+            LinearLayout bar = new LinearLayout(getContext());
+            bar.setOrientation(HORIZONTAL);
+            final Context c = getContext().getApplicationContext();
+            int k = netKind(c);
+            String glyph = k == 2 ? "📶" : (k == 1 ? "📱" : (k == 0 ? "📵" : "❓"));
+            bar.addView(button(glyph, new Runnable() {
+                @Override public void run() {
+                    boolean w = prefs(c).getBoolean("wifi_only", true);
+                    toast(c, "Сейчас: " + (netKind(c) == 2 ? "Wi-Fi" : netKind(c) == 1 ? "мобильная сеть" : netKind(c) == 0 ? "нет сети" : "не определена")
+                            + (w ? ". Только по Wi-Fi" : ". Мобильная сеть разрешена"));
+                    rebuild();
+                }
+            }));
+            bar.addView(button("📋", new Runnable() {
+                @Override public void run() { fromClipboard(); }
+            }));
+            bar.addView(button("⬇", new Runnable() {
+                @Override public void run() {
+                    List<Item> items;
+                    synchronized (ITEMS) { items = new ArrayList<Item>(ITEMS); }
+                    for (Item it : items) if (!"done".equals(it.status)) mod.startItem(c, it);
+                }
+            }));
+            bar.addView(button("🐞", new Runnable() {
+                @Override public void run() { copyLog(c); }
+            }));
+            bar.addView(button("🗑", new Runnable() {
+                @Override public void run() { confirmClear(); }
+            }));
+            return bar;
+        }
+
+        private void fromClipboard() {
+            try {
+                ClipboardManager cm = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+                ClipData d = cm == null ? null : cm.getPrimaryClip();
+                CharSequence t = (d == null || d.getItemCount() == 0) ? null : d.getItemAt(0).getText();
+                Matcher m = Pattern.compile("https?://\\S+").matcher(t == null ? "" : t);
+                String id = m.find() ? videoId(m.group()) : null;
+                if (id == null) { toast(getContext(), "В буфере нет ссылки на YouTube"); return; }
+                Context c = getContext().getApplicationContext();
+                Item it = findItem(id);
+                if (it == null) {
+                    it = new Item();
+                    it.videoId = id;
+                    it.title = "YouTube " + id;
+                    synchronized (ITEMS) { ITEMS.add(0, it); }
+                }
+                it.url = "https://youtu.be/" + id;
+                mod.startItem(c, it);
+            } catch (Throwable e) {
+                toast(getContext(), "Не вышло: " + e);
+            }
+        }
+
+        private void confirmClear() {
+            try {
+                new AlertDialog.Builder(getContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle("Очистить список?")
+                        .setPositiveButton("Очистить", new android.content.DialogInterface.OnClickListener() {
+                            @Override public void onClick(android.content.DialogInterface d, int w) {
+                                synchronized (ITEMS) {
+                                    for (Item it : ITEMS) it.removed = true;
+                                    ITEMS.clear();
+                                }
+                                changed();
+                            }
+                        })
+                        .setNegativeButton("Отмена", null)
+                        .show();
+            } catch (Throwable t) {
+                synchronized (ITEMS) { ITEMS.clear(); }
+                changed();
+            }
+        }
+
+        /** Плитка 16:9: высота считается от ширины. */
+        private static final class Tile extends FrameLayout {
+            Tile(Context c) { super(c); }
+
+            @Override protected void onMeasure(int wSpec, int hSpec) {
+                int w = MeasureSpec.getSize(wSpec);
+                super.onMeasure(MeasureSpec.makeMeasureSpec(w, MeasureSpec.EXACTLY),
+                        MeasureSpec.makeMeasureSpec(w * 9 / 16, MeasureSpec.EXACTLY));
+            }
+        }
+
+        private TextView badge(String text) {
+            TextView b = new TextView(getContext());
+            b.setText(text);
+            b.setTextSize(16);
+            b.setTextColor(Color.WHITE);
+            b.setBackgroundColor(0xAA000000);
+            b.setGravity(Gravity.CENTER);
+            b.setPadding(dp(8), dp(4), dp(8), dp(4));
+            return b;
+        }
+
+        private View tile(final Item it) {
+            Context ctx = getContext();
+            final Context app = ctx.getApplicationContext();
+            final String name = it.title.length() == 0 ? it.url : it.title;
+            final Tile tile = new Tile(ctx);
+            tile.setContentDescription(name);
+
+            ImageView img = new ImageView(ctx);
+            img.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            img.setBackgroundColor(0xFFE0E0E0);
+            tile.addView(img, new FrameLayout.LayoutParams(-1, -1));
+
+            TextView ph = new TextView(ctx);
+            ph.setText(name);
+            ph.setTextSize(14);
+            ph.setTextColor(Color.BLACK);
+            ph.setGravity(Gravity.CENTER);
+            ph.setPadding(dp(10), dp(10), dp(10), dp(10));
+            ph.setMaxLines(4);
+            ph.setEllipsize(TextUtils.TruncateAt.END);
+            tile.addView(ph, new FrameLayout.LayoutParams(-1, -1));
+            loadThumb(it.videoId, img, ph);
+
+            final TextView over = badge(name);
+            over.setTextSize(15);
+            over.setBackgroundColor(0xCC000000);
+            over.setPadding(dp(10), dp(10), dp(10), dp(10));
+            over.setVisibility(GONE);
+            tile.addView(over, new FrameLayout.LayoutParams(-1, -1));
+
+            String mark = it.busy ? ("run".equals(it.status) ? "🗣" : "⏳") : ("done".equals(it.status) ? "✅" : ("err".equals(it.status) ? "⚠️" : "⏳"));
+            tile.addView(badge(mark), new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START));
+
+            LinearLayout bar = new LinearLayout(ctx);
+            bar.setOrientation(HORIZONTAL);
+            TextView redo = badge("↻");
+            redo.setOnClickListener(new OnClickListener() {
+                @Override public void onClick(View v) { mod.startItem(app, it); }
+            });
+            bar.addView(redo);
+            TextView link = badge("🔗");
+            link.setOnClickListener(new OnClickListener() {
+                @Override public void onClick(View v) { openInBrowser(it.url); }
+            });
+            bar.addView(link);
+            TextView del = badge("🗑");
+            del.setOnClickListener(new OnClickListener() {
+                @Override public void onClick(View v) {
+                    it.removed = true;
+                    synchronized (ITEMS) { ITEMS.remove(it); }
+                    changed();
+                }
+            });
+            bar.addView(del);
+            tile.addView(bar, new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END));
+
+            final Runnable hide = new Runnable() {
+                @Override public void run() { over.setVisibility(GONE); }
+            };
+            final GestureDetector gd = new GestureDetector(ctx, new GestureDetector.SimpleOnGestureListener() {
+                @Override public boolean onDown(MotionEvent e) { return true; }
+
+                @Override public boolean onSingleTapConfirmed(MotionEvent e) {
+                    if (it.busy) toast(app, it.msg);
+                    else if ("done".equals(it.status)) toast(app, "Готово: " + it.file + " (↻ — перевести заново)");
+                    else mod.startItem(app, it);
+                    return true;
+                }
+
+                @Override public boolean onDoubleTap(MotionEvent e) {
+                    over.setText(it.msg.length() == 0 ? name : name + "\n" + it.msg);
+                    over.setVisibility(VISIBLE);
+                    over.removeCallbacks(hide);
+                    over.postDelayed(hide, 6000);
+                    return true;
+                }
+            });
+            tile.setOnTouchListener(new OnTouchListener() {
+                @Override public boolean onTouch(View v, MotionEvent e) { return gd.onTouchEvent(e); }
+            });
+            return tile;
+        }
+
+        private void openInBrowser(String url) {
+            try {
+                Context c = getContext();
+                Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                i.setClassName(c.getPackageName(), c.getPackageName() + ".BrowserApp");
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                c.startActivity(i);
+            } catch (Throwable t) {
+                toast(getContext(), "Не открыть ссылку: " + t.getMessage());
+            }
+        }
+
+        /** Превью с i.ytimg.com (кэш в cache/votq); без сети остаётся плитка с названием. */
+        private void loadThumb(final String id, final ImageView iv, final View ph) {
+            if (id == null || id.length() == 0) return;
+            iv.setTag(id);
+            final File f = new File(new File(getContext().getCacheDir(), "votq"), id + ".jpg");
+            EXEC.execute(new Runnable() {
+                @Override public void run() {
+                    Bitmap bm = null;
+                    try {
+                        if (!f.isFile()) {
+                            f.getParentFile().mkdirs();
+                            HttpURLConnection c = (HttpURLConnection) new URL("https://i.ytimg.com/vi/" + id + "/mqdefault.jpg").openConnection();
+                            c.setConnectTimeout(8000);
+                            c.setReadTimeout(8000);
+                            if (c.getResponseCode() == 200) {
+                                File tmp = new File(f.getPath() + ".tmp");
+                                InputStream in = c.getInputStream();
+                                OutputStream o = new FileOutputStream(tmp);
+                                try {
+                                    byte[] buf = new byte[8192];
+                                    int n;
+                                    while ((n = in.read(buf)) > 0) o.write(buf, 0, n);
+                                } finally {
+                                    o.close();
+                                    in.close();
+                                }
+                                tmp.renameTo(f);
+                            }
+                        }
+                        if (f.isFile()) {
+                            BitmapFactory.Options o2 = new BitmapFactory.Options();
+                            o2.inPreferredConfig = Bitmap.Config.RGB_565;
+                            bm = BitmapFactory.decodeFile(f.getAbsolutePath(), o2);
+                        }
+                    } catch (Throwable t) { }
+                    final Bitmap fb = bm;
+                    if (fb != null) {
+                        iv.post(new Runnable() {
+                            @Override public void run() {
+                                if (id.equals(iv.getTag())) {
+                                    iv.setImageBitmap(fb);
+                                    ph.setVisibility(GONE);
+                                }
+                            }
+                        });
+                    }
+                }
+            });
+        }
     }
 
     // ---------------------------------------------------------------- protobuf (только нужные сообщения)
