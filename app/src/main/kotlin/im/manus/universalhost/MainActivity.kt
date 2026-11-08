@@ -136,6 +136,13 @@ class MainActivity : Activity() {
         render()
     }
 
+    /** Модуль с главным окном (список, плеер) открывается им отдельной карточкой; остальные: экраном настроек. */
+    private fun openModule(target: String) {
+        val plugin = try { PluginRegistry.find(this, target) } catch (e: Throwable) { null }
+        if (plugin is IMainViewProvider) startActivity(ModuleViewActivity.intentFor(this, target))
+        else openSettings(target)
+    }
+
     private fun openSettings(target: String, folderId: String? = null) {
         startActivity(
             Intent(this, ModuleSettingsActivity::class.java)
@@ -342,7 +349,7 @@ class MainActivity : Activity() {
                 currentFolder = c.id
                 render()
             } else {
-                openSettings(c.id)
+                openModule(c.id)
             }
         }
 
