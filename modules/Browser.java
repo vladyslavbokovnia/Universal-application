@@ -383,8 +383,9 @@ public class Browser implements IPlugin, ISettingsProvider {
         l.add(SettingItem.toggle("restore_tabs", "♻ Восстанавливать вкладки", "При следующем открытии вернуть вкладки, которые были открыты", true));
         l.add(SettingItem.toggle("keep_alive", "🧠 Держать страницы в памяти",
                 "Закрытие окна браузера (назад, смахивание из недавних) не выгружает вкладки: при следующем открытии страницы те же, без перезагрузки. Рендерер вкладок не понижается в фоне, система реже его убивает", true));
-        l.add(SettingItem.toggle("cache_restore", "💾 Страницы из кэша после перезапуска",
-                "Состояние вкладок сохраняется на диск. После перезапуска приложения или смерти процесса страницы открываются из кэша WebView на том же месте, без трафика; обновить можно обычным ↻", true));
+        l.add(SettingItem.choice("restore_mode", "💾 Страницы после перезапуска",
+                "Как вернуть вкладки после перезапуска приложения или смерти процесса. Состояние и кэш: история и место на странице, загрузка из кэша WebView. Снимок MHTML: вся страница одним файлом, открывается без сети, но это статичный снимок без скриптов; ↻ открывает живую страницу",
+                java.util.Arrays.asList("Состояние и кэш WebView", "Снимок MHTML (saveWebArchive)", "Выключено"), 0));
         l.add(SettingItem.toggle("keep_screen_on", "💡 Не гасить экран", "Пока открыт браузер", false));
         l.add(SettingItem.toggle("fullscreen", "⛶ Полноэкранный режим",
                 "Системные панели скрыты", false));
@@ -1090,6 +1091,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         int group;              // 0: вне группы
         long lastUsed;
         boolean keepFiles;      // файлы снимка и значка нужны истории закрытых
+        String snapUrl;         // вкладка сейчас показывает MHTML-снимок этой страницы (адрес оригинала); null: живая страница
         boolean diskState;      // у вкладки может быть состояние WebView, сохранённое на диск (ubstate/uid.bin)
         boolean cacheOnce;      // первая загрузка после восстановления с диска идёт из кэша WebView, а не из сети
         Bitmap sketch;          // эскиз пальцем поверх снимка: прозрачная картинка с белыми линиями (файл uid_s.png)
@@ -1325,7 +1327,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             btnReload = toolButton("↻", "Обновить", new View.OnClickListener() {
                 @Override public void onClick(View v) {
                     if (cur == null || cur.wv == null) return;
-                    if (cur.loading) cur.wv.stopLoading(); else cur.wv.reload();
+                    if (cur.loading) cur.wv.stopLoading(); else reloadTab(cur);
                 }
             });
             btnTabs = toolButton("1", "Вкладки", new View.OnClickListener() {
@@ -1465,6 +1467,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             if (closed || detached) return;
             saveTabs();
             for (Tab t : tabs) saveTabState(t, true);       // на случай, если систему убьёт процесс, пока окна нет
+            saveSnapshot(cur);
             if (customView != null) hideCustomView();
             if (fileCb != null) { fileCb.onReceiveValue(null); fileCb = null; }
             closeLayer(false);
@@ -2019,7 +2022,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             items.add(new RingItem(t.loading ? "✕" : "↻", t.loading ? "Остановить загрузку" : "Обновить страницу", true, new Runnable() {
                 @Override public void run() {
                     if (t.wv == null) return;
-                    if (t.loading) t.wv.stopLoading(); else t.wv.reload();
+                    if (t.loading) t.wv.stopLoading(); else reloadTab(t);
                 }
             }));
             items.add(new RingItem("⌕", "Поиск, адрес, закладки и новая вкладка", true, new Runnable() { @Override public void run() { showStart(false, true); } }));
@@ -2732,6 +2735,54 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         // ------------------------------------------------------------ состояние вкладок на диске (переживает смерть процесса)
 
+        /** 0: состояние и кэш WebView, 1: MHTML-снимок, 2: выключено. Старая настройка cache_restore=false даёт «выключено». */
+        private int restoreMode() {
+            if (sp.contains("restore_mode")) return Math.max(0, Math.min(2, sp.getInt("restore_mode", 0)));
+            return sp.getBoolean("cache_restore", true) ? 0 : 2;
+        }
+
+        private boolean isSnap(Tab t, String url) {
+            return t.snapUrl != null && url != null && url.startsWith("file:");
+        }
+
+        private File snapDir() {
+            File d = new File(act.getFilesDir(), "ubsnap");
+            if (!d.exists()) d.mkdirs();
+            return d;
+        }
+
+        private File snapFile(Tab t) { return new File(snapDir(), t.uid + ".mhtml"); }
+
+        /** Вся страница одним файлом MHTML (WebView.saveWebArchive, только с главного потока). Пишется во временный файл и подменяет прежний снимок. */
+        private void saveSnapshot(final Tab t) {
+            if (closed || restoreMode() != 1 || t == null || t.wv == null || t.blocked || t.snapUrl != null || t.url == null
+                    || !(t.url.startsWith("http://") || t.url.startsWith("https://"))) return;
+            try {
+                final File f = snapFile(t);
+                final File tmp = new File(f.getPath() + ".tmp");
+                t.wv.saveWebArchive(tmp.getAbsolutePath(), false, new ValueCallback<String>() {
+                    @Override public void onReceiveValue(String path) {
+                        try {
+                            if (path == null) tmp.delete(); else if (!tmp.renameTo(f)) tmp.delete();
+                        } catch (Throwable ignored) { }
+                    }
+                });
+            } catch (Throwable ignored) { }
+        }
+
+        /** Обновить: у снимка открывает живую страницу оригинала, у обычной страницы перезагружает её. */
+        private void reloadTab(Tab t) {
+            if (t == null || t.wv == null) return;
+            if (t.snapUrl != null) {
+                String u = t.snapUrl;
+                t.snapUrl = null;
+                t.url = u;
+                t.wv.loadUrl(u);
+            } else {
+                t.wv.reload();
+            }
+        }
+
         private File stateDir() {
             File d = new File(act.getFilesDir(), "ubstate");
             if (!d.exists()) d.mkdirs();
@@ -2740,7 +2791,7 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         /** История, положение прокрутки и формы вкладки: WebView.saveState в файл. Живая вкладка сохраняется раз в 20 секунд и при закрытии окна. */
         private void saveTabState(Tab t, boolean sync) {
-            if (closed || t == null || t.wv == null || t.blocked || t.loading || t.popup) return;
+            if (closed || t == null || t.wv == null || t.blocked || t.loading || t.popup || t.snapUrl != null) return;
             try {
                 Bundle b = new Bundle();
                 if (t.wv.saveState(b) == null) return;
@@ -3010,6 +3061,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                     new File(thumbDir(), t.uid + "_i.png").delete();
                     new File(thumbDir(), t.uid + "_s.png").delete();
                     new File(stateDir(), t.uid + ".bin").delete();
+                    new File(snapDir(), t.uid + ".mhtml").delete();
                 } catch (Throwable ignored) { }
             }
             cleanGroups();
@@ -3424,10 +3476,21 @@ public class Browser implements IPlugin, ISettingsProvider {
             });
             if (!load) return;
             if (t.popup) { t.popup = false; return; }               // окно, открытое страницей: содержимое придёт от WebView
-            if (t.saved == null && t.diskState && sp.getBoolean("cache_restore", true)) {
+            int rm = restoreMode();
+            if (t.saved == null && t.diskState && rm != 2) {
                 t.diskState = false;
-                t.saved = loadTabState(t);
-                t.cacheOnce = t.saved != null;       // страница из прошлого запуска: сначала берём её из кэша, без трафика
+                if (rm == 1) {
+                    File mf = snapFile(t);
+                    if (mf.exists() && t.url != null && (t.url.startsWith("http://") || t.url.startsWith("https://"))) {
+                        t.snapUrl = t.url;          // адрес вкладки остаётся адресом оригинала, показывается файл
+                        s.setAllowFileAccess(true);     // только на время загрузки снимка, в onPageFinished снова выключается
+                        w.loadUrl(Uri.fromFile(mf).toString());
+                        return;
+                    }
+                } else {
+                    t.saved = loadTabState(t);
+                    t.cacheOnce = t.saved != null;       // страница из прошлого запуска: сначала берём её из кэша, без трафика
+                }
             }
             if (t.saved != null) {
                 if (t.cacheOnce) s.setCacheMode(WebSettings.LOAD_CACHE_ELSE_NETWORK);
@@ -3450,8 +3513,9 @@ public class Browser implements IPlugin, ISettingsProvider {
 
             @Override public void onPageStarted(WebView v, String url, Bitmap icon) {
                 String prevHost = hostOf(t.url);
-                t.url = url;
-                if (!prevHost.equals(hostOf(url))) {
+                boolean snap = isSnap(t, url);
+                if (!snap) { t.snapUrl = null; t.url = url; }
+                if (!snap && !prevHost.equals(hostOf(url))) {
                     t.icon = null;
                     t.iconHost = null;
                     try { new File(thumbDir(), t.uid + "_i.png").delete(); } catch (Throwable ignored) { }
@@ -3470,7 +3534,15 @@ public class Browser implements IPlugin, ISettingsProvider {
                     t.cacheOnce = false;
                     try { v.getSettings().setCacheMode(WebSettings.LOAD_DEFAULT); } catch (Throwable ignored) { }
                 }
-                t.url = url;
+                if (isSnap(t, url)) {
+                    try { v.getSettings().setAllowFileAccess(false); } catch (Throwable ignored) { }
+                } else {
+                    t.url = url;
+                    final Tab st = t;
+                    h.postDelayed(new Runnable() {
+                        @Override public void run() { if (!closed && !st.loading) saveSnapshot(st); }
+                    }, 2500);
+                }
                 t.loading = false;
                 t.progress = 100;
                 updateLoadDots();
@@ -3495,7 +3567,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
 
             @Override public void doUpdateVisitedHistory(WebView v, String url, boolean isReload) {
-                t.url = url;
+                if (!isSnap(t, url)) t.url = url;
                 if (t == cur) refreshUi();
             }
 
@@ -5420,12 +5492,12 @@ public class Browser implements IPlugin, ISettingsProvider {
             addG(items, "closetab", "✕", "Закрыть эту вкладку", new Runnable() { @Override public void run() { closeTabKeep(t); } });
             addG(items, "reload", t.loading ? "✕" : "↻", t.loading ? "Остановить загрузку" : "Обновить страницу", new Runnable() { @Override public void run() {
                 if (t.wv == null) return;
-                if (t.loading) t.wv.stopLoading(); else t.wv.reload();
+                if (t.loading) t.wv.stopLoading(); else reloadTab(t);
             } });
             addG(items, "desktop", t.desktop ? "📱" : "🖥", t.desktop ? "Версия для телефона" : "Версия для компьютера", new Runnable() { @Override public void run() {
                 t.desktop = !t.desktop;
                 applyUserAgent(t);
-                if (t.wv != null) t.wv.reload();
+                reloadTab(t);
             } });
             addG(items, "scripts", "🧩", "Скрипты", new Runnable() { @Override public void run() { showScripts(t); } });
             addG(items, "vot", "🗣", "Перевод VOT: скачать русское аудио", new Runnable() { @Override public void run() { sendToVot(t); } });
@@ -5891,7 +5963,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 @Override public void run() {
                     if (scriptsDirty && t.wv != null) {
                         scriptsDirty = false;
-                        t.wv.reload();
+                        reloadTab(t);
                     }
                 }
             }, "Скрипты");
