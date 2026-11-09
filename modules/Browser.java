@@ -3833,6 +3833,7 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         private void injectScripts(Tab t, String url, boolean early) {
             if (t.wv == null || t.blocked || url == null) return;
+            if (isSnap(t, url)) url = t.snapUrl;                       // MHTML-снимок: скрипты подбираются и работают как для страницы-оригинала
             String low = url.toLowerCase(Locale.ROOT);
             if (!(low.startsWith("http://") || low.startsWith("https://"))) return;
             if (early) t.resetScripts();                               // началась новая страница
@@ -4239,6 +4240,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 Injected i = inj(nonce);
                 if (i == null || url == null) return false;
                 if (!sp.getBoolean("script_on:" + i.script.fileName, true)) return false;
+                if (isSnap(t, url)) url = t.snapUrl;                 // страница открыта из MHTML-снимка: сверяем адрес оригинала
                 String low = url.toLowerCase(Locale.ROOT);
                 if (!(low.startsWith("http://") || low.startsWith("https://"))) return false;
                 return i.script.applies(url);
