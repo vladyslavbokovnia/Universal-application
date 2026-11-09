@@ -216,6 +216,37 @@ public final class YtAudioBridge {
         return out.getAbsolutePath();
     }
 
+    /**
+     * Для модуля «VOT перевод»: скачивает оригинальную звуковую дорожку ролика во временный файл
+     * (Яндексу для перевода нужно оригинальное аудио). Возвращает файл; удалить его должен вызывающий.
+     */
+    public static File fetchOriginal(Context ctx, String url, File dir) throws Exception {
+        ensureInit();
+        StreamInfo info = StreamInfo.getInfo(ServiceList.YouTube, url);
+        List<AudioStream> all = new ArrayList<AudioStream>();
+        for (AudioStream s : info.getAudioStreams()) {
+            if (s.isUrl() && s.getDeliveryMethod() == DeliveryMethod.PROGRESSIVE_HTTP) all.add(s);
+        }
+        if (all.isEmpty()) throw new UserError("Нет доступных аудиопотоков");
+        List<AudioStream> orig = new ArrayList<AudioStream>();
+        for (AudioStream s : all) if (isOriginal(s) || s.getAudioLocale() == null) orig.add(s);
+        AudioStream pick = best(orig.isEmpty() ? all : orig);
+        if (!dir.exists() && !dir.mkdirs()) throw new UserError("Не создать папку " + dir);
+        String ext = pick.getFormat() != null ? pick.getFormat().getSuffix() : "m4a";
+        File out = new File(dir, "vot-" + System.currentTimeMillis() + "." + ext);
+        try {
+            download(pick.getContent(), out, new Listener() {
+                @Override public void onStatus(String s) { }
+                @Override public void onDone(String audioPath, String error) { }
+            });
+        } catch (Throwable e) {
+            out.delete();
+            if (e instanceof Exception) throw (Exception) e;
+            throw new IOException(e.toString());
+        }
+        return out;
+    }
+
     /** Язык видео по тексту (название, канал, начало описания): пока умеем только русский (кириллица без украинских букв). */
     private static boolean looksLike(StreamInfo info, String lang) {
         if (!"ru".equalsIgnoreCase(lang)) return false;

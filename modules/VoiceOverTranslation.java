@@ -36,12 +36,14 @@ import im.manus.universalhost.IPlugin;
 import im.manus.universalhost.ISettingsProvider;
 import im.manus.universalhost.IShareHandler;
 import im.manus.universalhost.SettingItem;
+import im.manus.universalhost.YtAudioBridge;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -149,7 +151,7 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
     private Context appCtx;
 
     @Override public String getName() { return NAME; }
-    @Override public int getVersion() { return 3; }
+    @Override public int getVersion() { return 4; }
     @Override public String getDescription() {
         return "Закадровый перевод YouTube на русский (сервис Яндекса, как в VOT): скачивает озвучку в Music/VOT.";
     }
@@ -280,7 +282,7 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
         final String text;
         synchronized (LOG) {
             StringBuilder sb = new StringBuilder();
-            sb.append("VOT перевод, версия модуля 3, Android ").append(android.os.Build.VERSION.RELEASE)
+            sb.append("VOT перевод, версия модуля 4, Android ").append(android.os.Build.VERSION.RELEASE)
               .append(" (API ").append(android.os.Build.VERSION.SDK_INT).append("), сеть: ").append(netKind(app)).append("\n\n");
             for (String l : LOG) sb.append(l).append('\n');
             text = sb.toString();
@@ -537,6 +539,11 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
                 case 6:
                     if (!emptyAudioSent) {
                         emptyAudioSent = true;
+                        // Яндекс просит звук: как VOT с «скачиванием аудио», отдаём ему оригинальную дорожку.
+                        // Запасной путь (пустая заглушка, Яндекс качает сам) часто даёт «ошибку при переводе».
+                        waitWifi(app, job, prefs(app));
+                        if (uploadRealAudio(app, job, t.id)) continue;
+                        say(app, job, "аудио с YouTube взять не вышло, пробую запасной путь");
                         failAudio(job);
                         sendEmptyAudio(job, t.id);
                         continue;                    // сразу повторяем запрос, как в VOT
@@ -580,6 +587,71 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
             }
         }
         throw new IOException("Яндекс слишком долго переводит видео, попробуйте позже");
+    }
+
+    /** Скачивает оригинальное аудио ролика (NewPipe, через хост) и загружает его в Яндекс кусками по 1 МБ. */
+    private boolean uploadRealAudio(Context app, Job job, String translationId) {
+        File f = null;
+        try {
+            say(app, job, "⬇ Беру оригинальное аудио с YouTube");
+            f = YtAudioBridge.fetchOriginal(app, job.videoUrl, new File(app.getCacheDir(), "vot"));
+            final int CH = 1024 * 1024;
+            long len = f.length();
+            int parts = (int) ((len + CH - 1) / CH);
+            if (parts == 0) throw new IOException("пустое аудио");
+            log("#" + job.n + " аудио " + f.getName() + ", " + len + " байт, частей " + parts);
+            say(app, job, "⬆ Загружаю аудио в Яндекс");
+            String fileId = "random-youtube-" + uuid32().toLowerCase(Locale.ROOT);
+            String path = "/video-translation/audio";
+            FileInputStream in = new FileInputStream(f);
+            try {
+                byte[] buf = new byte[CH];
+                for (int i = 0; i < parts; i++) {
+                    int got = 0, n;
+                    while (got < CH && (n = in.read(buf, got, CH - got)) > 0) got += n;
+                    byte[] data = new byte[got];
+                    System.arraycopy(buf, 0, data, 0, got);
+                    Pb part = new Pb();
+                    part.int32(1, i);
+                    part.msg(2, data);
+                    Pb chunk = new Pb();
+                    chunk.msg(1, part.bytes());
+                    chunk.int32(2, i == parts - 1 ? parts : 0);
+                    chunk.str(3, fileId);
+                    chunk.int32(4, 1);
+                    Pb req = new Pb();
+                    req.str(1, translationId == null ? "" : translationId);
+                    req.str(2, job.videoUrl);
+                    req.msg(4, chunk.bytes());
+                    byte[] body = req.bytes();
+                    IOException last = null;
+                    boolean ok = false;
+                    for (int attempt = 0; attempt < 3 && !ok; attempt++) {
+                        try {
+                            Session s = session();
+                            Map<String, String> h = baseHeaders();
+                            h.putAll(secHeaders(s, body, path));
+                            Http r = http("PUT", HOST + path, h, body, 60000);
+                            if (r.code != 200) throw new IOException("загрузка аудио: HTTP " + r.code + snippet(r.body));
+                            ok = true;
+                        } catch (IOException e) {
+                            last = e;
+                            log("#" + job.n + " часть " + (i + 1) + "/" + parts + ", попытка " + (attempt + 1) + ": " + e);
+                        }
+                    }
+                    if (!ok) throw last;
+                }
+            } finally {
+                in.close();
+            }
+            log("#" + job.n + " аудио загружено полностью");
+            return true;
+        } catch (Throwable t) {
+            log("#" + job.n + " загрузка аудио: " + stackTop(t));
+            return false;
+        } finally {
+            if (f != null) f.delete();
+        }
     }
 
     private Tr translateOnce(Job job, String src, String dst, boolean live, String token) throws IOException {
