@@ -221,6 +221,11 @@ public final class YtAudioBridge {
      * (Яндексу для перевода нужно оригинальное аудио). Возвращает файл; удалить его должен вызывающий.
      */
     public static File fetchOriginal(Context ctx, String url, File dir) throws Exception {
+        return fetchOriginal(ctx, url, dir, "m4a");
+    }
+
+    /** format: "m4a" (по умолчанию) или "webm" (Opus). Если потоков такого формата нет, берётся лучший из остальных. */
+    public static File fetchOriginal(Context ctx, String url, File dir, String format) throws Exception {
         ensureInit();
         StreamInfo info = StreamInfo.getInfo(ServiceList.YouTube, url);
         List<AudioStream> all = new ArrayList<AudioStream>();
@@ -230,7 +235,15 @@ public final class YtAudioBridge {
         if (all.isEmpty()) throw new UserError("Нет доступных аудиопотоков");
         List<AudioStream> orig = new ArrayList<AudioStream>();
         for (AudioStream s : all) if (isOriginal(s) || s.getAudioLocale() == null) orig.add(s);
-        AudioStream pick = best(orig.isEmpty() ? all : orig);
+        List<AudioStream> pool = orig.isEmpty() ? all : orig;
+        AudioStream pick = null;
+        if ("webm".equalsIgnoreCase(format)) {
+            for (AudioStream s : pool) {
+                if (s.getFormat() == null || !"webm".equalsIgnoreCase(s.getFormat().getSuffix())) continue;
+                if (pick == null || s.getAverageBitrate() > pick.getAverageBitrate()) pick = s;
+            }
+        }
+        if (pick == null) pick = best(pool);
         if (!dir.exists() && !dir.mkdirs()) throw new UserError("Не создать папку " + dir);
         String ext = pick.getFormat() != null ? pick.getFormat().getSuffix() : "m4a";
         File out = new File(dir, "vot-" + System.currentTimeMillis() + "." + ext);

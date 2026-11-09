@@ -151,7 +151,7 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
     private Context appCtx;
 
     @Override public String getName() { return NAME; }
-    @Override public int getVersion() { return 4; }
+    @Override public int getVersion() { return 5; }
     @Override public String getDescription() {
         return "Закадровый перевод YouTube на русский (сервис Яндекса, как в VOT): скачивает озвучку в Music/VOT.";
     }
@@ -282,7 +282,7 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
         final String text;
         synchronized (LOG) {
             StringBuilder sb = new StringBuilder();
-            sb.append("VOT перевод, версия модуля 4, Android ").append(android.os.Build.VERSION.RELEASE)
+            sb.append("VOT перевод, версия модуля 5, Android ").append(android.os.Build.VERSION.RELEASE)
               .append(" (API ").append(android.os.Build.VERSION.SDK_INT).append("), сеть: ").append(netKind(app)).append("\n\n");
             for (String l : LOG) sb.append(l).append('\n');
             text = sb.toString();
@@ -589,68 +589,123 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
         throw new IOException("Яндекс слишком долго переводит видео, попробуйте позже");
     }
 
-    /** Скачивает оригинальное аудио ролика (NewPipe, через хост) и загружает его в Яндекс кусками по 1 МБ. */
+    /**
+     * Берёт оригинальное аудио ролика (NewPipe, через хост) и загружает его в Яндекс. Формат загрузки Яндекс принимает
+     * не любой, а в журнале видно только «HTTP 400», поэтому пробуем по очереди: M4A кусками по 4 МБ, M4A одним куском,
+     * Opus (WebM) кусками по 4 МБ.
+     */
     private boolean uploadRealAudio(Context app, Job job, String translationId) {
+        String[][] plan = {{"m4a", "chunks"}, {"m4a", "whole"}, {"webm", "chunks"}};
         File f = null;
+        String fmt = null;
         try {
-            say(app, job, "⬇ Беру оригинальное аудио с YouTube");
-            f = YtAudioBridge.fetchOriginal(app, job.videoUrl, new File(app.getCacheDir(), "vot"));
-            final int CH = 1024 * 1024;
-            long len = f.length();
-            int parts = (int) ((len + CH - 1) / CH);
-            if (parts == 0) throw new IOException("пустое аудио");
-            log("#" + job.n + " аудио " + f.getName() + ", " + len + " байт, частей " + parts);
-            say(app, job, "⬆ Загружаю аудио в Яндекс");
-            String fileId = "random-youtube-" + uuid32().toLowerCase(Locale.ROOT);
-            String path = "/video-translation/audio";
-            FileInputStream in = new FileInputStream(f);
-            try {
-                byte[] buf = new byte[CH];
-                for (int i = 0; i < parts; i++) {
-                    int got = 0, n;
-                    while (got < CH && (n = in.read(buf, got, CH - got)) > 0) got += n;
-                    byte[] data = new byte[got];
-                    System.arraycopy(buf, 0, data, 0, got);
-                    Pb part = new Pb();
-                    part.int32(1, i);
-                    part.msg(2, data);
-                    Pb chunk = new Pb();
-                    chunk.msg(1, part.bytes());
-                    chunk.int32(2, i == parts - 1 ? parts : 0);
-                    chunk.str(3, fileId);
-                    chunk.int32(4, 1);
-                    Pb req = new Pb();
-                    req.str(1, translationId == null ? "" : translationId);
-                    req.str(2, job.videoUrl);
-                    req.msg(4, chunk.bytes());
-                    byte[] body = req.bytes();
-                    IOException last = null;
-                    boolean ok = false;
-                    for (int attempt = 0; attempt < 3 && !ok; attempt++) {
-                        try {
-                            Session s = session();
-                            Map<String, String> h = baseHeaders();
-                            h.putAll(secHeaders(s, body, path));
-                            Http r = http("PUT", HOST + path, h, body, 60000);
-                            if (r.code != 200) throw new IOException("загрузка аудио: HTTP " + r.code + snippet(r.body));
-                            ok = true;
-                        } catch (IOException e) {
-                            last = e;
-                            log("#" + job.n + " часть " + (i + 1) + "/" + parts + ", попытка " + (attempt + 1) + ": " + e);
-                        }
+            for (String[] step : plan) {
+                try {
+                    if (f == null || !step[0].equals(fmt)) {
+                        if (f != null) f.delete();
+                        f = null;
+                        say(app, job, "⬇ Беру оригинальное аудио с YouTube (" + step[0] + ")");
+                        File dir = new File(app.getCacheDir(), "vot");
+                        f = "m4a".equals(step[0]) ? YtAudioBridge.fetchOriginal(app, job.videoUrl, dir)
+                                : YtAudioBridge.fetchOriginal(app, job.videoUrl, dir, step[0]);
+                        fmt = step[0];
+                        log("#" + job.n + " аудио " + f.getName() + ", " + f.length() + " байт, начало " + head(f));
                     }
-                    if (!ok) throw last;
+                    say(app, job, "⬆ Загружаю аудио в Яндекс (" + step[1] + ")");
+                    if (uploadFile(job, translationId, f, step[1])) {
+                        log("#" + job.n + " аудио загружено полностью (" + step[0] + ", " + step[1] + ")");
+                        return true;
+                    }
+                } catch (Throwable t) {
+                    log("#" + job.n + " вариант " + step[0] + "/" + step[1] + ": " + stackTop(t));
                 }
-            } finally {
-                in.close();
             }
-            log("#" + job.n + " аудио загружено полностью");
-            return true;
-        } catch (Throwable t) {
-            log("#" + job.n + " загрузка аудио: " + stackTop(t));
             return false;
         } finally {
             if (f != null) f.delete();
+        }
+    }
+
+    private static String head(File f) {
+        try {
+            FileInputStream in = new FileInputStream(f);
+            try {
+                byte[] b = new byte[16];
+                int n = in.read(b);
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < n; i++) sb.append(String.format(Locale.ROOT, "%02x", b[i] & 0xff));
+                return sb.toString();
+            } finally {
+                in.close();
+            }
+        } catch (Throwable t) {
+            return "?";
+        }
+    }
+
+    private boolean putAudio(Job job, byte[] body, String what) throws IOException {
+        String path = "/video-translation/audio";
+        IOException last = null;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            try {
+                Session s = session();
+                Map<String, String> h = baseHeaders();
+                h.putAll(secHeaders(s, body, path));
+                Http r = http("PUT", HOST + path, h, body, 90000);
+                if (r.code != 200) throw new IOException("HTTP " + r.code + snippet(r.body));
+                return true;
+            } catch (IOException e) {
+                last = e;
+                log("#" + job.n + " " + what + ", попытка " + (attempt + 1) + " (" + body.length + " байт): " + e);
+            }
+        }
+        throw last;
+    }
+
+    private boolean uploadFile(Job job, String translationId, File f, String mode) throws IOException {
+        String tid = translationId == null ? "" : translationId;
+        String fileId = "random-youtube-" + uuid32().toLowerCase(Locale.ROOT);
+        FileInputStream in = new FileInputStream(f);
+        try {
+            if ("whole".equals(mode)) {
+                byte[] data = new byte[(int) f.length()];
+                int got = 0, n;
+                while (got < data.length && (n = in.read(data, got, data.length - got)) > 0) got += n;
+                Pb info = new Pb();
+                info.str(1, fileId);
+                info.msg(2, data);
+                Pb req = new Pb();
+                req.str(1, tid);
+                req.str(2, job.videoUrl);
+                req.msg(6, info.bytes());
+                return putAudio(job, req.bytes(), "целиком");
+            }
+            final int CH = 4 * 1024 * 1024;
+            int parts = (int) ((f.length() + CH - 1) / CH);
+            if (parts == 0) throw new IOException("пустое аудио");
+            byte[] buf = new byte[CH];
+            for (int i = 0; i < parts; i++) {
+                int got = 0, n;
+                while (got < CH && (n = in.read(buf, got, CH - got)) > 0) got += n;
+                byte[] data = new byte[got];
+                System.arraycopy(buf, 0, data, 0, got);
+                Pb part = new Pb();
+                part.int32(1, i);
+                part.msg(2, data);
+                Pb chunk = new Pb();
+                chunk.msg(1, part.bytes());
+                chunk.int32(2, i == parts - 1 ? parts : 0);
+                chunk.str(3, fileId);
+                chunk.int32(4, 1);
+                Pb req = new Pb();
+                req.str(1, tid);
+                req.str(2, job.videoUrl);
+                req.msg(4, chunk.bytes());
+                putAudio(job, req.bytes(), "часть " + (i + 1) + "/" + parts);
+            }
+            return true;
+        } finally {
+            in.close();
         }
     }
 
