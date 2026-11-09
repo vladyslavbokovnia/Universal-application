@@ -151,7 +151,7 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
     private Context appCtx;
 
     @Override public String getName() { return NAME; }
-    @Override public int getVersion() { return 5; }
+    @Override public int getVersion() { return 6; }
     @Override public String getDescription() {
         return "Закадровый перевод YouTube на русский (сервис Яндекса, как в VOT): скачивает озвучку в Music/VOT.";
     }
@@ -282,7 +282,7 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
         final String text;
         synchronized (LOG) {
             StringBuilder sb = new StringBuilder();
-            sb.append("VOT перевод, версия модуля 5, Android ").append(android.os.Build.VERSION.RELEASE)
+            sb.append("VOT перевод, версия модуля 6, Android ").append(android.os.Build.VERSION.RELEASE)
               .append(" (API ").append(android.os.Build.VERSION.SDK_INT).append("), сеть: ").append(netKind(app)).append("\n\n");
             for (String l : LOG) sb.append(l).append('\n');
             text = sb.toString();
@@ -498,6 +498,7 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
             File dir = new File(Environment.getExternalStorageDirectory(), pref(p, "out_dir", "Music/VOT"));
             if (!dir.exists() && !dir.mkdirs()) throw new IOException("Не создать папку " + dir);
             File out = download(tr.url, dir, safeName(job.title) + " [VOT " + dst + (tr.lively ? ", живой" : "") + "]");
+            saveExtras(job, out);
             MediaScannerConnection.scanFile(app, new String[]{out.getAbsolutePath()}, null, null);
             say(app, job, "✅ Готово: " + out.getName());
             if (it != null) { it.status = "done"; it.file = out.getName(); it.msg = "готово: " + out.getName(); changed(); }
@@ -925,6 +926,47 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
             throw e;
         } finally {
             c.disconnect();
+        }
+    }
+
+    /** Рядом с озвучкой, как у «YouTube аудио»: превью (.jpg) и ссылка на ролик (.url). */
+    private static void saveExtras(Job job, File audio) {
+        String name = audio.getName();
+        int dot = name.lastIndexOf('.');
+        File base = new File(audio.getParentFile(), dot > 0 ? name.substring(0, dot) : name);
+        try {
+            OutputStream o = new FileOutputStream(new File(base.getPath() + ".url"));
+            try {
+                o.write(("[InternetShortcut]\r\nURL=" + job.videoUrl + "\r\n").getBytes(UTF8));
+            } finally {
+                o.close();
+            }
+        } catch (Throwable t) {
+            log("#" + job.n + " ссылка: " + stackTop(t));
+        }
+        for (String q : new String[]{"maxresdefault", "hqdefault"}) {
+            File jpg = new File(base.getPath() + ".jpg");
+            try {
+                HttpURLConnection c = (HttpURLConnection) new URL("https://i.ytimg.com/vi/" + job.videoId + "/" + q + ".jpg").openConnection();
+                c.setConnectTimeout(8000);
+                c.setReadTimeout(15000);
+                if (c.getResponseCode() != 200) { c.disconnect(); continue; }
+                InputStream in = c.getInputStream();
+                OutputStream o = new FileOutputStream(jpg);
+                try {
+                    byte[] buf = new byte[16384];
+                    int n;
+                    while ((n = in.read(buf)) > 0) o.write(buf, 0, n);
+                } finally {
+                    o.close();
+                    in.close();
+                }
+                c.disconnect();
+                return;
+            } catch (Throwable t) {
+                jpg.delete();
+                log("#" + job.n + " превью " + q + ": " + t);
+            }
         }
     }
 
