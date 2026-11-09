@@ -229,6 +229,13 @@ public class Browser implements IPlugin, ISettingsProvider {
     @Override
     public void stop() {
         ctx = null;     // окно браузера живёт своей жизнью в ModuleWakeActivity и закрывается само
+        final BrowserView v = view;
+        if (v != null && v.isDetached()) {       // удержанный вид без окна: модуль выключают или обновляют, страницы отпускаем
+            view = null;
+            main.post(new Runnable() {
+                @Override public void run() { v.shutdown(); }
+            });
+        }
     }
 
     @Override
@@ -248,6 +255,11 @@ public class Browser implements IPlugin, ISettingsProvider {
             Object a = data.get("activity");
             Object in = data.get("intent");
             if (!(a instanceof Activity)) return null;
+            // Окно хоста закрывали (назад) или система его пересоздала: страницы остались живыми в удержанном виде, берём его заново
+            if (view != null && view.canReattach()) {
+                view.attach((Activity) a, in instanceof Intent ? (Intent) in : null);
+                return view;
+            }
             if (view != null) view.shutdown();
             BrowserView v = new BrowserView((Activity) a);
             view = v;
@@ -267,8 +279,16 @@ public class Browser implements IPlugin, ISettingsProvider {
                 view.activityResult(((Number) rc).intValue(), ((Number) res).intValue(), d instanceof Intent ? (Intent) d : null);
             }
         } else if ("destroyView".equals(c)) {
-            if (view != null) view.shutdown();
-            view = null;
+            Object a = data.get("activity");
+            if (view != null) {
+                if (!view.ownedBy(a)) return null;           // уже перехвачено новым окном: старое окно не трогает чужой вид
+                if (view.keepAlive()) {
+                    view.detach();                           // окно закрыто, вкладки остаются в памяти
+                } else {
+                    view.shutdown();
+                    view = null;
+                }
+            }
         } else if ("open".equals(c)) {
             Object u = data.get("url");
             Object p = data.get("profile");
@@ -361,6 +381,8 @@ public class Browser implements IPlugin, ISettingsProvider {
         l.add(SettingItem.text("user_agent", "🕵 User-Agent",
                 "Пусто: стандартный (без метки «wv»). Если сайт, например вход Google, не пускает во встроенный браузер, впишите строку мобильного Chrome", ""));
         l.add(SettingItem.toggle("restore_tabs", "♻ Восстанавливать вкладки", "При следующем открытии вернуть вкладки, которые были открыты", true));
+        l.add(SettingItem.toggle("keep_alive", "🧠 Держать страницы в памяти",
+                "Закрытие окна браузера (назад, смахивание из недавних) не выгружает вкладки: при следующем открытии страницы те же, без перезагрузки. Рендерер вкладок не понижается в фоне, система реже его убивает", true));
         l.add(SettingItem.toggle("keep_screen_on", "💡 Не гасить экран", "Пока открыт браузер", false));
         l.add(SettingItem.toggle("fullscreen", "⛶ Полноэкранный режим",
                 "Системные панели скрыты", false));
@@ -431,7 +453,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             new Thread(new Runnable() {
                 @Override public void run() { toast(ScriptStore.updateAll()); }
             }).start();
-        } else if ("user_agent".equals(key) || "keep_screen_on".equals(key) || "tts_bridge".equals(key) || "ms_bridge".equals(key) || "fullscreen".equals(key)) {
+        } else if ("user_agent".equals(key) || "keep_screen_on".equals(key) || "tts_bridge".equals(key) || "ms_bridge".equals(key) || "fullscreen".equals(key) || "keep_alive".equals(key)) {
             final BrowserView v = view;
             if (v != null) main.post(new Runnable() {
                 @Override public void run() { v.applySettingsLive(); }
@@ -1161,7 +1183,8 @@ public class Browser implements IPlugin, ISettingsProvider {
     // ---------------------------------------------------------------- окно браузера (вид внутри ModuleWakeActivity)
 
     private final class BrowserView extends FrameLayout {
-        private final Activity act;
+        private Activity act;
+        private boolean detached;
         private final SharedPreferences sp;
         private final Handler h = new Handler(Looper.getMainLooper());
         private final float density;
@@ -1422,6 +1445,68 @@ public class Browser implements IPlugin, ISettingsProvider {
             cb.onReceiveValue(r);
         }
 
+        // ------------------------------------------------------------ удержание страниц в памяти при закрытии окна
+
+        boolean keepAlive() { return sp.getBoolean("keep_alive", true); }
+
+        boolean isDetached() { return detached && !closed; }
+
+        boolean canReattach() { return !closed && keepAlive(); }
+
+        boolean ownedBy(Object a) { return a == null || a == act; }
+
+        /** Окно хоста закрыто: вид снимается с него, вкладки и их WebView остаются живыми и ждут нового окна. */
+        void detach() {
+            if (closed || detached) return;
+            saveTabs();
+            if (customView != null) hideCustomView();
+            if (fileCb != null) { fileCb.onReceiveValue(null); fileCb = null; }
+            closeLayer(false);
+            urlField.clearFocus();
+            try {
+                ViewGroup p = (ViewGroup) getParent();
+                if (p != null) p.removeView(this);
+            } catch (Throwable ignored) { }
+            detached = true;
+            try { CookieManager.getInstance().flush(); } catch (Throwable ignored) { }
+        }
+
+        /** Новое окно хоста: те же вкладки, те же загруженные страницы; WebView получают контекст нового окна. */
+        void attach(Activity a, Intent in) {
+            act = a;
+            detached = false;
+            for (Tab t : tabs) rebaseContext(t.wv, a);
+            configureWindow();
+            applyFullscreen();
+            applyBar(cur);
+            try {
+                act.setTaskDescription(new android.app.ActivityManager.TaskDescription("Браузер", makeIcon(128), C_BG));
+            } catch (Throwable ignored) { }
+            if (cur != null && cur.wv != null && cur.wv.getParent() == null) content.addView(cur.wv, new FrameLayout.LayoutParams(-1, -1));
+            handleIntent(in);
+            if (tabs.isEmpty()) newTab(home(), 0, null, true);
+            requestFocus();
+            started = true;
+            flushPanel();
+        }
+
+        private void rebaseContext(WebView w, Activity a) {
+            if (w == null) return;
+            try {
+                Context c = w.getContext();
+                if (c instanceof android.content.MutableContextWrapper) ((android.content.MutableContextWrapper) c).setBaseContext(a);
+            } catch (Throwable ignored) { }
+        }
+
+        /** Рендерер вкладки не понижается и не убивается системой первым, когда вкладка не на экране. */
+        private void applyRendererPolicy(WebView w) {
+            if (w == null || Build.VERSION.SDK_INT < 26) return;
+            try {
+                if (keepAlive()) w.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
+                else w.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true);
+            } catch (Throwable ignored) { }
+        }
+
         void shutdown() {
             if (closed) return;
             saveTabs();
@@ -1442,8 +1527,14 @@ public class Browser implements IPlugin, ISettingsProvider {
 
         void applySettingsLive() {
             boolean ttsEnabled = sp.getBoolean("tts_bridge", true);
+            if (detached && !keepAlive()) {          // удержание выключили, пока окна нет: страницы отпускаем
+                view = null;
+                shutdown();
+                return;
+            }
             for (Tab t : tabs) {
                 applyUserAgent(t);
+                applyRendererPolicy(t.wv);
                 if (t.wv != null && !t.blocked) {
                     if (ttsEnabled) {
                         t.wv.addJavascriptInterface(new TtsBridge(t), t.ttsName);
@@ -3179,8 +3270,9 @@ public class Browser implements IPlugin, ISettingsProvider {
         @SuppressWarnings({"deprecation", "SetJavaScriptEnabled"})
         private void ensureWebView(final Tab t, boolean load) {
             if (t.wv != null) return;
-            final WebView w = new WebView(act);
+            final WebView w = new WebView(new android.content.MutableContextWrapper(act));      // контекст подменяется при смене окна хоста
             t.wv = w;
+            applyRendererPolicy(w);
             w.setTag(t);
             w.setBackgroundColor(C_BG);
             t.blocked = !Profiles.apply(w, t.profile);      // без изоляции чужой профиль не открываем
