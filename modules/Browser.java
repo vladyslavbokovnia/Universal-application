@@ -946,13 +946,17 @@ public class Browser implements IPlugin, ISettingsProvider {
             "function GM_getTab(cb){try{cb({});}catch(e){}}\n" +
             "function GM_saveTab(){}\n" +
             "function GM_getTabs(cb){try{cb({});}catch(e){}}\n" +
+            "function u8b64(u8){var bs='';for(var bi=0;bi<u8.length;bi+=8192)bs+=String.fromCharCode.apply(null,u8.subarray(bi,bi+8192));return btoa(bs);}\n" +
             "function GM_xmlhttpRequest(d){\n" +
-            "var id=++xhrN;xhr[id]=d;\n" +
-            "var data=null,b64=null,x=d.data;\n" +
-            "if(x!==undefined&&x!==null){var u8=null;if(x instanceof ArrayBuffer)u8=new Uint8Array(x);else if(ArrayBuffer.isView(x))u8=new Uint8Array(x.buffer,x.byteOffset,x.byteLength);\n" +
-            "if(u8){var bs='';for(var bi=0;bi<u8.length;bi+=8192)bs+=String.fromCharCode.apply(null,u8.subarray(bi,bi+8192));b64=btoa(bs);}else data=String(x);}\n" +
-            "B.xhr(NO,id,JSON.stringify({method:String(d.method||'GET').toUpperCase(),url:String(d.url),headers:d.headers||{},data:data,b64:b64,timeout:d.timeout||0,responseType:d.responseType||''}));\n" +
-            "return{abort:function(){B.xhrAbort(NO,id);}};\n" +
+            "var id=++xhrN;xhr[id]=d;var gone=false;\n" +
+            "var send=function(data,b64){B.xhr(NO,id,JSON.stringify({method:String(d.method||'GET').toUpperCase(),url:String(d.url),headers:d.headers||{},data:data,b64:b64,timeout:d.timeout||0,responseType:d.responseType||''}));};\n" +
+            "var x=d.data;\n" +
+            "if(x===undefined||x===null)send(null,null);\n" +
+            "else if(x instanceof ArrayBuffer)send(null,u8b64(new Uint8Array(x)));\n" +
+            "else if(ArrayBuffer.isView(x))send(null,u8b64(new Uint8Array(x.buffer,x.byteOffset,x.byteLength)));\n" +
+            "else if(typeof Blob!=='undefined'&&x instanceof Blob){x.arrayBuffer().then(function(ab){if(!gone)send(null,u8b64(new Uint8Array(ab)));},function(e){if(!gone)D.x(id,{kind:'error',error:String(e)});});}\n" +
+            "else send(String(x),null);\n" +
+            "return{abort:function(){if(!gone){gone=true;B.xhrAbort(NO,id);D.x(id,{kind:'abort'});}}};\n" +
             "}\n" +
             "function b64ab(s){var bin=atob(s),n=bin.length,u=new Uint8Array(n);for(var i=0;i<n;i++)u[i]=bin.charCodeAt(i);return u.buffer;}\n" +
             "var D={\n" +
