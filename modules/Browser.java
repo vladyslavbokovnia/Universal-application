@@ -383,6 +383,8 @@ public class Browser implements IPlugin, ISettingsProvider {
         l.add(SettingItem.toggle("restore_tabs", "♻ Восстанавливать вкладки", "При следующем открытии вернуть вкладки, которые были открыты", true));
         l.add(SettingItem.toggle("keep_alive", "🧠 Держать страницы в памяти",
                 "Закрытие окна браузера (назад, смахивание из недавних) не выгружает вкладки: при следующем открытии страницы те же, без перезагрузки. Рендерер вкладок не понижается в фоне, система реже его убивает", true));
+        l.add(SettingItem.toggle("cache_restore", "💾 Страницы из кэша после перезапуска",
+                "Состояние вкладок сохраняется на диск. После перезапуска приложения или смерти процесса страницы открываются из кэша WebView на том же месте, без трафика; обновить можно обычным ↻", true));
         l.add(SettingItem.toggle("keep_screen_on", "💡 Не гасить экран", "Пока открыт браузер", false));
         l.add(SettingItem.toggle("fullscreen", "⛶ Полноэкранный режим",
                 "Системные панели скрыты", false));
@@ -1088,6 +1090,8 @@ public class Browser implements IPlugin, ISettingsProvider {
         int group;              // 0: вне группы
         long lastUsed;
         boolean keepFiles;      // файлы снимка и значка нужны истории закрытых
+        boolean diskState;      // у вкладки может быть состояние WebView, сохранённое на диск (ubstate/uid.bin)
+        boolean cacheOnce;      // первая загрузка после восстановления с диска идёт из кэша WebView, а не из сети
         Bitmap sketch;          // эскиз пальцем поверх снимка: прозрачная картинка с белыми линиями (файл uid_s.png)
         boolean sketchTried;
         Tab opener;
@@ -1377,6 +1381,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             started = true;
             flushPanel();
             maybeAutoUpdate();
+            h.postDelayed(stateTick, 20000);
         }
 
         /** Запуск без адреса (ярлык, пункт «Открыть браузер», Недавние): по настройке сначала панель вкладок. */
@@ -1459,6 +1464,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         void detach() {
             if (closed || detached) return;
             saveTabs();
+            for (Tab t : tabs) saveTabState(t, true);       // на случай, если систему убьёт процесс, пока окна нет
             if (customView != null) hideCustomView();
             if (fileCb != null) { fileCb.onReceiveValue(null); fileCb = null; }
             closeLayer(false);
@@ -1510,6 +1516,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         void shutdown() {
             if (closed) return;
             saveTabs();
+            for (Tab t : tabs) saveTabState(t, true);
             closed = true;
             if (fileCb != null) { fileCb.onReceiveValue(null); fileCb = null; }
             closeLayer(false);
@@ -2723,6 +2730,65 @@ public class Browser implements IPlugin, ISettingsProvider {
             if (og != null && !groups.contains(og)) openGroup = groupById(og.parent);      // открытая группа опустела: на уровень выше
         }
 
+        // ------------------------------------------------------------ состояние вкладок на диске (переживает смерть процесса)
+
+        private File stateDir() {
+            File d = new File(act.getFilesDir(), "ubstate");
+            if (!d.exists()) d.mkdirs();
+            return d;
+        }
+
+        /** История, положение прокрутки и формы вкладки: WebView.saveState в файл. Живая вкладка сохраняется раз в 20 секунд и при закрытии окна. */
+        private void saveTabState(Tab t, boolean sync) {
+            if (closed || t == null || t.wv == null || t.blocked || t.loading || t.popup) return;
+            try {
+                Bundle b = new Bundle();
+                if (t.wv.saveState(b) == null) return;
+                android.os.Parcel p = android.os.Parcel.obtain();
+                final byte[] data;
+                try {
+                    p.writeBundle(b);
+                    data = p.marshall();
+                } finally {
+                    p.recycle();
+                }
+                final File f = new File(stateDir(), t.uid + ".bin");
+                Runnable w = new Runnable() {
+                    @Override public void run() {
+                        try {
+                            OutputStream o = new FileOutputStream(f);
+                            try { o.write(data); } finally { o.close(); }
+                        } catch (Throwable ignored) { }
+                    }
+                };
+                if (sync) w.run(); else pool.execute(w);
+            } catch (Throwable ignored) { }
+        }
+
+        private Bundle loadTabState(Tab t) {
+            File f = new File(stateDir(), t.uid + ".bin");
+            if (!f.exists()) return null;
+            android.os.Parcel p = android.os.Parcel.obtain();
+            try {
+                byte[] data = Net.readAll(new java.io.FileInputStream(f), 8 * 1024 * 1024);
+                p.unmarshall(data, 0, data.length);
+                p.setDataPosition(0);
+                return p.readBundle(Browser.class.getClassLoader());
+            } catch (Throwable e) {
+                return null;
+            } finally {
+                p.recycle();
+            }
+        }
+
+        private final Runnable stateTick = new Runnable() {
+            @Override public void run() {
+                if (closed) return;
+                for (Tab t : new ArrayList<Tab>(tabs)) saveTabState(t, false);
+                h.postDelayed(this, 20000);
+            }
+        };
+
         private File thumbDir() {
             File d = new File(act.getFilesDir(), "ubthumbs");
             if (!d.exists()) d.mkdirs();
@@ -2943,6 +3009,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                     new File(thumbDir(), t.uid + ".jpg").delete();
                     new File(thumbDir(), t.uid + "_i.png").delete();
                     new File(thumbDir(), t.uid + "_s.png").delete();
+                    new File(stateDir(), t.uid + ".bin").delete();
                 } catch (Throwable ignored) { }
             }
             cleanGroups();
@@ -3125,6 +3192,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                     String k = o.optString("k", "");
                     if (k.length() > 0) t.uid = k;
                     t.group = o.optInt("g", 0);
+                    t.diskState = true;
                     tabs.add(t);
                 }
             } catch (JSONException ignored) { }
@@ -3356,7 +3424,13 @@ public class Browser implements IPlugin, ISettingsProvider {
             });
             if (!load) return;
             if (t.popup) { t.popup = false; return; }               // окно, открытое страницей: содержимое придёт от WebView
+            if (t.saved == null && t.diskState && sp.getBoolean("cache_restore", true)) {
+                t.diskState = false;
+                t.saved = loadTabState(t);
+                t.cacheOnce = t.saved != null;       // страница из прошлого запуска: сначала берём её из кэша, без трафика
+            }
             if (t.saved != null) {
+                if (t.cacheOnce) s.setCacheMode(WebSettings.LOAD_CACHE_ELSE_NETWORK);
                 WebBackForwardList l = w.restoreState(t.saved);
                 t.saved = null;
                 if (l != null) return;
@@ -3392,6 +3466,10 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
 
             @Override public void onPageFinished(WebView v, String url) {
+                if (t.cacheOnce) {
+                    t.cacheOnce = false;
+                    try { v.getSettings().setCacheMode(WebSettings.LOAD_DEFAULT); } catch (Throwable ignored) { }
+                }
                 t.url = url;
                 t.loading = false;
                 t.progress = 100;
