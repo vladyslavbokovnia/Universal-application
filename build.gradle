@@ -7,7 +7,7 @@ buildscript {
     dependencies {
         // Newer D8 fixes dexing crashes seen with androidx.webkit:webkit:1.17.1.
         classpath "com.android.tools.build:gradle:8.6.1"
-        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:2.0.21"
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.21"
     }
 }
 
