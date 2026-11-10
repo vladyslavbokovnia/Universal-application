@@ -53,6 +53,7 @@ public final class YtAudioQueue {
     private final Handler h = new Handler(Looper.getMainLooper());
     private final List<Item> items = new ArrayList<Item>();
     private final Set<String> active = new HashSet<String>();
+    private final java.util.Map<String, String> stages = new java.util.HashMap<String, String>();
     private final List<Runnable> listeners = new ArrayList<Runnable>();
     private ConnectivityManager.NetworkCallback netCb;
     private boolean forceAll;
@@ -111,6 +112,19 @@ public final class YtAudioQueue {
     public synchronized List<Item> snapshot() { return new ArrayList<Item>(items); }
 
     public synchronized boolean isActive(String url) { return active.contains(url); }
+
+    /** Значок текущего шага цепочки для ролика в работе (⬇, если шаг ещё не сообщили). */
+    public synchronized String stage(String url) {
+        String g = stages.get(url);
+        return g == null || g.length() == 0 ? "⬇" : g;
+    }
+
+    private synchronized void setStage(String url, String text) {
+        String g = YtNotify.glyphs(text);
+        if (g.length() == 0) return;
+        stages.put(url, g);
+        changed();
+    }
 
     public void addListener(Runnable r) { synchronized (listeners) { listeners.add(r); } }
 
@@ -292,7 +306,7 @@ public final class YtAudioQueue {
             }
             if (QUEUED.equals(it.status)) any = true;
         }
-        if (!any) { toast("Нечего качать"); return; }
+        if (!any) { toast("📭"); return; }
         forceAll = true;
         save();
         changed();
@@ -328,20 +342,21 @@ public final class YtAudioQueue {
         changed();
         SharedPreferences p = prefs();
         String lang = p.getString("lang", "ru");
-        boolean fb = p.getBoolean("fallback_original", false);
-        toast("🎧 Начинаю: " + (it.title.length() == 0 ? it.url : it.title));
-        YtAudioBridge.start(app, it.url, it.title, lang, outDir(), fb, net, new YtAudioBridge.Listener() {
-            @Override public void onStatus(String text) { toast(text); }
+        toast("🎧");
+        setStage(it.url, "🔎");
+        YtPipeline.start(app, it.url, it.title, lang, outDir(), net, new YtAudioBridge.Listener() {
+            @Override public void onStatus(String text) { setStage(it.url, text); toast(text); }
             @Override public void onDone(String audioPath, String error) { finish(it, audioPath, error); }
         });
     }
 
     private synchronized void finish(Item it, String path, String error) {
         active.remove(it.url);
+        stages.remove(it.url);
         boolean netLost = false;
         if (error == null) {
             items.remove(it);
-            toast("✅ Готово: " + new File(path).getName());
+            toast("✅");
         } else if (error.startsWith("Нет сети")) {
             it.status = QUEUED;
             it.err = "";
@@ -369,7 +384,9 @@ public final class YtAudioQueue {
     public void toast(final String s) {
         h.post(new Runnable() {
             @Override public void run() {
-                try { Toast.makeText(app, s, Toast.LENGTH_LONG).show(); } catch (Throwable t) { }
+                // уведомления без текста: от строки остаются только эмодзи и значки
+                String g = YtNotify.glyphs(s);
+                try { Toast.makeText(app, g.length() == 0 ? "🔔" : g, Toast.LENGTH_SHORT).show(); } catch (Throwable t) { }
             }
         });
     }

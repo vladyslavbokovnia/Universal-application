@@ -56,6 +56,9 @@ public final class YtAudioBridge {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:153.0) Gecko/20100101 Firefox/153.0";
     private static final int CHUNK = 4 * 1024 * 1024;
 
+    /** Какую дорожку брать: любую русскую, только оригинал или только дубляж YouTube. */
+    public static final int MODE_ANY = 0, MODE_ORIGINAL = 1, MODE_DUBBED = 2;
+
     private static boolean inited;
 
     /** Сеть, через которую качает текущий поток (null: по умолчанию). Нужна для режима «только Wi-Fi». */
@@ -84,15 +87,24 @@ public final class YtAudioBridge {
         start(ctx, url, title, lang, outDir, fallbackOriginal, null, l);
     }
 
-    /** Запускает загрузку в фоне. lang — код языка дорожки (ru), outDir — папка, net — сеть для загрузки (null: любая). */
+    public static void start(Context ctx, String url, String title, String lang, String outDir,
+                             boolean fallbackOriginal, Network net, Listener l) {
+        start(ctx, url, title, lang, outDir, fallbackOriginal, MODE_ANY, net, l);
+    }
+
+    /**
+     * Запускает загрузку в фоне. lang — код языка дорожки (ru), outDir — папка, net — сеть для загрузки (null: любая).
+     * mode: MODE_ORIGINAL — только оригинальная дорожка языка, MODE_DUBBED — только дубляж YouTube, MODE_ANY — любая.
+     */
     public static void start(final Context ctx, final String url, final String title, final String lang,
-                             final String outDir, final boolean fallbackOriginal, final Network net, final Listener l) {
+                             final String outDir, final boolean fallbackOriginal, final int mode,
+                             final Network net, final Listener l) {
         final Context app = ctx.getApplicationContext();
         Thread t = new Thread(new Runnable() {
             @Override public void run() {
                 NET.set(net);
                 try {
-                    String path = doRun(app, url, title, lang, outDir, fallbackOriginal, l);
+                    String path = doRun(app, url, title, lang, outDir, fallbackOriginal, mode, l);
                     l.onDone(path, null);
                 } catch (UserError e) {
                     l.onDone(null, e.getMessage());
@@ -125,6 +137,14 @@ public final class YtAudioBridge {
         return s.getAudioTrackType() == org.schabi.newpipe.extractor.stream.AudioTrackType.ORIGINAL;
     }
 
+    /** Подходит ли дорожка выбранному режиму: тип null (единственная дорожка) считается оригиналом. */
+    private static boolean modeFits(AudioStream s, int mode) {
+        org.schabi.newpipe.extractor.stream.AudioTrackType t = s.getAudioTrackType();
+        if (mode == MODE_ORIGINAL) return t == null || t == org.schabi.newpipe.extractor.stream.AudioTrackType.ORIGINAL;
+        if (mode == MODE_DUBBED) return t == org.schabi.newpipe.extractor.stream.AudioTrackType.DUBBED;
+        return true;
+    }
+
     /** Лучший по формату (M4A предпочтительнее: его индексирует медиатека) и битрейту. */
     private static AudioStream best(List<AudioStream> list) {
         AudioStream b = null;
@@ -139,7 +159,7 @@ public final class YtAudioBridge {
     }
 
     private static String doRun(Context ctx, String url, String title, String lang, String outDir,
-                              boolean fallbackOriginal, Listener l) throws Exception {
+                              boolean fallbackOriginal, int mode, Listener l) throws Exception {
         if (lang == null || lang.trim().length() == 0) lang = "ru";
         lang = lang.trim();
         ensureInit();
@@ -157,14 +177,18 @@ public final class YtAudioBridge {
         for (AudioStream s : all) {
             Locale lo = s.getAudioLocale();
             if (lo != null) langs.add(lo.getDisplayLanguage(new Locale("ru")));
-            if (sameLang(s, lang)) wanted.add(s);
+            if (sameLang(s, lang) && modeFits(s, mode)) wanted.add(s);
         }
-        if (wanted.isEmpty() && looksLike(info, lang)) {
+        if (wanted.isEmpty() && mode != MODE_DUBBED && looksLike(info, lang)) {
             // единственная дорожка (язык в потоках не указан) или оригинал: язык видео совпал по тексту
             Set<String> ids = new HashSet<String>();
             for (AudioStream s : all) ids.add(s.getAudioTrackId() == null ? "" : s.getAudioTrackId());
             if (ids.size() <= 1) wanted.addAll(all);
-            else for (AudioStream s : all) if (isOriginal(s)) wanted.add(s);
+            else for (AudioStream s : all) {
+                Locale lo = s.getAudioLocale();
+                // оригинал с известным другим языком русским не считается
+                if (isOriginal(s) && (lo == null || lang.equalsIgnoreCase(lo.getLanguage()))) wanted.add(s);
+            }
         }
         boolean original = false;
         AudioStream pick = best(wanted);

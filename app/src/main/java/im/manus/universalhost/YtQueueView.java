@@ -187,12 +187,12 @@ public final class YtQueueView extends LinearLayout {
             String url = t == null ? "" : t.toString().trim();
             String low = url.toLowerCase();
             if (!low.startsWith("http") || !(low.contains("youtu.be/") || low.contains("youtube.com/"))) {
-                q.toast("В буфере нет ссылки на YouTube");
+                q.toast("📋❓");
                 return;
             }
             q.submit(url, null);
         } catch (Throwable e) {
-            q.toast("Не вышло: " + e);
+            q.toast("⚠️");
         }
     }
 
@@ -263,7 +263,7 @@ public final class YtQueueView extends LinearLayout {
         over.setVisibility(GONE);
         tile.addView(over, new FrameLayout.LayoutParams(-1, -1));
 
-        String mark = q.isActive(it.url) ? "⬇" : (YtAudioQueue.NO_TRACK.equals(it.status) ? "🚫"
+        String mark = q.isActive(it.url) ? q.stage(it.url) : (YtAudioQueue.NO_TRACK.equals(it.status) ? "🚫"
                 : (YtAudioQueue.ERROR.equals(it.status) ? "⚠️" : "⏳"));
         tile.addView(badge(mark), new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START));
 
@@ -316,7 +316,7 @@ public final class YtQueueView extends LinearLayout {
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             c.startActivity(i);
         } catch (Throwable t) {
-            q.toast("Не открыть ссылку: " + t.getMessage());
+            q.toast("⚠️🔗");
         }
     }
 

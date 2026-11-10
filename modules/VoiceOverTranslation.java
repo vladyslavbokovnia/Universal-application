@@ -981,7 +981,13 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
     private static void toast(final Context c, final String s) {
         MAIN.post(new Runnable() {
             @Override public void run() {
-                try { Toast.makeText(c, s, Toast.LENGTH_LONG).show(); } catch (Throwable ignored) { }
+                try {
+                    // уведомления без текста: только эмодзи (хост с YtNotify); со старым хостом показывается как раньше
+                    String g;
+                    try { g = im.manus.universalhost.YtNotify.glyphs(s); } catch (Throwable e) { g = null; }
+                    if (g == null) Toast.makeText(c, s, Toast.LENGTH_LONG).show();
+                    else Toast.makeText(c, g.length() == 0 ? "🗣" : g, Toast.LENGTH_SHORT).show();
+                } catch (Throwable ignored) { }
             }
         });
     }
