@@ -1,0 +1,434 @@
+diff --git a/app/src/main/java/im/manus/universalhost/YtAudioBridge.java b/app/src/main/java/im/manus/universalhost/YtAudioBridge.java
+index 2edcd2c..d95e74e 100644
+--- a/app/src/main/java/im/manus/universalhost/YtAudioBridge.java
++++ b/app/src/main/java/im/manus/universalhost/YtAudioBridge.java
+@@ -56,6 +56,9 @@ public final class YtAudioBridge {
+             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:153.0) Gecko/20100101 Firefox/153.0";
+     private static final int CHUNK = 4 * 1024 * 1024;
+ 
++    /** Какую дорожку брать: любую русскую, только оригинал или только дубляж YouTube. */
++    public static final int MODE_ANY = 0, MODE_ORIGINAL = 1, MODE_DUBBED = 2;
++
+     private static boolean inited;
+ 
+     /** Сеть, через которую качает текущий поток (null: по умолчанию). Нужна для режима «только Wi-Fi». */
+@@ -84,15 +87,24 @@ public final class YtAudioBridge {
+         start(ctx, url, title, lang, outDir, fallbackOriginal, null, l);
+     }
+ 
+-    /** Запускает загрузку в фоне. lang — код языка дорожки (ru), outDir — папка, net — сеть для загрузки (null: любая). */
++    public static void start(Context ctx, String url, String title, String lang, String outDir,
++                             boolean fallbackOriginal, Network net, Listener l) {
++        start(ctx, url, title, lang, outDir, fallbackOriginal, MODE_ANY, net, l);
++    }
++
++    /**
++     * Запускает загрузку в фоне. lang — код языка дорожки (ru), outDir — папка, net — сеть для загрузки (null: любая).
++     * mode: MODE_ORIGINAL — только оригинальная дорожка языка, MODE_DUBBED — только дубляж YouTube, MODE_ANY — любая.
++     */
+     public static void start(final Context ctx, final String url, final String title, final String lang,
+-                             final String outDir, final boolean fallbackOriginal, final Network net, final Listener l) {
++                             final String outDir, final boolean fallbackOriginal, final int mode,
++                             final Network net, final Listener l) {
+         final Context app = ctx.getApplicationContext();
+         Thread t = new Thread(new Runnable() {
+             @Override public void run() {
+                 NET.set(net);
+                 try {
+-                    String path = doRun(app, url, title, lang, outDir, fallbackOriginal, l);
++                    String path = doRun(app, url, title, lang, outDir, fallbackOriginal, mode, l);
+                     l.onDone(path, null);
+                 } catch (UserError e) {
+                     l.onDone(null, e.getMessage());
+@@ -125,6 +137,14 @@ public final class YtAudioBridge {
+         return s.getAudioTrackType() == org.schabi.newpipe.extractor.stream.AudioTrackType.ORIGINAL;
+     }
+ 
++    /** Подходит ли дорожка выбранному режиму: тип null (единственная дорожка) считается оригиналом. */
++    private static boolean modeFits(AudioStream s, int mode) {
++        org.schabi.newpipe.extractor.stream.AudioTrackType t = s.getAudioTrackType();
++        if (mode == MODE_ORIGINAL) return t == null || t == org.schabi.newpipe.extractor.stream.AudioTrackType.ORIGINAL;
++        if (mode == MODE_DUBBED) return t == org.schabi.newpipe.extractor.stream.AudioTrackType.DUBBED;
++        return true;
++    }
++
+     /** Лучший по формату (M4A предпочтительнее: его индексирует медиатека) и битрейту. */
+     private static AudioStream best(List<AudioStream> list) {
+         AudioStream b = null;
+@@ -139,7 +159,7 @@ public final class YtAudioBridge {
+     }
+ 
+     private static String doRun(Context ctx, String url, String title, String lang, String outDir,
+-                              boolean fallbackOriginal, Listener l) throws Exception {
++                              boolean fallbackOriginal, int mode, Listener l) throws Exception {
+         if (lang == null || lang.trim().length() == 0) lang = "ru";
+         lang = lang.trim();
+         ensureInit();
+@@ -157,14 +177,18 @@ public final class YtAudioBridge {
+         for (AudioStream s : all) {
+             Locale lo = s.getAudioLocale();
+             if (lo != null) langs.add(lo.getDisplayLanguage(new Locale("ru")));
+-            if (sameLang(s, lang)) wanted.add(s);
++            if (sameLang(s, lang) && modeFits(s, mode)) wanted.add(s);
+         }
+-        if (wanted.isEmpty() && looksLike(info, lang)) {
++        if (wanted.isEmpty() && mode != MODE_DUBBED && looksLike(info, lang)) {
+             // единственная дорожка (язык в потоках не указан) или оригинал: язык видео совпал по тексту
+             Set<String> ids = new HashSet<String>();
+             for (AudioStream s : all) ids.add(s.getAudioTrackId() == null ? "" : s.getAudioTrackId());
+             if (ids.size() <= 1) wanted.addAll(all);
+-            else for (AudioStream s : all) if (isOriginal(s)) wanted.add(s);
++            else for (AudioStream s : all) {
++                Locale lo = s.getAudioLocale();
++                // оригинал с известным другим языком русским не считается
++                if (isOriginal(s) && (lo == null || lang.equalsIgnoreCase(lo.getLanguage()))) wanted.add(s);
++            }
+         }
+         boolean original = false;
+         AudioStream pick = best(wanted);
+diff --git a/app/src/main/java/im/manus/universalhost/YtAudioQueue.java b/app/src/main/java/im/manus/universalhost/YtAudioQueue.java
+index 271415d..130ceab 100644
+--- a/app/src/main/java/im/manus/universalhost/YtAudioQueue.java
++++ b/app/src/main/java/im/manus/universalhost/YtAudioQueue.java
+@@ -53,6 +53,7 @@ public final class YtAudioQueue {
+     private final Handler h = new Handler(Looper.getMainLooper());
+     private final List<Item> items = new ArrayList<Item>();
+     private final Set<String> active = new HashSet<String>();
++    private final java.util.Map<String, String> stages = new java.util.HashMap<String, String>();
+     private final List<Runnable> listeners = new ArrayList<Runnable>();
+     private ConnectivityManager.NetworkCallback netCb;
+     private boolean forceAll;
+@@ -112,6 +113,19 @@ public final class YtAudioQueue {
+ 
+     public synchronized boolean isActive(String url) { return active.contains(url); }
+ 
++    /** Значок текущего шага цепочки для ролика в работе (⬇, если шаг ещё не сообщили). */
++    public synchronized String stage(String url) {
++        String g = stages.get(url);
++        return g == null || g.length() == 0 ? "⬇" : g;
++    }
++
++    private synchronized void setStage(String url, String text) {
++        String g = YtNotify.glyphs(text);
++        if (g.length() == 0) return;
++        stages.put(url, g);
++        changed();
++    }
++
+     public void addListener(Runnable r) { synchronized (listeners) { listeners.add(r); } }
+ 
+     public void removeListener(Runnable r) { synchronized (listeners) { listeners.remove(r); } }
+@@ -292,7 +306,7 @@ public final class YtAudioQueue {
+             }
+             if (QUEUED.equals(it.status)) any = true;
+         }
+-        if (!any) { toast("Нечего качать"); return; }
++        if (!any) { toast("📭"); return; }
+         forceAll = true;
+         save();
+         changed();
+@@ -328,20 +342,21 @@ public final class YtAudioQueue {
+         changed();
+         SharedPreferences p = prefs();
+         String lang = p.getString("lang", "ru");
+-        boolean fb = p.getBoolean("fallback_original", false);
+-        toast("🎧 Начинаю: " + (it.title.length() == 0 ? it.url : it.title));
+-        YtAudioBridge.start(app, it.url, it.title, lang, outDir(), fb, net, new YtAudioBridge.Listener() {
+-            @Override public void onStatus(String text) { toast(text); }
++        toast("🎧");
++        setStage(it.url, "🔎");
++        YtPipeline.start(app, it.url, it.title, lang, outDir(), net, new YtAudioBridge.Listener() {
++            @Override public void onStatus(String text) { setStage(it.url, text); toast(text); }
+             @Override public void onDone(String audioPath, String error) { finish(it, audioPath, error); }
+         });
+     }
+ 
+     private synchronized void finish(Item it, String path, String error) {
+         active.remove(it.url);
++        stages.remove(it.url);
+         boolean netLost = false;
+         if (error == null) {
+             items.remove(it);
+-            toast("✅ Готово: " + new File(path).getName());
++            toast("✅");
+         } else if (error.startsWith("Нет сети")) {
+             it.status = QUEUED;
+             it.err = "";
+@@ -369,7 +384,9 @@ public final class YtAudioQueue {
+     public void toast(final String s) {
+         h.post(new Runnable() {
+             @Override public void run() {
+-                try { Toast.makeText(app, s, Toast.LENGTH_LONG).show(); } catch (Throwable t) { }
++                // уведомления без текста: от строки остаются только эмодзи и значки
++                String g = YtNotify.glyphs(s);
++                try { Toast.makeText(app, g.length() == 0 ? "🔔" : g, Toast.LENGTH_SHORT).show(); } catch (Throwable t) { }
+             }
+         });
+     }
+diff --git a/app/src/main/java/im/manus/universalhost/YtPipeline.java b/app/src/main/java/im/manus/universalhost/YtPipeline.java
+new file mode 100644
+index 0000000..e8bb9c7
+--- /dev/null
++++ b/app/src/main/java/im/manus/universalhost/YtPipeline.java
+@@ -0,0 +1,177 @@
++package im.manus.universalhost;
++
++import android.content.Context;
++import android.content.Intent;
++import android.content.SharedPreferences;
++import android.net.Network;
++import android.os.Environment;
++
++import org.json.JSONArray;
++import org.json.JSONObject;
++
++import java.io.File;
++import java.util.concurrent.CountDownLatch;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
++
++/**
++ * Одна кнопка 🎧 вместо набора пунктов: что делать со ссылкой, решается по шагам.
++ *
++ *  1. 🔎 Есть оригинальная русская дорожка → качаем её и вырезаем «эээ» (🧹).
++ *  2. 🗣 Дорожка не русская → перевод Яндекса «живые голоса» (модуль «VOT перевод»).
++ *  3. 🤖 VOT не справился → ищем русскую дорожку, переведённую самим YouTube (дубляж).
++ *  4. 📋 Больше вариантов нет → ссылка остаётся в списке загрузки.
++ *
++ * Шаги сообщают значками через Listener.onStatus; ошибки сети уходят наверх как есть, чтобы очередь поставила
++ * ролик ждать сеть. VOT ведёт свою очередь и сам результат не возвращает: готовность читается из его настроек.
++ */
++public final class YtPipeline {
++
++    private static final String VOT = "VOT перевод";
++    private static final String VOT_MIME = "text/x-votaudio";
++    private static final Pattern ID = Pattern.compile("(?:v=|youtu\\.be/|shorts/|embed/)([A-Za-z0-9_-]{11})");
++
++    private YtPipeline() { }
++
++    public static void start(final Context ctx, final String url, final String title, final String lang,
++                             final String outDir, final Network net, final YtAudioBridge.Listener l) {
++        final Context app = ctx.getApplicationContext();
++        Thread t = new Thread(new Runnable() {
++            @Override public void run() {
++                try {
++                    flow(app, url, title, lang, outDir, net, l);
++                } catch (Throwable e) {
++                    l.onDone(null, "Ошибка: " + e);
++                }
++            }
++        }, "YtPipeline");
++        t.start();
++    }
++
++    private static void flow(Context app, String url, String title, String lang, String outDir, Network net,
++                            YtAudioBridge.Listener l) throws Exception {
++        SharedPreferences p = app.getSharedPreferences(YtAudioQueue.PREFS, Context.MODE_PRIVATE);
++        l.onStatus("🔎");
++
++        // 1. оригинальная русская дорожка
++        String[] r = fetch(app, url, title, lang, outDir, YtAudioBridge.MODE_ORIGINAL, net);
++        if (r[0] != null) {
++            String path = r[0];
++            if (p.getBoolean("clean_fillers", true)) {
++                l.onStatus("🧹");
++                try {
++                    FillerCleaner.Report rep = FillerCleaner.clean(app, new File(path));
++                    if (rep != null && rep.file != null) path = rep.file;
++                    l.onStatus(rep != null && rep.count > 0 ? "✂️" : "👌");
++                } catch (Throwable e) {
++                    l.onStatus("⚠️🧹");
++                }
++            }
++            l.onDone(path, null);
++            return;
++        }
++        if (!r[1].startsWith("Нет дорожки")) {      // сеть или сбой: как раньше, решает очередь
++            l.onDone(null, r[1]);
++            return;
++        }
++
++        // 2. перевод Яндекса (живые голоса)
++        l.onStatus("🗣");
++        String[] v = vot(app, url, title);
++        if (v[0] != null) {
++            l.onDone(v[0], null);
++            return;
++        }
++
++        // 3. русская дорожка YouTube (дубляж)
++        l.onStatus("🤖");
++        r = fetch(app, url, title, lang, outDir, YtAudioBridge.MODE_DUBBED, net);
++        if (r[0] != null) {
++            l.onDone(r[0], null);
++            return;
++        }
++        if (r[1].startsWith("Нет сети")) {
++            l.onDone(null, r[1]);
++            return;
++        }
++
++        // 4. вариантов больше нет: ссылка остаётся в списке
++        l.onStatus("📋");
++        l.onDone(null, "Нет дорожки: русской нет, перевод Яндекса не вышел (" + v[1] + ")");
++    }
++
++    /** Скачивает дорожку нужного вида и ждёт конца. Возвращает {путь, null} или {null, ошибка}. */
++    private static String[] fetch(Context app, String url, String title, String lang, String outDir, int mode,
++                                  Network net) throws InterruptedException {
++        final CountDownLatch done = new CountDownLatch(1);
++        final String[] r = new String[2];
++        YtAudioBridge.start(app, url, title, lang, outDir, false, mode, net, new YtAudioBridge.Listener() {
++            @Override public void onStatus(String text) { }     // проценты и пр. наружу не идут: только значки шагов
++
++            @Override public void onDone(String audioPath, String error) {
++                r[0] = audioPath;
++                r[1] = error == null ? "" : error;
++                done.countDown();
++            }
++        });
++        done.await();
++        return r;
++    }
++
++    private static String videoId(String url) {
++        Matcher m = ID.matcher(url == null ? "" : url);
++        return m.find() ? m.group(1) : null;
++    }
++
++    /** Отдаёт ролик модулю «VOT перевод» и ждёт результат. Возвращает {путь, null} или {null, причина}. */
++    private static String[] vot(Context app, String url, String title) {
++        try {
++            String id = videoId(url);
++            if (id == null) return new String[]{null, "не ссылка на ролик"};
++            IPlugin plugin = PluginRegistry.INSTANCE.find(app, VOT);
++            if (!(plugin instanceof IShareHandler) || !ModuleStorage.INSTANCE.isEnabled(app, VOT)) {
++                return new String[]{null, "нет модуля VOT"};
++            }
++            Intent i = new Intent(Intent.ACTION_SEND);
++            i.setType(VOT_MIME);
++            i.putExtra(Intent.EXTRA_TEXT, "https://youtu.be/" + id);
++            if (title != null && title.trim().length() > 0) i.putExtra(Intent.EXTRA_SUBJECT, title.trim());
++            if (!((IShareHandler) plugin).onShare(app, i)) return new String[]{null, "VOT не принял ссылку"};
++
++            SharedPreferences vp = app.getSharedPreferences(ModuleStorage.INSTANCE.prefsName(VOT), Context.MODE_PRIVATE);
++            long until = System.currentTimeMillis() + 6L * 60 * 60 * 1000;
++            while (System.currentTimeMillis() < until) {
++                Thread.sleep(2000);
++                JSONObject o = votEntry(vp, id);
++                if (o == null) return new String[]{null, "убрано из списка VOT"};
++                String st = o.optString("status");
++                if ("done".equals(st)) {
++                    String name = o.optString("file");
++                    String dir = vp.getString("out_dir", "Music/VOT");
++                    if (dir == null || dir.trim().length() == 0) dir = "Music/VOT";
++                    File f = new File(new File(Environment.getExternalStorageDirectory(), dir.trim()), name);
++                    return f.isFile() ? new String[]{f.getAbsolutePath(), null} : new String[]{null, "файл VOT не найден"};
++                }
++                if ("err".equals(st)) {
++                    String m = o.optString("msg");
++                    return new String[]{null, m.length() > 80 ? m.substring(0, 80) : m};
++                }
++            }
++            return new String[]{null, "VOT слишком долго"};
++        } catch (Throwable t) {
++            return new String[]{null, String.valueOf(t)};
++        }
++    }
++
++    /** Запись ролика в очереди VOT (она хранится в настройках модуля как JSON). */
++    private static JSONObject votEntry(SharedPreferences vp, String id) {
++        try {
++            JSONArray a = new JSONArray(vp.getString("queue", "[]"));
++            for (int i = 0; i < a.length(); i++) {
++                JSONObject o = a.getJSONObject(i);
++                if (id.equals(o.optString("id"))) return o;
++            }
++        } catch (Throwable ignored) { }
++        return null;
++    }
++}
+diff --git a/app/src/main/java/im/manus/universalhost/YtQueueView.java b/app/src/main/java/im/manus/universalhost/YtQueueView.java
+index d8718ac..b28686e 100644
+--- a/app/src/main/java/im/manus/universalhost/YtQueueView.java
++++ b/app/src/main/java/im/manus/universalhost/YtQueueView.java
+@@ -187,12 +187,12 @@ public final class YtQueueView extends LinearLayout {
+             String url = t == null ? "" : t.toString().trim();
+             String low = url.toLowerCase();
+             if (!low.startsWith("http") || !(low.contains("youtu.be/") || low.contains("youtube.com/"))) {
+-                q.toast("В буфере нет ссылки на YouTube");
++                q.toast("📋❓");
+                 return;
+             }
+             q.submit(url, null);
+         } catch (Throwable e) {
+-            q.toast("Не вышло: " + e);
++            q.toast("⚠️");
+         }
+     }
+ 
+@@ -263,7 +263,7 @@ public final class YtQueueView extends LinearLayout {
+         over.setVisibility(GONE);
+         tile.addView(over, new FrameLayout.LayoutParams(-1, -1));
+ 
+-        String mark = q.isActive(it.url) ? "⬇" : (YtAudioQueue.NO_TRACK.equals(it.status) ? "🚫"
++        String mark = q.isActive(it.url) ? q.stage(it.url) : (YtAudioQueue.NO_TRACK.equals(it.status) ? "🚫"
+                 : (YtAudioQueue.ERROR.equals(it.status) ? "⚠️" : "⏳"));
+         tile.addView(badge(mark), new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START));
+ 
+@@ -316,7 +316,7 @@ public final class YtQueueView extends LinearLayout {
+             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+             c.startActivity(i);
+         } catch (Throwable t) {
+-            q.toast("Не открыть ссылку: " + t.getMessage());
++            q.toast("⚠️🔗");
+         }
+     }
+ 
+diff --git a/modules/VoiceOverTranslation.java b/modules/VoiceOverTranslation.java
+index 513d464..973dd51 100644
+--- a/modules/VoiceOverTranslation.java
++++ b/modules/VoiceOverTranslation.java
+@@ -981,7 +981,13 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
+     private static void toast(final Context c, final String s) {
+         MAIN.post(new Runnable() {
+             @Override public void run() {
+-                try { Toast.makeText(c, s, Toast.LENGTH_LONG).show(); } catch (Throwable ignored) { }
++                try {
++                    // уведомления без текста: только эмодзи (хост с YtNotify); со старым хостом показывается как раньше
++                    String g;
++                    try { g = im.manus.universalhost.YtNotify.glyphs(s); } catch (Throwable e) { g = null; }
++                    if (g == null) Toast.makeText(c, s, Toast.LENGTH_LONG).show();
++                    else Toast.makeText(c, g.length() == 0 ? "🗣" : g, Toast.LENGTH_SHORT).show();
++                } catch (Throwable ignored) { }
+             }
+         });
+     }
+diff --git a/modules/YouTubeAudio.java b/modules/YouTubeAudio.java
+index eebffb6..ca85d96 100644
+--- a/modules/YouTubeAudio.java
++++ b/modules/YouTubeAudio.java
+@@ -32,9 +32,10 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvider
+     private Context appCtx;
+ 
+     @Override public String getName() { return "YouTube аудио"; }
+-    @Override public int getVersion() { return 4; }
++    @Override public int getVersion() { return 5; }
+     @Override public String getDescription() {
+-        return "Скачивает русскую аудиодорожку YouTube по кнопке 🎧 из скрипта YouTube TTS; список ссылок с превью.";
++        return "Кнопка 🎧 из скрипта YouTube TTS: русский оригинал (без «эээ»), иначе перевод Яндекса (VOT), иначе дубляж YouTube; "
++                + "что не нашлось, остаётся в списке.";
+     }
+     @Override public String getIconName() { return "ic_launcher"; }
+ 
+@@ -91,8 +92,8 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvider
+                 "Включено: ссылки качаются сами, как только есть подходящая сеть. Выключено: ссылки ждут в списке, пока не нажмёшь на плитку.", true));
+         r.add(SettingItem.toggle("wifi_only", "📶 Только по Wi-Fi",
+                 "Мобильная сеть не используется: ссылки ждут Wi-Fi.", false));
+-        r.add(SettingItem.toggle("fallback_original", "🎙 Оригинал, если русской нет",
+-                "Выключено: ролик без русской дорожки остаётся в списке со ссылкой.", false));
++        r.add(SettingItem.toggle("clean_fillers", "🧹 Вырезать «эээ» из русского оригинала",
++                "Модель Uhm на устройстве. Если она не подключена или нашла слишком много, файл остаётся как есть.", true));
+         r.add(SettingItem.text("lang", "🌐 Язык дорожки", "Код языка: ru, en, uk.", "ru"));
+         r.add(SettingItem.text("out_dir", "📁 Папка", "Внутри памяти телефона. Рядом с аудио кладутся превью и ссылка.", "Music/YouTube"));
+         return r;
