@@ -151,7 +151,7 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
     private Context appCtx;
 
     @Override public String getName() { return NAME; }
-    @Override public int getVersion() { return 6; }
+    @Override public int getVersion() { return 7; }
     @Override public String getDescription() {
         return "Закадровый перевод YouTube на русский (сервис Яндекса, как в VOT): скачивает озвучку в Music/VOT.";
     }
@@ -183,6 +183,16 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
                 return false;
             }
             ensureLoaded(app);
+            if (intent.getBooleanExtra("vot_remove", false)) {
+                // хост забрал готовый перевод: запись из списка убираем, файл остаётся
+                Item d = findItem(id);
+                if (d != null && !d.busy) {
+                    d.removed = true;
+                    synchronized (ITEMS) { ITEMS.remove(d); }
+                    changed();
+                }
+                return true;
+            }
             String title = intent.getStringExtra(Intent.EXTRA_SUBJECT);
             Item it = findItem(id);
             if (it == null) {
@@ -257,7 +267,7 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
         r.add(SettingItem.toggle("wifi_only", "📶 Только по Wi-Fi",
                 "Перевод и скачивание ждут Wi-Fi (или Ethernet), по мобильной сети не идут.", true));
         r.add(SettingItem.text("max_parallel", "⚡ Переводов одновременно",
-                "От 1 до 5. Яндекс переводит ролик не сразу, поэтому несколько роликов можно отправлять подряд.", "3"));
+                "0 или пусто — без ограничения (по умолчанию). Яндекс переводит ролик не сразу, поэтому ролики можно отправлять подряд.", "0"));
         r.add(SettingItem.text("out_dir", "📁 Папка", "Внутри памяти телефона.", "Music/VOT"));
         r.add(SettingItem.section("👤 Аккаунт Яндекса (для живого голоса)"));
         r.add(SettingItem.action("login", "🔑 Войти в Яндекс",
@@ -466,8 +476,11 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
         Item it = job.it;
         try {
             SharedPreferences p = prefs(app);
-            int limit = 3;
-            try { limit = Math.max(1, Math.min(5, Integer.parseInt(pref(p, "max_parallel", "3")))); } catch (NumberFormatException ignored) { }
+            int limit = Integer.MAX_VALUE;      // без ограничения: Яндекс переводит медленно на своей стороне, телефон при этом свободен
+            try {
+                int n = Integer.parseInt(pref(p, "max_parallel", "0").trim());
+                if (n > 0) limit = n;
+            } catch (NumberFormatException ignored) { }
             synchronized (GATE) {
                 boolean told = false;
                 while (running >= limit) {

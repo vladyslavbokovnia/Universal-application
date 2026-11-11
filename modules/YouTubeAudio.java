@@ -32,7 +32,7 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvid
     private Context appCtx;
 
     @Override public String getName() { return "YouTube аудио"; }
-    @Override public int getVersion() { return 5; }
+    @Override public int getVersion() { return 6; }
     @Override public String getDescription() {
         return "Кнопка 🎧 из скрипта YouTube TTS: русский оригинал (без «эээ»), иначе перевод Яндекса (VOT), иначе дубляж YouTube; "
                 + "что не нашлось, остаётся в списке.";
@@ -92,6 +92,8 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvid
                 "Включено: ссылки качаются сами, как только есть подходящая сеть. Выключено: ссылки ждут в списке, пока не нажмёшь на плитку.", true));
         r.add(SettingItem.toggle("wifi_only", "📶 Только по Wi-Fi",
                 "Мобильная сеть не используется: ссылки ждут Wi-Fi.", false));
+        r.add(SettingItem.text("max_dl", "⬇ Одновременных загрузок",
+                "Сколько роликов качается с YouTube сразу (1–10). Перевод Яндекса идёт без ограничения, очистка «эээ» всегда по одной.", "3"));
         r.add(SettingItem.toggle("clean_fillers", "🧹 Вырезать «эээ» из русского оригинала",
                 "Модель Uhm на устройстве. Если она не подключена или нашла слишком много, файл остаётся как есть.", true));
         r.add(SettingItem.text("lang", "🌐 Язык дорожки", "Код языка: ru, en, uk.", "ru"));
