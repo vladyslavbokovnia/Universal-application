@@ -107,10 +107,44 @@ public final class YtAudioQueue {
         return prefs().getBoolean("clean_fillers", true) && FillerCleaner.available();
     }
 
-    private String outDir() {
-        String rel = prefs().getString("out_dir", "Music/YouTube");
+    /** Корень SD-карты (съёмного тома) или null, если её нет или она не подключена. */
+    public static File sdRoot(Context app) {
+        try {
+            File internal = Environment.getExternalStorageDirectory();
+            File[] dirs = app.getExternalFilesDirs(null);
+            if (dirs == null) return null;
+            for (File d : dirs) {
+                if (d == null) continue;
+                String path = d.getAbsolutePath();
+                int i = path.indexOf("/Android/data/");
+                if (i < 0) continue;
+                File root = new File(path.substring(0, i));
+                if (root.equals(internal)) continue;
+                if (!Environment.MEDIA_MOUNTED.equals(Environment.getExternalStorageState(d))) continue;
+                if (!Environment.isExternalStorageRemovable(d)) continue;
+                return root;
+            }
+        } catch (Throwable ignored) { }
+        return null;
+    }
+
+    /**
+     * Единая папка для всех аудио (оригинал, дубляж YouTube, перевод Яндекса): внутри памяти телефона или SD-карты
+     * (настройка «Куда сохранять»). null: выбрана SD-карта, а её нет.
+     */
+    public static File mediaDir(Context app) {
+        SharedPreferences p = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        String rel = p.getString("out_dir", "Music/YouTube");
         if (rel == null || rel.trim().length() == 0) rel = "Music/YouTube";
-        return new File(Environment.getExternalStorageDirectory(), rel.trim()).getAbsolutePath();
+        rel = rel.trim();
+        while (rel.startsWith("/")) rel = rel.substring(1);
+        File root = p.getInt("storage", 0) == 1 ? sdRoot(app) : Environment.getExternalStorageDirectory();
+        return root == null ? null : new File(root, rel);
+    }
+
+    private String outDir() {
+        File d = mediaDir(app);
+        return d == null ? null : d.getAbsolutePath();
     }
 
     private void load() {
@@ -405,13 +439,22 @@ public final class YtAudioQueue {
     }
 
     private void startItem(final Item it, Network net) {
+        final String dir = outDir();
+        if (dir == null) {                                   // выбрана SD-карта, а её нет: не качаем в другое место молча
+            it.status = ERROR;
+            it.err = "SD-карта не найдена";
+            save();
+            changed();
+            toast("💾⚠️");
+            return;
+        }
         active.add(it.url);
         changed();
         String lang = prefs().getString("lang", "ru");
         final boolean dub = "d".equals(it.step);
         toast(dub ? "🤖" : "🎧");
         int mode = dub ? YtAudioBridge.MODE_DUBBED : YtAudioBridge.MODE_ORIGINAL;
-        YtAudioBridge.start(app, it.url, it.title, lang, outDir(), false, mode, net, new YtAudioBridge.Listener() {
+        YtAudioBridge.start(app, it.url, it.title, lang, dir, false, mode, net, new YtAudioBridge.Listener() {
             @Override public void onStatus(String text) { }              // проценты наружу не идут: на плитке значок шага
             @Override public void onDone(String audioPath, String error) { finish(it, audioPath, error); }
         });

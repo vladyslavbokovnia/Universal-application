@@ -2,28 +2,22 @@ package im.manus.universalhost;
 
 import android.content.Context;
 import android.content.Intent;
-import android.content.SharedPreferences;
-import android.os.Environment;
-
-import org.json.JSONArray;
-import org.json.JSONObject;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Связь очереди «YouTube аудио» с модулем «VOT перевод» (перевод Яндекса, живые голоса). Сама цепочка шагов живёт
- * в {@link YtAudioQueue}; здесь только то, что нужно для VOT: отдать ему ролик, узнать готовность и убрать запись.
- * VOT ведёт свою очередь и результат наружу не возвращает: готовность читается из его настроек (список хранится там же).
+ * Связь очереди «YouTube аудио» с движком перевода Яндекса (живые голоса), который теперь часть хоста: отдать ему ролик,
+ * узнать готовность, убрать запись и показать его настройки внутри настроек модуля. Сама цепочка шагов живёт в
+ * {@link YtAudioQueue}.
  */
 public final class YtPipeline {
 
-    private static final String VOT = "VOT перевод";
-    private static final String VOT_MIME = "text/x-votaudio";
-    /** С этой версии модуль понимает vot_remove (убрать запись из списка). Старый принял бы такое за новую ссылку. */
-    private static final int VOT_REMOVE_VERSION = 7;
     private static final Pattern ID = Pattern.compile("(?:v=|youtu\\.be/|shorts/|embed/)([A-Za-z0-9_-]{11})");
+    private static VoiceOverTranslation engine;
 
     private YtPipeline() { }
 
@@ -32,76 +26,106 @@ public final class YtPipeline {
         return m.find() ? m.group(1) : null;
     }
 
-    private static IShareHandler votPlugin(Context app) {
-        try {
-            IPlugin p = PluginRegistry.INSTANCE.find(app, VOT);
-            if (p instanceof IShareHandler && ModuleStorage.INSTANCE.isEnabled(app, VOT)) return (IShareHandler) p;
-        } catch (Throwable ignored) { }
-        return null;
+    /** Переносит настройки бывшего модуля перевода в настройки «YouTube аудио» (один раз). */
+    public static void prepare(Context app) {
+        try { VotPrefs.of(app); } catch (Throwable ignored) { }
     }
 
-    private static SharedPreferences votPrefs(Context app) {
-        return app.getSharedPreferences(ModuleStorage.INSTANCE.prefsName(VOT), Context.MODE_PRIVATE);
+    private static synchronized VoiceOverTranslation vot(Context app) {
+        if (engine == null) {
+            engine = new VoiceOverTranslation();
+            engine.init(app.getApplicationContext());
+        }
+        return engine;
     }
 
-    /** Отдаёт ролик VOT. null: принят (или перевод уже готов), иначе причина отказа. Не ждёт результата. */
+    /** Отдаёт ролик переводчику. null: принят (или перевод уже готов), иначе причина отказа. Не ждёт результата. */
     public static String votSubmit(Context app, String url, String title) {
         try {
             String id = videoId(url);
             if (id == null) return "не ссылка на ролик";
-            IShareHandler vot = votPlugin(app);
-            if (vot == null) return "нет модуля VOT";
             if ("done".equals(votState(app, url)[0])) return null;         // перевод уже лежит готовый: заново не просим
             Intent i = new Intent(Intent.ACTION_SEND);
-            i.setType(VOT_MIME);
             i.putExtra(Intent.EXTRA_TEXT, "https://youtu.be/" + id);
             if (title != null && title.trim().length() > 0) i.putExtra(Intent.EXTRA_SUBJECT, title.trim());
-            return vot.onShare(app, i) ? null : "VOT не принял ссылку";
+            return vot(app).onShare(app, i) ? null : "перевод не принял ссылку";
         } catch (Throwable t) {
             return String.valueOf(t);
         }
     }
 
     /**
-     * Как дела у ролика в VOT: {"wait", ""} идёт, {"done", путь} готов, {"err", причина} не вышло,
-     * {"gone", ""} записи в списке VOT нет (убрали).
+     * Как дела у ролика: {"wait", ""} идёт, {"done", путь} готов, {"err", причина} не вышло,
+     * {"gone", ""} записи нет (убрали).
      */
     public static String[] votState(Context app, String url) {
         try {
             String id = videoId(url);
-            SharedPreferences vp = votPrefs(app);
-            JSONArray a = new JSONArray(vp.getString("queue", "[]"));
-            for (int i = 0; i < a.length(); i++) {
-                JSONObject o = a.getJSONObject(i);
-                if (!String.valueOf(id).equals(o.optString("id"))) continue;
-                String st = o.optString("status");
-                if ("done".equals(st)) {
-                    String dir = vp.getString("out_dir", "Music/VOT");
-                    if (dir == null || dir.trim().length() == 0) dir = "Music/VOT";
-                    File f = new File(new File(Environment.getExternalStorageDirectory(), dir.trim()), o.optString("file"));
-                    return f.isFile() ? new String[]{"done", f.getAbsolutePath()} : new String[]{"err", "файл VOT не найден"};
-                }
-                if ("err".equals(st)) {
-                    String m = o.optString("msg");
-                    return new String[]{"err", m.length() > 80 ? m.substring(0, 80) : m};
-                }
-                return new String[]{"wait", ""};
+            vot(app);
+            VoiceOverTranslation.ensureLoaded(app);
+            VoiceOverTranslation.Item it = id == null ? null : VoiceOverTranslation.findItem(id);
+            if (it == null) return new String[]{"gone", ""};
+            if ("done".equals(it.status)) {
+                File dir = YtAudioQueue.mediaDir(app);
+                File f = dir == null ? null : new File(dir, it.file);
+                return f != null && f.isFile() ? new String[]{"done", f.getAbsolutePath()} : new String[]{"err", "файл не найден"};
             }
+            if ("err".equals(it.status)) {
+                String m = it.msg == null ? "" : it.msg;
+                return new String[]{"err", m.length() > 80 ? m.substring(0, 80) : m};
+            }
+            return new String[]{"wait", ""};
         } catch (Throwable ignored) { }
         return new String[]{"gone", ""};
     }
 
-    /** Убирает запись о готовом переводе из списка VOT (файл остаётся: он уже в плеере). Старому VOT не пишем. */
+    /** Убирает запись о готовом переводе (файл остаётся: он уже в плеере). */
     public static void votRemove(Context app, String url) {
         try {
             String id = videoId(url);
-            IShareHandler vot = votPlugin(app);
-            if (id == null || vot == null || ((IPlugin) vot).getVersion() < VOT_REMOVE_VERSION) return;
-            Intent i = new Intent(Intent.ACTION_SEND);
-            i.setType(VOT_MIME);
-            i.putExtra(Intent.EXTRA_TEXT, "https://youtu.be/" + id);
-            i.putExtra("vot_remove", true);
-            vot.onShare(app, i);
+            vot(app);
+            if (id != null) VoiceOverTranslation.drop(id);
         } catch (Throwable ignored) { }
+    }
+
+    /** Настройки перевода для экрана настроек «YouTube аудио»: ключи с префиксом vot_, без папки и Wi-Fi (они общие). */
+    public static List<SettingItem> votSettings(Context app) {
+        List<SettingItem> out = new ArrayList<SettingItem>();
+        if (app != null) prepare(app);
+        VoiceOverTranslation e = app == null ? new VoiceOverTranslation() : vot(app);
+        for (SettingItem s : e.getSettingsSchema()) {
+            String k = s.getKey();
+            if ("out_dir".equals(k) || "wifi_only".equals(k)) continue;
+            String nk = VotPrefs.PREFIX + k;
+            switch (s.getType()) {
+                case SettingItem.SECTION:
+                    out.add(SettingItem.section(s.getTitle()));
+                    break;
+                case SettingItem.SWITCH:
+                    out.add(SettingItem.toggle(nk, s.getTitle(), s.getSummary(), s.getDefInt() == 1));
+                    break;
+                case SettingItem.SLIDER:
+                    out.add(SettingItem.slider(nk, s.getTitle(), s.getSummary(), s.getMin(), s.getMax(), s.getStep(), s.getDefInt()));
+                    break;
+                case SettingItem.CHOICE:
+                    out.add(SettingItem.choice(nk, s.getTitle(), s.getSummary(), s.getOptions(), s.getDefInt()));
+                    break;
+                case SettingItem.TEXT:
+                    out.add(SettingItem.text(nk, s.getTitle(), s.getSummary(), s.getDefStr()));
+                    break;
+                case SettingItem.ACTION:
+                    out.add(SettingItem.action(nk, s.getTitle(), s.getSummary()));
+                    break;
+                default:
+                    break;
+            }
+        }
+        return out;
+    }
+
+    /** Хост сообщает об изменении настройки перевода (ключ с префиксом vot_): передаём движку его собственный ключ. */
+    public static void votSettingChanged(Context app, String key) {
+        if (app == null || key == null || !key.startsWith(VotPrefs.PREFIX)) return;
+        vot(app).onSettingChanged(key.substring(VotPrefs.PREFIX.length()));
     }
 }

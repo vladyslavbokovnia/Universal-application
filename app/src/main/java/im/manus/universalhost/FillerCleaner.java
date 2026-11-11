@@ -6,6 +6,7 @@ import android.media.MediaCodecInfo;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
 import android.media.MediaMuxer;
+import android.media.MediaScannerConnection;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -137,6 +138,8 @@ public final class FillerCleaner {
             rep.count = merged.size();
             rep.removedSec = (double) (p.frames - kept) / p.rate;
             rep.file = out.getAbsolutePath();
+            // медиатека должна увидеть новый файл и забыть старый (на SD-карте тоже)
+            try { MediaScannerConnection.scanFile(app, new String[]{out.getAbsolutePath(), audio.getAbsolutePath()}, null, null); } catch (Throwable ignored) { }
             return rep;
         } finally {
             try { if (raf != null) raf.close(); } catch (Throwable ignored) { }

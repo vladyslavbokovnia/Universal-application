@@ -11,9 +11,11 @@ import im.manus.universalhost.ISettingsProvider;
 import im.manus.universalhost.IShareHandler;
 import im.manus.universalhost.SettingItem;
 import im.manus.universalhost.YtAudioQueue;
+import im.manus.universalhost.YtPipeline;
 import im.manus.universalhost.YtQueueView;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -28,19 +30,22 @@ import java.util.Map;
 public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvider, IShareHandler {
 
     static final String MIME = "text/x-ytaudio";
+    /** Старый тип кнопки 🗣 и меню браузера: теперь это та же цепочка, что и у 🎧. */
+    static final String MIME_VOT = "text/x-votaudio";
 
     private Context appCtx;
 
     @Override public String getName() { return "YouTube аудио"; }
-    @Override public int getVersion() { return 6; }
+    @Override public int getVersion() { return 7; }
     @Override public String getDescription() {
-        return "Кнопка 🎧 из скрипта YouTube TTS: русский оригинал (без «эээ»), иначе перевод Яндекса (VOT), иначе дубляж YouTube; "
-                + "что не нашлось, остаётся в списке.";
+        return "Один модуль: кнопка 🎧 из скрипта YouTube TTS, список загрузок, перевод Яндекса (живые голоса) и очистка «эээ». "
+                + "Русский оригинал, иначе перевод Яндекса, иначе дубляж YouTube; что не нашлось, остаётся в списке.";
     }
     @Override public String getIconName() { return "ic_launcher"; }
 
     @Override public void init(Context context) {
         appCtx = context.getApplicationContext();
+        YtPipeline.prepare(appCtx);               // перенос настроек бывшего модуля «VOT перевод»
         YtAudioQueue.get(appCtx).tryDrain();      // ссылки, дожидавшиеся сети до перезапуска
     }
 
@@ -63,6 +68,7 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvid
     @Override public List<String> shareMimeTypes() {
         List<String> r = new ArrayList<String>();
         r.add(MIME);
+        r.add(MIME_VOT);
         return r;
     }
 
@@ -73,7 +79,7 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvid
             String title = intent.getStringExtra(Intent.EXTRA_SUBJECT);
             if (url != null) url = url.trim();
             if (!isYoutube(url)) {
-                q.toast("Это не ссылка на YouTube");
+                q.toast("⚠️🔗");
                 return false;
             }
             q.submit(url, title);
@@ -97,12 +103,18 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvid
         r.add(SettingItem.toggle("clean_fillers", "🧹 Вырезать «эээ» из русского оригинала",
                 "Модель Uhm на устройстве. Если она не подключена или нашла слишком много, файл остаётся как есть.", true));
         r.add(SettingItem.text("lang", "🌐 Язык дорожки", "Код языка: ru, en, uk.", "ru"));
-        r.add(SettingItem.text("out_dir", "📁 Папка", "Внутри памяти телефона. Рядом с аудио кладутся превью и ссылка.", "Music/YouTube"));
+        r.add(SettingItem.choice("storage", "💾 Куда сохранять",
+                "Память телефона или SD-карта (карта должна быть подключена, приложению нужен доступ ко всем файлам). Если выбрана карта, а её нет, ссылки остаются в списке.",
+                Arrays.asList("📱 Память телефона", "💾 SD-карта"), 0));
+        r.add(SettingItem.text("out_dir", "📁 Папка", "Одна папка для оригинала, дубляжа и перевода, внутри выбранного места. Рядом с аудио кладутся превью и ссылка.", "Music/YouTube"));
+        r.add(SettingItem.section("🗣 Перевод Яндекса"));
+        r.addAll(YtPipeline.votSettings(appCtx));
         return r;
     }
 
     @Override public void onSettingChanged(String key) {
         if (appCtx == null) return;
+        if (key != null && key.startsWith("vot_")) { YtPipeline.votSettingChanged(appCtx, key); return; }
         if ("auto_mode".equals(key) || "wifi_only".equals(key)) YtAudioQueue.get(appCtx).tryDrain();
     }
 

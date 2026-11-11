@@ -1,4 +1,4 @@
-package im.manus.plugins;
+package im.manus.universalhost;
 
 import android.accessibilityservice.AccessibilityService;
 import android.app.AlertDialog;
@@ -240,12 +240,13 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
 
     private static String prefsName() { return "module_" + NAME.replaceAll("[^A-Za-z0-9_.-]", "_"); }
 
+    // Движок больше не отдельный модуль: его настройки лежат внутри настроек «YouTube аудио» (ключи с префиксом vot_)
     private SharedPreferences prefs() {
-        return appCtx == null ? null : appCtx.getSharedPreferences(prefsName(), Context.MODE_PRIVATE);
+        return appCtx == null ? null : VotPrefs.of(appCtx);
     }
 
     private static SharedPreferences prefs(Context c) {
-        return c.getSharedPreferences(prefsName(), Context.MODE_PRIVATE);
+        return VotPrefs.of(c);
     }
 
     private static String pref(SharedPreferences p, String key, String def) {
@@ -508,7 +509,8 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
             if (tr.url == null || tr.url.length() == 0) throw new IOException("Яндекс не прислал ссылку на озвучку");
             waitWifi(app, job, p);
             say(app, job, "⬇ Скачиваю озвучку" + (tr.lively ? " (живой голос)" : ""));
-            File dir = new File(Environment.getExternalStorageDirectory(), pref(p, "out_dir", "Music/VOT"));
+            File dir = YtAudioQueue.mediaDir(app);          // одна папка для всех аудио: память телефона или SD-карта
+            if (dir == null) throw new IOException("SD-карта не найдена");
             if (!dir.exists() && !dir.mkdirs()) throw new IOException("Не создать папку " + dir);
             File out = download(tr.url, dir, safeName(job.title) + " [VOT " + dst + (tr.lively ? ", живой" : "") + "]");
             saveExtras(job, out);
@@ -1068,6 +1070,16 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
                 for (Runnable r : copy) r.run();
             }
         });
+    }
+
+    /** Хост забрал готовый перевод: запись из списка убираем, файл остаётся. */
+    static void drop(String videoId) {
+        Item d = findItem(videoId);
+        if (d != null && !d.busy) {
+            d.removed = true;
+            synchronized (ITEMS) { ITEMS.remove(d); }
+            changed();
+        }
     }
 
     static Item findItem(String videoId) {
