@@ -12,13 +12,16 @@ import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
+import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
-import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import java.util.Locale
@@ -26,6 +29,10 @@ import java.util.Locale
 /**
  * Экран настроек модуля (или папки). Здесь единственное место, где у модулей есть текст:
  * на экране модулей остаются только значки.
+ *
+ * Управление настройками: нажатие на логотип озвучивает настройку; долгое нажатие переключает
+ * (для включателей; отдельного переключателя на экране нет, выключенное тускнеет); долгое нажатие
+ * и движение пальцем перетаскивает настройку на новое место, порядок запоминается для модуля.
  */
 class ModuleSettingsActivity : Activity() {
 
@@ -33,11 +40,14 @@ class ModuleSettingsActivity : Activity() {
         const val EXTRA_TARGET = "target"       // имя модуля либо ModuleStorage.folderTarget(...)
         const val EXTRA_FOLDER = "folder"       // id папки, если открыты настройки папки
         private const val REQ_IMAGE = 1
+        private const val ORDER_KEY = "_host_order"   // порядок настроек: id через перевод строки
+        private const val TAG_LOGO = "logo"
     }
 
     private lateinit var target: String
     private var folderId: String? = null
     private var pendingKey: String? = null
+    private lateinit var scroll: ScrollView
     private lateinit var content: LinearLayout
 
     // живые мониторы (SettingItem.MONITOR)
@@ -51,6 +61,13 @@ class ModuleSettingsActivity : Activity() {
             if (monitors.isNotEmpty()) ui.postDelayed(this, 500)
         }
     }
+
+    // строки настроек, которые можно переставлять
+    private class Entry(val id: String, val view: View)
+    private val entries = ArrayList<Entry>()
+    private var currentIds = ArrayList<String>()
+    private val says = HashMap<View, () -> String>()        // что озвучить по нажатию
+    private val toggles = HashMap<View, () -> Unit>()       // что делает долгое нажатие
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density + 0.5f).toInt()
 
@@ -67,10 +84,13 @@ class ModuleSettingsActivity : Activity() {
         folderId = intent.getStringExtra(EXTRA_FOLDER)
         pendingKey = savedInstanceState?.getString("pending")
 
-        val scroll = ScrollView(this)
+        scroll = ScrollView(this)
         scroll.setBackgroundColor(Color.BLACK)
+        scroll.clipChildren = false
         content = LinearLayout(this)
         content.orientation = LinearLayout.VERTICAL
+        content.clipChildren = false
+        content.clipToPadding = false
         content.setPadding(dp(16), dp(16), dp(16), dp(32))
         scroll.addView(content)
         setContentView(scroll)
@@ -96,6 +116,10 @@ class ModuleSettingsActivity : Activity() {
     private fun build() {
         ui.removeCallbacks(tick)
         monitors.clear()
+        entries.clear()
+        says.clear()
+        toggles.clear()
+        currentIds = ArrayList()
         content.removeAllViews()
         gridRow = null
         val fid = folderId
@@ -158,14 +182,17 @@ class ModuleSettingsActivity : Activity() {
         val plugin = PluginRegistry.find(this, target)
         monitorPlugin = plugin
         val prefs = ModuleStorage.prefs(this, target)
-        header(IconFactory.forModule(this, plugin, target, 192), target,
+        header(IconFactory.forModule(this, plugin, target, 192, false), target,
             plugin?.let { "v" + it.version + "  " + it.description } ?: "Модуль не найден")
 
-        val enabled = switchRow("⏻ Модуль включён", "Выключенный модуль не запускается", ModuleStorage.isEnabled(this, target)) { on ->
+        // включатель модуля: тот же логотип без переключателя; место в списке не меняется
+        val enabled = switchTile("⏻ Модуль включён", "Выключенный модуль не запускается",
+            ModuleStorage.isEnabled(this, target), 72) { on ->
             ModuleStorage.setEnabled(this, target, on)
             CoreAccessibilityService.instance?.refreshPlugins()
         }
-        content.addView(enabled)
+        addCompact(enabled, 4)
+        attach(enabled, null, { speak(says[enabled]?.invoke() ?: "") }, toggles[enabled])
 
         val schema = try {
             (plugin as? ISettingsProvider)?.getSettingsSchema() ?: emptyList()
@@ -173,10 +200,13 @@ class ModuleSettingsActivity : Activity() {
             emptyList()
         }
         if (schema.isEmpty()) {
+            flushGrid()
             content.addView(hint("У этого модуля нет своих настроек"))
             return
         }
-        for (item in schema) addItem(item, prefs)
+        val sorted = sortSchema(schema, prefs)
+        currentIds = ArrayList(sorted.map { idOf(it) })
+        for (item in sorted) addItem(item, prefs)
         flushGrid()
     }
 
@@ -188,7 +218,7 @@ class ModuleSettingsActivity : Activity() {
             return
         }
         val custom = ModuleStorage.imagePath(this, target, ModuleStorage.KEY_ICON)
-        val icon = custom?.let { ModuleStorage.loadBitmap(it, 192) } ?: IconFactory.monogram(node.name.ifEmpty { "Папка" }, 192)
+        val icon = custom?.let { ModuleStorage.loadBitmap(it, 192) } ?: IconFactory.monogram(node.name.ifEmpty { "Папка" }, 192, false)
         header(icon, node.name.ifEmpty { "Папка" }, "Модулей в папке: " + node.items.size)
 
         content.addView(valueRow("✏️ Название папки", "", node.name.ifEmpty { "не задано" }) {
@@ -213,10 +243,8 @@ class ModuleSettingsActivity : Activity() {
         row.gravity = Gravity.CENTER_VERTICAL
         val iv = ImageView(this)
         iv.setImageBitmap(icon)
-        iv.setBackgroundColor(Color.rgb(26, 26, 26))
-        iv.setPadding(dp(8), dp(8), dp(8), dp(8))
         iv.setOnClickListener { speak("$title. $subtitle") }
-        row.addView(iv, LinearLayout.LayoutParams(dp(80), dp(80)))
+        row.addView(iv, LinearLayout.LayoutParams(dp(96), dp(96)))
         row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         row.addView(smallBtn("🖼") { pickImage(ModuleStorage.KEY_ICON) })
         row.addView(smallBtn("↺") {
@@ -226,9 +254,225 @@ class ModuleSettingsActivity : Activity() {
         content.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
     }
 
+    // ------------------------------------------------------------ порядок настроек
+
+    private fun idOf(item: SettingItem): String = if (item.key.isEmpty()) "sec:" + item.title else item.key
+
+    /** Применяет сохранённый порядок; новые настройки встают после своей предыдущей соседки по схеме модуля. */
+    private fun sortSchema(schema: List<SettingItem>, prefs: SharedPreferences): List<SettingItem> {
+        val saved = (prefs.getString(ORDER_KEY, "") ?: "").split('\n').filter { it.isNotEmpty() }
+        if (saved.isEmpty()) return schema
+        val pos = HashMap<String, Int>()
+        saved.forEachIndexed { i, s -> if (!pos.containsKey(s)) pos[s] = i }
+        val result = ArrayList<SettingItem>(schema.filter { pos.containsKey(idOf(it)) }.sortedBy { pos[idOf(it)] ?: 0 })
+        for ((i, item) in schema.withIndex()) {
+            if (pos.containsKey(idOf(item))) continue
+            var at = 0
+            var j = i - 1
+            while (j >= 0) {
+                val k = result.indexOf(schema[j])
+                if (k >= 0) {
+                    at = k + 1
+                    break
+                }
+                j--
+            }
+            result.add(at, item)
+        }
+        return result
+    }
+
+    private fun moveItem(id: String, targetId: String) {
+        val ids = ArrayList(currentIds)
+        val from = ids.indexOf(id)
+        val to = ids.indexOf(targetId)
+        if (from < 0 || to < 0 || from == to) return
+        ids.removeAt(from)
+        val t = ids.indexOf(targetId)
+        ids.add(if (from < to) t + 1 else t, id)
+        ModuleStorage.prefs(this, target).edit().putString(ORDER_KEY, ids.joinToString("\n")).apply()
+        ui.post { build() }
+    }
+
+    private fun findTarget(x: Float, y: Float, selfId: String?): Entry? {
+        var best: Entry? = null
+        var bestD = dp(40).toFloat()
+        val loc = IntArray(2)
+        for (e in entries) {
+            if (e.id == selfId) continue
+            e.view.getLocationOnScreen(loc)
+            val l = loc[0].toFloat()
+            val t = loc[1].toFloat()
+            val r = l + e.view.width
+            val b = t + e.view.height
+            val dx = maxOf(l - x, 0f, x - r)
+            val dy = maxOf(t - y, 0f, y - b)
+            val d = Math.hypot(dx.toDouble(), dy.toDouble()).toFloat()
+            if (d < bestD) {
+                bestD = d
+                best = e
+            }
+        }
+        return best
+    }
+
+    // ------------------------------------------------------------ жесты: тап, долгое нажатие, перетаскивание
+
+    /**
+     * Тап — озвучить. Долгое нажатие без движения (срабатывает при отпускании) — [onLong], например переключить.
+     * Долгое нажатие и движение пальцем — перетащить строку на место другой (если [id] задан).
+     */
+    private inner class Gesture(
+        val row: View,
+        val id: String?,
+        val onTap: () -> Unit,
+        val onLong: (() -> Unit)?
+    ) : View.OnTouchListener {
+        private var downX = 0f
+        private var downY = 0f
+        private var lastX = 0f
+        private var lastY = 0f
+        private var startScroll = 0
+        private var grabbed = false
+        private var dragging = false
+        private var hover: Entry? = null
+        private val slop = ViewConfiguration.get(this@ModuleSettingsActivity).scaledTouchSlop
+
+        private val grab = Runnable {
+            grabbed = true
+            row.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            row.parent?.requestDisallowInterceptTouchEvent(true)
+        }
+
+        private val autoScroll = object : Runnable {
+            override fun run() {
+                if (!dragging) return
+                val loc = IntArray(2)
+                scroll.getLocationOnScreen(loc)
+                val dy = when {
+                    lastY < loc[1] + dp(90) -> -dp(10)
+                    lastY > loc[1] + scroll.height - dp(90) -> dp(10)
+                    else -> 0
+                }
+                if (dy != 0) {
+                    scroll.scrollBy(0, dy)
+                    follow()
+                }
+                ui.postDelayed(this, 16)
+            }
+        }
+
+        private fun moved(): Boolean =
+            Math.hypot((lastX - downX).toDouble(), (lastY - downY).toDouble()) > slop
+
+        private fun follow() {
+            row.translationX = lastX - downX
+            row.translationY = lastY - downY + (scroll.scrollY - startScroll)
+            val t = findTarget(lastX, lastY, id)
+            if (t?.view !== hover?.view) {
+                hover?.view?.let { it.scaleX = 1f; it.scaleY = 1f }
+                hover = t
+                hover?.view?.let { it.scaleX = 1.12f; it.scaleY = 1.12f }
+            }
+        }
+
+        private fun finishDrag(drop: Boolean) {
+            row.scaleX = 1f
+            row.scaleY = 1f
+            row.translationX = 0f
+            row.translationY = 0f
+            row.translationZ = 0f
+            hover?.view?.let { it.scaleX = 1f; it.scaleY = 1f }
+            val t = hover
+            hover = null
+            dragging = false
+            val me = id
+            if (drop && t != null && me != null) moveItem(me, t.id)
+        }
+
+        override fun onTouch(v: View, e: MotionEvent): Boolean {
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = e.rawX
+                    downY = e.rawY
+                    lastX = downX
+                    lastY = downY
+                    grabbed = false
+                    dragging = false
+                    startScroll = scroll.scrollY
+                    ui.postDelayed(grab, ViewConfiguration.getLongPressTimeout().toLong())
+                    return true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    lastX = e.rawX
+                    lastY = e.rawY
+                    if (!grabbed) {
+                        // палец ушёл до долгого нажатия: это прокрутка списка, ScrollView заберёт жест сам
+                        if (moved()) ui.removeCallbacks(grab)
+                        return true
+                    }
+                    if (!dragging && id != null && moved()) {
+                        dragging = true
+                        row.scaleX = 1.15f
+                        row.scaleY = 1.15f
+                        row.translationZ = dp(8).toFloat()
+                        ui.post(autoScroll)
+                    }
+                    if (dragging) follow()
+                    return true
+                }
+                MotionEvent.ACTION_UP -> {
+                    ui.removeCallbacks(grab)
+                    ui.removeCallbacks(autoScroll)
+                    when {
+                        dragging -> finishDrag(true)
+                        grabbed -> onLong?.invoke()
+                        else -> onTap()
+                    }
+                    grabbed = false
+                    return true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    ui.removeCallbacks(grab)
+                    ui.removeCallbacks(autoScroll)
+                    if (dragging) finishDrag(false)
+                    grabbed = false
+                    return true
+                }
+            }
+            return false
+        }
+    }
+
+    /** Вешает жесты на строку и на её логотип (логотип сам перехватывает касания). */
+    private fun attach(v: View, id: String?, tap: () -> Unit, long: (() -> Unit)?) {
+        val g = Gesture(v, id, tap, long)
+        v.setOnTouchListener(g)
+        if (v is ViewGroup) {
+            for (i in 0 until v.childCount) {
+                val c = v.getChildAt(i)
+                if (c.tag == TAG_LOGO) c.setOnTouchListener(g)
+            }
+        }
+    }
+
+    /** Ставит строку на экран ([per] > 0 — в сетку по [per] в ряд, иначе на всю ширину) и включает жесты. */
+    private fun place(item: SettingItem, v: View, per: Int) {
+        if (per > 0) {
+            addCompact(v, per)
+        } else {
+            flushGrid()
+            content.addView(v)
+        }
+        val id = idOf(item)
+        entries.add(Entry(id, v))
+        if (item.type == SettingItem.CUSTOM || item.type == SettingItem.MONITOR) return
+        attach(v, id, { speak(says[v]?.invoke() ?: plain(item.title)) }, toggles[v])
+    }
+
     // ------------------------------------------------------------ логотипы и озвучка
-    // Экран настроек без текста: у каждой настройки логотип и элемент управления. Текст настройки
-    // озвучивается по нажатию на логотип. Логотип берётся из эмодзи в начале заголовка, иначе это монограмма.
+    // Экран настроек без текста: у каждой настройки логотип (крупный, без рамки) и элемент управления.
+    // Текст настройки озвучивается по нажатию. Логотип берётся из эмодзи в начале заголовка, иначе это монограмма.
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
@@ -270,21 +514,18 @@ class ModuleSettingsActivity : Activity() {
         if (logo != null) {
             val tv = TextView(this)
             tv.text = logo
-            tv.textSize = sizeDp * 0.5f
+            tv.textSize = sizeDp * 0.55f
             tv.gravity = Gravity.CENTER
             tv.setTextColor(Color.WHITE)
-            val bg = GradientDrawable()
-            bg.setColor(Color.rgb(34, 34, 34))
-            bg.setStroke(dp(1), Color.GRAY)
-            bg.cornerRadius = dp(12).toFloat()
-            tv.background = bg
             v = tv
         } else {
             val iv = ImageView(this)
-            iv.setImageBitmap(IconFactory.monogram(plain(title), 128))
+            iv.setImageBitmap(IconFactory.monogram(plain(title), 160, false))
             iv.setPadding(dp(4), dp(4), dp(4), dp(4))
             v = iv
         }
+        v.tag = TAG_LOGO
+        v.minimumHeight = dp(sizeDp)
         v.layoutParams = LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp))
         v.contentDescription = plain(title)
         v.setOnClickListener { speak(say()) }
@@ -296,7 +537,8 @@ class ModuleSettingsActivity : Activity() {
         val c = card()
         c.orientation = LinearLayout.HORIZONTAL
         c.gravity = Gravity.CENTER_VERTICAL
-        c.addView(logoView(title, 52, say))
+        c.addView(logoView(title, 56, say))
+        says[c] = say
         return c
     }
 
@@ -318,10 +560,11 @@ class ModuleSettingsActivity : Activity() {
         row.orientation = LinearLayout.HORIZONTAL
         row.gravity = Gravity.CENTER_VERTICAL
         row.setPadding(dp(4), dp(14), dp(4), dp(4))
-        row.addView(logoView(title, 32) { plain(title) })
+        row.addView(logoView(title, 40) { plain(title) })
         val line = View(this)
         line.setBackgroundColor(Color.DKGRAY)
         row.addView(line, LinearLayout.LayoutParams(0, dp(1), 1f).apply { leftMargin = dp(10) })
+        says[row] = { plain(title) }
         return row
     }
 
@@ -341,25 +584,50 @@ class ModuleSettingsActivity : Activity() {
         return c
     }
 
+    /**
+     * Включатель без переключателя: только крупный логотип. Включено — логотип яркий, выключено — тусклый.
+     * Нажатие озвучивает название и состояние, долгое нажатие переключает.
+     */
+    private fun switchTile(title: String, summary: String, checked: Boolean, sizeDp: Int, onChange: (Boolean) -> Unit): View {
+        var state = checked
+        val say: () -> String = {
+            plain(title) + (if (summary.isNotEmpty()) ". $summary" else "") +
+                ". " + (if (state) "Включено" else "Выключено")
+        }
+        val tile = logoView(title, sizeDp, say)
+        tile.alpha = if (state) 1f else 0.25f
+        says[tile] = say
+        toggles[tile] = {
+            state = !state
+            tile.alpha = if (state) 1f else 0.25f
+            onChange(state)
+            speak(plain(title) + ". " + (if (state) "Включено" else "Выключено"))
+        }
+        return tile
+    }
+
     // ------------------------------------------------------------ сетка
-    // Переключатели, кнопки, выбор и текст идут по две в ряд (меньше прокручивать); ползунки, картинки,
+    // Включатели идут по четыре в ряд (только логотипы), кнопки, выбор и текст — по две; ползунки, картинки,
     // секции и виды модуля занимают всю строку.
 
     private var gridRow: LinearLayout? = null
+    private var gridPer = 2
 
     private fun flushGrid() {
-        gridRow?.let { if (it.childCount == 1) it.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f)) }
+        gridRow?.let { while (it.childCount < gridPer) it.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f)) }
         gridRow = null
     }
 
-    private fun addCompact(v: View) {
+    private fun addCompact(v: View, per: Int = 2) {
         var row = gridRow
-        if (row == null || row.childCount >= 2) {
+        if (row == null || gridPer != per || row.childCount >= per) {
             flushGrid()
             row = LinearLayout(this)
             row.orientation = LinearLayout.HORIZONTAL
+            row.clipChildren = false
             content.addView(row, LinearLayout.LayoutParams(-1, -2))
             gridRow = row
+            gridPer = per
         }
         v.layoutParams = LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) }
         row.addView(v)
@@ -369,23 +637,19 @@ class ModuleSettingsActivity : Activity() {
 
     private fun addItem(item: SettingItem, prefs: SharedPreferences) {
         when (item.type) {
-            SettingItem.SECTION -> {
-                flushGrid()
-                content.addView(sectionRow(item.title))
-            }
-            SettingItem.SWITCH -> addCompact(
-                switchRow(item.title, item.summary, prefs.getBoolean(item.key, item.defInt == 1)) { on ->
+            SettingItem.SECTION -> place(item, sectionRow(item.title), 0)
+            SettingItem.SWITCH -> place(
+                item,
+                switchTile(item.title, item.summary, prefs.getBoolean(item.key, item.defInt == 1), 72) { on ->
                     prefs.edit().putBoolean(item.key, on).apply()
                     notifyModule(item.key)
-                }
+                },
+                4
             )
-            SettingItem.SLIDER -> {
-                flushGrid()
-                content.addView(sliderRow(item, prefs))
-            }
+            SettingItem.SLIDER -> place(item, sliderRow(item, prefs), 0)
             SettingItem.CHOICE -> {
                 val current = prefs.getInt(item.key, item.defInt).coerceIn(0, maxOf(0, item.options.size - 1))
-                addCompact(valueRow(item.title, item.summary, item.options.getOrElse(current) { "" }, true) {
+                place(item, valueRow(item.title, item.summary, item.options.getOrElse(current) { "" }, true) {
                     AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                         .setTitle(plain(item.title))
                         .setItems(item.options.toTypedArray()) { _, which ->
@@ -393,58 +657,51 @@ class ModuleSettingsActivity : Activity() {
                             notifyModule(item.key)
                             build()
                         }.show()
-                })
+                }, 2)
             }
             SettingItem.TEXT -> {
                 val cur = prefs.getString(item.key, item.defStr) ?: item.defStr
-                addCompact(valueRow(item.title, item.summary, cur, true) {
+                place(item, valueRow(item.title, item.summary, cur, true) {
                     askText(plain(item.title), cur) { value ->
                         prefs.edit().putString(item.key, value).apply()
                         notifyModule(item.key)
                         build()
                     }
-                })
+                }, 2)
             }
-            SettingItem.IMAGE -> {
-                flushGrid()
-                content.addView(imageRow(item))
-            }
-            SettingItem.APP_IMAGES -> addCompact(valueRow(item.title, item.summary, "", true) {
+            SettingItem.IMAGE -> place(item, imageRow(item), 0)
+            SettingItem.APP_IMAGES -> place(item, valueRow(item.title, item.summary, "", true) {
                 startActivity(
                     Intent(this, AppImagesActivity::class.java)
                         .putExtra(AppImagesActivity.EXTRA_MODULE, target)
                         .putExtra(AppImagesActivity.EXTRA_KEY, item.key)
                 )
-            })
+            }, 2)
             SettingItem.APP_PICKER -> {
                 val cur = prefs.getString(item.key, item.defStr) ?: item.defStr
-                addCompact(valueRow(item.title, item.summary, pickerSummary(cur, ""), true) {
+                place(item, valueRow(item.title, item.summary, pickerSummary(cur, ""), true) {
                     pickApps(item, prefs)
-                })
+                }, 2)
             }
-            SettingItem.MONITOR -> {
-                flushGrid()
-                content.addView(monitorRow(item))
-            }
+            SettingItem.MONITOR -> place(item, monitorRow(item), 0)
             SettingItem.CUSTOM -> {
-                flushGrid()
                 (monitorPlugin as? ISettingsViewProvider)?.let { provider ->
-                    try {
-                        // вид модуля на всю ширину экрана: отступы списка (16 dp) компенсируются отрицательными полями
-                        content.clipToPadding = false
-                        val lp = LinearLayout.LayoutParams(
-                            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-                        ).apply { setMargins(-dp(16), 0, -dp(16), 0) }
-                        content.addView(provider.createSettingsView(this, item.key), lp)
+                    val view: View = try {
+                        provider.createSettingsView(this, item.key)
                     } catch (t: Throwable) {
-                        content.addView(hint("Не удалось построить вид: " + t.message))
+                        hint("Не удалось построить вид: " + t.message)
                     }
+                    // вид модуля на всю ширину экрана: отступы списка (16 dp) компенсируются отрицательными полями
+                    view.layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { setMargins(-dp(16), 0, -dp(16), 0) }
+                    place(item, view, 0)
                 }
             }
-            SettingItem.ACTION -> addCompact(valueRow(item.title, item.summary, "", true) {
+            SettingItem.ACTION -> place(item, valueRow(item.title, item.summary, "", true) {
                 notifyModule(item.key)
                 Toast.makeText(this, "Готово", Toast.LENGTH_SHORT).show()
-            })
+            }, 2)
         }
     }
 
@@ -579,21 +836,6 @@ class ModuleSettingsActivity : Activity() {
         col.addView(text(title, 17f, Color.WHITE, false))
         if (summary.isNotEmpty()) col.addView(text(summary, 13f, Color.LTGRAY, false))
         return col
-    }
-
-    private fun switchRow(title: String, summary: String, checked: Boolean, onChange: (Boolean) -> Unit): View {
-        lateinit var sw: Switch
-        val c = iconCard(title) {
-            plain(title) + (if (summary.isNotEmpty()) ". $summary" else "") +
-                ". " + (if (sw.isChecked) "Включено" else "Выключено")
-        }
-        sw = Switch(this)
-        sw.isChecked = checked
-        sw.setOnCheckedChangeListener { _, on -> onChange(on) }
-        c.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-        c.addView(sw)
-        c.setOnClickListener { sw.toggle() }
-        return c
     }
 
     private fun button(label: String, onClick: () -> Unit): TextView {

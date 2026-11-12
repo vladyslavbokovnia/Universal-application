@@ -11,21 +11,25 @@ import android.graphics.Typeface
 /** Значки модулей для экрана модулей и экрана настроек. */
 object IconFactory {
 
-    /** Запасной значок: буква в скруглённом квадрате. */
-    fun monogram(name: String, px: Int): Bitmap {
+    /** Запасной значок: буква в скруглённом квадрате; при framed = false — одна крупная буква без рамки. */
+    @JvmOverloads
+    fun monogram(name: String, px: Int, framed: Boolean = true): Bitmap {
         val bmp = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
         val c = Canvas(bmp)
         val p = Paint(Paint.ANTI_ALIAS_FLAG)
-        val stroke = px * 0.045f
-        p.style = Paint.Style.STROKE
-        p.strokeWidth = stroke
-        p.color = Color.WHITE
-        val r = RectF(stroke, stroke, px - stroke, px - stroke)
-        c.drawRoundRect(r, px * 0.22f, px * 0.22f, p)
+        if (framed) {
+            val stroke = px * 0.045f
+            p.style = Paint.Style.STROKE
+            p.strokeWidth = stroke
+            p.color = Color.WHITE
+            val r = RectF(stroke, stroke, px - stroke, px - stroke)
+            c.drawRoundRect(r, px * 0.22f, px * 0.22f, p)
+        }
         p.style = Paint.Style.FILL
+        p.color = Color.WHITE
         p.textAlign = Paint.Align.CENTER
         p.typeface = Typeface.DEFAULT_BOLD
-        p.textSize = px * 0.5f
+        p.textSize = px * (if (framed) 0.5f else 0.85f)
         val fm = p.fontMetrics
         val letter = name.firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "?"
         c.drawText(letter, px / 2f, px / 2f - (fm.ascent + fm.descent) / 2f, p)
@@ -33,7 +37,8 @@ object IconFactory {
     }
 
     /** Порядок выбора: картинка пользователя, значок из модуля, монограмма. */
-    fun forModule(ctx: Context, plugin: IPlugin?, name: String, px: Int): Bitmap {
+    @JvmOverloads
+    fun forModule(ctx: Context, plugin: IPlugin?, name: String, px: Int, framed: Boolean = true): Bitmap {
         val custom = ModuleStorage.imagePath(ctx, name, ModuleStorage.KEY_ICON)
         if (custom != null) ModuleStorage.loadBitmap(custom, px)?.let { return it }
         val own = try {
@@ -41,6 +46,6 @@ object IconFactory {
         } catch (t: Throwable) {
             null
         }
-        return own ?: monogram(name, px)
+        return own ?: monogram(name, px, framed)
     }
 }
