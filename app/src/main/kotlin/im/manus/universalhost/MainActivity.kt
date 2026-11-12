@@ -10,6 +10,7 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
+import android.speech.tts.TextToSpeech
 import android.util.LruCache
 import android.view.Gravity
 import android.view.View
@@ -20,10 +21,13 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Toast
 import java.io.File
+import java.util.Locale
 
 /**
- * Экран модулей: только значки, без подписей. Тап по модулю открывает его настройки,
- * тап по папке открывает папку. Значок можно перетащить: на другой значок — папка.
+ * Экран модулей: только значки, без подписей и рамок.
+ * Тап озвучивает значок, двойной тап открывает (модуль: его окно или настройки, папка: её содержимое),
+ * долгое нажатие без движения включает или выключает модуль (папку: все модули в ней),
+ * долгое нажатие и движение перетаскивает значок: на другой значок — папка.
  *
  * Справа вверху три значка обновления, у каждого свой смысл: «приложение» (APK), «модули» и «скрипты» браузера.
  * Нажатие на значок обновляет именно то, что он обозначает. Индикация: у значка, для которого есть обновление,
@@ -54,6 +58,9 @@ class MainActivity : Activity() {
     private var plugins: List<IPlugin> = emptyList()
     private var cells: List<ModuleLayout.Cell> = emptyList()
     private val bitmaps = LruCache<String, Bitmap>(96)
+
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density + 0.5f).toInt()
 
@@ -126,6 +133,12 @@ class MainActivity : Activity() {
         PermissionGate.next(this)
     }
 
+    override fun onDestroy() {
+        tts?.shutdown()
+        tts = null
+        super.onDestroy()
+    }
+
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         if (currentFolder != null) leaveFolder() else super.onBackPressed()
@@ -134,6 +147,32 @@ class MainActivity : Activity() {
     private fun leaveFolder() {
         currentFolder = null
         render()
+    }
+
+    private fun speak(text: String) {
+        val s = text.trim()
+        if (s.isEmpty()) return
+        val t = tts
+        if (t == null) {
+            tts = TextToSpeech(applicationContext) { st ->
+                if (st == TextToSpeech.SUCCESS) {
+                    tts?.language = Locale("ru", "RU")
+                    ttsReady = true
+                    tts?.speak(s, TextToSpeech.QUEUE_FLUSH, null, "cell")
+                }
+            }
+        } else if (ttsReady) {
+            t.speak(s, TextToSpeech.QUEUE_FLUSH, null, "cell")
+        }
+    }
+
+    /** Что озвучивается для значка: имя модуля и состояние; для папки её название и число модулей. */
+    private fun cellLabel(c: ModuleLayout.Cell): String {
+        val on = c.members.any { ModuleStorage.isEnabled(this, it) }
+        val state = if (on) "Включён" else "Выключен"
+        if (!c.isFolder) return c.id + ". " + state
+        val name = layoutModel.folder(c.id)?.name.orEmpty().ifEmpty { "без названия" }
+        return "Папка " + name + ". Модулей: " + c.members.size + ". " + state
     }
 
     /** Модуль с главным окном (список, плеер) открывается им отдельной карточкой; остальные: экраном настроек. */
@@ -327,7 +366,7 @@ class MainActivity : Activity() {
     private fun cachedFile(path: String): Bitmap? {
         val key = "f:" + path + ":" + File(path).lastModified()
         bitmaps.get(key)?.let { return it }
-        val b = ModuleStorage.loadBitmap(path, 192) ?: return null
+        val b = ModuleStorage.loadBitmap(path, 256) ?: return null
         bitmaps.put(key, b)
         return b
     }
@@ -337,7 +376,7 @@ class MainActivity : Activity() {
         if (custom != null) cachedFile(custom)?.let { return it }
         val key = "g:$name"
         bitmaps.get(key)?.let { return it }
-        val b = IconFactory.forModule(this, plugins.firstOrNull { it.name == name }, name, 192)
+        val b = IconFactory.forModule(this, plugins.firstOrNull { it.name == name }, name, 256, false)
         bitmaps.put(key, b)
         return b
     }
@@ -345,12 +384,28 @@ class MainActivity : Activity() {
     private val gridListener = object : ModuleGridView.Listener {
         override fun onTap(index: Int) {
             val c = cells.getOrNull(index) ?: return
+            speak(cellLabel(c))
+        }
+
+        override fun onDoubleTap(index: Int) {
+            val c = cells.getOrNull(index) ?: return
             if (c.isFolder) {
                 currentFolder = c.id
                 render()
             } else {
                 openModule(c.id)
             }
+        }
+
+        override fun onLongPress(index: Int) {
+            val c = cells.getOrNull(index) ?: return
+            // папка: если включён хоть один модуль, выключаем все, иначе включаем все
+            val turnOn = !c.members.any { ModuleStorage.isEnabled(this@MainActivity, it) }
+            for (m in c.members) ModuleStorage.setEnabled(this@MainActivity, m, turnOn)
+            CoreAccessibilityService.instance?.refreshPlugins()
+            render()
+            val what = if (c.isFolder) "Папка " + (layoutModel.folder(c.id)?.name.orEmpty().ifEmpty { "без названия" }) else c.id
+            speak(what + ". " + if (turnOn) "Включён" else "Выключен")
         }
 
         override fun onReorder(from: Int, to: Int) {
