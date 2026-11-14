@@ -4,22 +4,8 @@ import android.content.Context;
 import android.media.MediaScannerConnection;
 import android.net.Network;
 
-import org.schabi.newpipe.extractor.Image;
-import org.schabi.newpipe.extractor.MediaFormat;
-import org.schabi.newpipe.extractor.NewPipe;
-import org.schabi.newpipe.extractor.ServiceList;
-import org.schabi.newpipe.extractor.downloader.Downloader;
-import org.schabi.newpipe.extractor.downloader.Request;
-import org.schabi.newpipe.extractor.downloader.Response;
-import org.schabi.newpipe.extractor.exceptions.ReCaptchaException;
-import org.schabi.newpipe.extractor.localization.ContentCountry;
-import org.schabi.newpipe.extractor.localization.Localization;
-import org.schabi.newpipe.extractor.services.youtube.YoutubeParsingHelper;
-import org.schabi.newpipe.extractor.stream.AudioStream;
-import org.schabi.newpipe.extractor.stream.DeliveryMethod;
-import org.schabi.newpipe.extractor.stream.StreamInfo;
+import im.manus.universalhost.dep.YtExtractor;
 
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -32,12 +18,13 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Set;
-import java.util.zip.GZIPInputStream;
 
 /**
  * Скачивание аудиодорожки YouTube нужного языка через NewPipeExtractor (его же использует приложение NewPipe).
+ * Сам извлекатель больше не в хосте: он лежит в зависимости dep-newpipe.apk (см. {@link Deps}), хост общается с ним через
+ * {@link YtExtractor}, а разбор дорожек, выбор нужной и сама загрузка остались здесь. Если зависимости ещё нет
+ * на устройстве, она скачивается из релиза перед первой загрузкой (через ту же сеть, что и дорожка).
  * Модули (YouTubeAudio) вызывают {@link #start}: всё идёт в фоновом потоке, итог приходит в {@link Listener}.
  * Рядом с аудиофайлом кладётся превью: то же имя, расширение .jpg (его показывает плеер).
  * Публичные сигнатуры только на типах JDK и Android, чтобы модуль (dex) компилировался без библиотеки.
@@ -55,11 +42,10 @@ public final class YtAudioBridge {
     private static final String FIREFOX_UA =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:153.0) Gecko/20100101 Firefox/153.0";
     private static final int CHUNK = 4 * 1024 * 1024;
+    private static final String IMPL = "im.manus.deps.NewPipeImpl";
 
     /** Какую дорожку брать: любую русскую, только оригинал или только дубляж YouTube. */
     public static final int MODE_ANY = 0, MODE_ORIGINAL = 1, MODE_DUBBED = 2;
-
-    private static boolean inited;
 
     /** Сеть, через которую качает текущий поток (null: по умолчанию). Нужна для режима «только Wi-Fi». */
     private static final ThreadLocal<Network> NET = new ThreadLocal<Network>();
@@ -68,6 +54,19 @@ public final class YtAudioBridge {
         URL url = new URL(u);
         Network n = NET.get();
         return (HttpURLConnection) (n != null ? n.openConnection(url) : url.openConnection());
+    }
+
+    /** Для зависимости: открывает соединение в том же потоке через выбранную сеть. */
+    private static final YtExtractor.Opener OPENER = new YtExtractor.Opener() {
+        @Override public HttpURLConnection open(String url) throws IOException {
+            return YtAudioBridge.open(url);
+        }
+    };
+
+    /** Извлекатель из dep-newpipe.apk; если файла ещё нет, скачивает его из релиза. */
+    private static YtExtractor extractor(Context ctx) throws Exception {
+        Deps.ensure(ctx, Deps.NEWPIPE, NET.get());
+        return Deps.create(ctx, Deps.NEWPIPE, IMPL, YtExtractor.class);
     }
 
     /** Ошибка связана с сетью (нет сети, обрыв, таймаут): такую загрузку стоит поставить в очередь. */
@@ -120,40 +119,31 @@ public final class YtAudioBridge {
         UserError(String m) { super(m); }
     }
 
-    private static synchronized void ensureInit() {
-        if (inited) return;
-        NewPipe.init(new Dl(), Localization.DEFAULT, ContentCountry.DEFAULT);
-        inited = true;
-    }
-
-    private static boolean sameLang(AudioStream s, String lang) {
-        Locale lo = s.getAudioLocale();
-        if (lo != null && lang.equalsIgnoreCase(lo.getLanguage())) return true;
-        String id = s.getAudioTrackId();
+    private static boolean sameLang(YtExtractor.Audio s, String lang) {
+        if (s.lang != null && lang.equalsIgnoreCase(s.lang)) return true;
+        String id = s.trackId;
         return id != null && id.toLowerCase(Locale.ROOT).startsWith(lang.toLowerCase(Locale.ROOT) + ".");
     }
 
-    private static boolean isOriginal(AudioStream s) {
-        return s.getAudioTrackType() == org.schabi.newpipe.extractor.stream.AudioTrackType.ORIGINAL;
+    private static boolean isOriginal(YtExtractor.Audio s) {
+        return "ORIGINAL".equals(s.trackType);
     }
 
     /** Подходит ли дорожка выбранному режиму: тип null (единственная дорожка) считается оригиналом. */
-    private static boolean modeFits(AudioStream s, int mode) {
-        org.schabi.newpipe.extractor.stream.AudioTrackType t = s.getAudioTrackType();
-        if (mode == MODE_ORIGINAL) return t == null || t == org.schabi.newpipe.extractor.stream.AudioTrackType.ORIGINAL;
-        if (mode == MODE_DUBBED) return t == org.schabi.newpipe.extractor.stream.AudioTrackType.DUBBED;
+    private static boolean modeFits(YtExtractor.Audio s, int mode) {
+        String t = s.trackType;
+        if (mode == MODE_ORIGINAL) return t == null || "ORIGINAL".equals(t);
+        if (mode == MODE_DUBBED) return "DUBBED".equals(t);
         return true;
     }
 
     /** Лучший по формату (M4A предпочтительнее: его индексирует медиатека) и битрейту. */
-    private static AudioStream best(List<AudioStream> list) {
-        AudioStream b = null;
-        for (AudioStream s : list) {
+    private static YtExtractor.Audio best(List<YtExtractor.Audio> list) {
+        YtExtractor.Audio b = null;
+        for (YtExtractor.Audio s : list) {
             if (b == null) { b = s; continue; }
-            boolean sm = s.getFormat() == MediaFormat.M4A;
-            boolean bm = b.getFormat() == MediaFormat.M4A;
-            if (sm && !bm) b = s;
-            else if (sm == bm && s.getAverageBitrate() > b.getAverageBitrate()) b = s;
+            if (s.m4a && !b.m4a) b = s;
+            else if (s.m4a == b.m4a && s.bitrate > b.bitrate) b = s;
         }
         return b;
     }
@@ -162,49 +152,44 @@ public final class YtAudioBridge {
                               boolean fallbackOriginal, int mode, Listener l) throws Exception {
         if (lang == null || lang.trim().length() == 0) lang = "ru";
         lang = lang.trim();
-        ensureInit();
+        YtExtractor ex = extractor(ctx);
         l.onStatus("🎧 Ищу дорожки…");
-        StreamInfo info = StreamInfo.getInfo(ServiceList.YouTube, url);
+        YtExtractor.Video info = ex.fetch(url, OPENER);
 
-        List<AudioStream> all = new ArrayList<AudioStream>();
-        for (AudioStream s : info.getAudioStreams()) {
-            if (s.isUrl() && s.getDeliveryMethod() == DeliveryMethod.PROGRESSIVE_HTTP) all.add(s);
-        }
+        List<YtExtractor.Audio> all = new ArrayList<YtExtractor.Audio>(info.audio);
         if (all.isEmpty()) throw new UserError("Нет доступных аудиопотоков");
 
-        List<AudioStream> wanted = new ArrayList<AudioStream>();
+        List<YtExtractor.Audio> wanted = new ArrayList<YtExtractor.Audio>();
         Set<String> langs = new LinkedHashSet<String>();
-        for (AudioStream s : all) {
-            Locale lo = s.getAudioLocale();
-            if (lo != null) langs.add(lo.getDisplayLanguage(new Locale("ru")));
+        for (YtExtractor.Audio s : all) {
+            if (s.lang != null) langs.add(new Locale(s.lang).getDisplayLanguage(new Locale("ru")));
             if (sameLang(s, lang) && modeFits(s, mode)) wanted.add(s);
         }
         if (wanted.isEmpty() && mode != MODE_DUBBED && looksLike(info, lang)) {
             // единственная дорожка (язык в потоках не указан) или оригинал: язык видео совпал по тексту
             Set<String> ids = new HashSet<String>();
-            for (AudioStream s : all) ids.add(s.getAudioTrackId() == null ? "" : s.getAudioTrackId());
+            for (YtExtractor.Audio s : all) ids.add(s.trackId == null ? "" : s.trackId);
             if (ids.size() <= 1) wanted.addAll(all);
-            else for (AudioStream s : all) {
-                Locale lo = s.getAudioLocale();
+            else for (YtExtractor.Audio s : all) {
                 // оригинал с известным другим языком русским не считается
-                if (isOriginal(s) && (lo == null || lang.equalsIgnoreCase(lo.getLanguage()))) wanted.add(s);
+                if (isOriginal(s) && (s.lang == null || lang.equalsIgnoreCase(s.lang))) wanted.add(s);
             }
         }
         boolean original = false;
-        AudioStream pick = best(wanted);
+        YtExtractor.Audio pick = best(wanted);
         if (pick == null) {
             if (!fallbackOriginal) {
                 throw new UserError("Нет дорожки «" + lang + "»" + (langs.isEmpty() ? " (единственная дорожка не русская)"
                         : ". Есть: " + join(langs)));
             }
-            List<AudioStream> orig = new ArrayList<AudioStream>();
-            for (AudioStream s : all) if (isOriginal(s) || s.getAudioLocale() == null) orig.add(s);
+            List<YtExtractor.Audio> orig = new ArrayList<YtExtractor.Audio>();
+            for (YtExtractor.Audio s : all) if (isOriginal(s) || s.lang == null) orig.add(s);
             pick = best(orig.isEmpty() ? all : orig);
             original = true;
         }
 
-        String ext = pick.getFormat() != null ? pick.getFormat().getSuffix() : "m4a";
-        String name = safeName(title != null && title.trim().length() > 0 ? title : info.getName());
+        String ext = pick.suffix != null ? pick.suffix : "m4a";
+        String name = safeName(title != null && title.trim().length() > 0 ? title : info.title);
         if (original) name = name + " (оригинал)";
         File dir = new File(outDir);
         if (!dir.exists() && !dir.mkdirs()) throw new UserError("Не создать папку " + dir);
@@ -215,7 +200,7 @@ public final class YtAudioBridge {
         l.onStatus("⬇ Качаю" + (original ? " оригинал" : "") + "…");
         File part = new File(dir, base + ".part");
         try {
-            download(pick.getContent(), part, l);
+            download(ex, pick.url, part, l);
         } catch (Throwable e) {
             part.delete();
             throw e;
@@ -227,7 +212,7 @@ public final class YtAudioBridge {
 
         File jpg = new File(dir, base + ".jpg");
         try {
-            String th = bestThumb(info.getThumbnails());
+            String th = bestThumb(info.thumbs);
             if (th != null) fetchTo(th, jpg);
         } catch (Throwable ignore) {
             jpg.delete();
@@ -250,29 +235,26 @@ public final class YtAudioBridge {
 
     /** format: "m4a" (по умолчанию) или "webm" (Opus). Если потоков такого формата нет, берётся лучший из остальных. */
     public static File fetchOriginal(Context ctx, String url, File dir, String format) throws Exception {
-        ensureInit();
-        StreamInfo info = StreamInfo.getInfo(ServiceList.YouTube, url);
-        List<AudioStream> all = new ArrayList<AudioStream>();
-        for (AudioStream s : info.getAudioStreams()) {
-            if (s.isUrl() && s.getDeliveryMethod() == DeliveryMethod.PROGRESSIVE_HTTP) all.add(s);
-        }
+        YtExtractor ex = extractor(ctx);
+        YtExtractor.Video info = ex.fetch(url, OPENER);
+        List<YtExtractor.Audio> all = new ArrayList<YtExtractor.Audio>(info.audio);
         if (all.isEmpty()) throw new UserError("Нет доступных аудиопотоков");
-        List<AudioStream> orig = new ArrayList<AudioStream>();
-        for (AudioStream s : all) if (isOriginal(s) || s.getAudioLocale() == null) orig.add(s);
-        List<AudioStream> pool = orig.isEmpty() ? all : orig;
-        AudioStream pick = null;
+        List<YtExtractor.Audio> orig = new ArrayList<YtExtractor.Audio>();
+        for (YtExtractor.Audio s : all) if (isOriginal(s) || s.lang == null) orig.add(s);
+        List<YtExtractor.Audio> pool = orig.isEmpty() ? all : orig;
+        YtExtractor.Audio pick = null;
         if ("webm".equalsIgnoreCase(format)) {
-            for (AudioStream s : pool) {
-                if (s.getFormat() == null || !"webm".equalsIgnoreCase(s.getFormat().getSuffix())) continue;
-                if (pick == null || s.getAverageBitrate() > pick.getAverageBitrate()) pick = s;
+            for (YtExtractor.Audio s : pool) {
+                if (s.suffix == null || !"webm".equalsIgnoreCase(s.suffix)) continue;
+                if (pick == null || s.bitrate > pick.bitrate) pick = s;
             }
         }
         if (pick == null) pick = best(pool);
         if (!dir.exists() && !dir.mkdirs()) throw new UserError("Не создать папку " + dir);
-        String ext = pick.getFormat() != null ? pick.getFormat().getSuffix() : "m4a";
+        String ext = pick.suffix != null ? pick.suffix : "m4a";
         File out = new File(dir, "vot-" + System.currentTimeMillis() + "." + ext);
         try {
-            download(pick.getContent(), out, new Listener() {
+            download(ex, pick.url, out, new Listener() {
                 @Override public void onStatus(String s) { }
                 @Override public void onDone(String audioPath, String error) { }
             });
@@ -285,14 +267,12 @@ public final class YtAudioBridge {
     }
 
     /** Язык видео по тексту (название, канал, начало описания): пока умеем только русский (кириллица без украинских букв). */
-    private static boolean looksLike(StreamInfo info, String lang) {
+    private static boolean looksLike(YtExtractor.Video info, String lang) {
         if (!"ru".equalsIgnoreCase(lang)) return false;
         StringBuilder sb = new StringBuilder();
-        try { sb.append(info.getName()).append(' ').append(info.getUploaderName()).append(' '); } catch (Throwable t) { }
-        try {
-            String d = info.getDescription() == null ? null : info.getDescription().getContent();
-            if (d != null) sb.append(d.length() > 300 ? d.substring(0, 300) : d);
-        } catch (Throwable t) { }
+        sb.append(info.title).append(' ').append(info.uploader).append(' ');
+        String d = info.description;
+        if (d != null) sb.append(d.length() > 300 ? d.substring(0, 300) : d);
         String s = sb.toString();
         int letters = 0, cyr = 0, ukr = 0;
         for (int i = 0; i < s.length(); i++) {
@@ -323,16 +303,16 @@ public final class YtAudioBridge {
     }
 
     /** Самое крупное превью до 720 px по высоте, иначе самое мелкое. */
-    private static String bestThumb(List<Image> imgs) {
+    private static String bestThumb(List<YtExtractor.Thumb> imgs) {
         if (imgs == null || imgs.isEmpty()) return null;
-        Image best = null;
-        Image smallest = null;
-        for (Image im : imgs) {
-            if (smallest == null || im.getHeight() < smallest.getHeight()) smallest = im;
-            if (im.getHeight() <= 720 && (best == null || im.getHeight() > best.getHeight())) best = im;
+        YtExtractor.Thumb best = null;
+        YtExtractor.Thumb smallest = null;
+        for (YtExtractor.Thumb im : imgs) {
+            if (smallest == null || im.height < smallest.height) smallest = im;
+            if (im.height <= 720 && (best == null || im.height > best.height)) best = im;
         }
-        Image r = best != null ? best : smallest;
-        return r == null ? null : r.getUrl();
+        YtExtractor.Thumb r = best != null ? best : smallest;
+        return r == null ? null : r.url;
     }
 
     private static void fetchTo(String url, File f) throws IOException {
@@ -362,7 +342,7 @@ public final class YtAudioBridge {
     }
 
     /** Как плеер NewPipe: POST с телом {0x78, 0}, параметры rn и range в адресе, UA по клиенту потока. */
-    private static void download(String url, File to, Listener l) throws Exception {
+    private static void download(YtExtractor ex, String url, File to, Listener l) throws Exception {
         long total = clen(url);
         boolean playback = new URL(url).getPath().startsWith("/videoplayback");
         OutputStream o = new FileOutputStream(to);
@@ -383,12 +363,9 @@ public final class YtAudioBridge {
                 c.setConnectTimeout(20000);
                 c.setReadTimeout(30000);
                 c.setInstanceFollowRedirects(true);
-                if (YoutubeParsingHelper.isVisionOsStreamingUrl(u)) {
-                    c.setRequestProperty("User-Agent", YoutubeParsingHelper.getVisionOsUserAgent(null));
-                } else {
-                    c.setRequestProperty("User-Agent", FIREFOX_UA);
-                }
-                if (YoutubeParsingHelper.isWebStreamingUrl(u)) {
+                String ua = ex.userAgent(u);
+                c.setRequestProperty("User-Agent", ua != null ? ua : FIREFOX_UA);
+                if (ex.webStreaming(u)) {
                     c.setRequestProperty("Origin", "https://www.youtube.com");
                     c.setRequestProperty("Referer", "https://www.youtube.com");
                     c.setRequestProperty("Sec-Fetch-Dest", "empty");
@@ -431,55 +408,5 @@ public final class YtAudioBridge {
             o.close();
         }
         if (pos == 0) throw new IOException("пустой ответ");
-    }
-
-    /** Запросы самого извлекателя (HttpURLConnection, как у простого загрузчика). */
-    private static final class Dl extends Downloader {
-        @Override public Response execute(Request request) throws IOException, ReCaptchaException {
-            HttpURLConnection c = open(request.url());
-            c.setConnectTimeout(20000);
-            c.setReadTimeout(30000);
-            c.setInstanceFollowRedirects(true);
-            c.setRequestMethod(request.httpMethod());
-            c.setRequestProperty("User-Agent", FIREFOX_UA);
-            Map<String, List<String>> reqHeaders = request.headers();
-            if (reqHeaders == null) reqHeaders = new java.util.HashMap<String, List<String>>();
-            for (Map.Entry<String, List<String>> e : reqHeaders.entrySet()) {
-                List<String> v = e.getValue();
-                if (v == null || v.isEmpty()) continue;
-                StringBuilder sb = new StringBuilder();
-                for (String x : v) {
-                    if (sb.length() > 0) sb.append("Cookie".equalsIgnoreCase(e.getKey()) ? "; " : ", ");
-                    sb.append(x);
-                }
-                c.setRequestProperty(e.getKey(), sb.toString());
-            }
-            byte[] data = request.dataToSend();
-            if (data != null) {
-                c.setDoOutput(true);
-                c.setFixedLengthStreamingMode(data.length);
-                OutputStream o = c.getOutputStream();
-                o.write(data);
-                o.close();
-            }
-            int code = c.getResponseCode();
-            if (code == 429) throw new ReCaptchaException("reCaptcha Challenge requested", request.url());
-            InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();
-            String body = "";
-            if (in != null) {
-                if ("gzip".equalsIgnoreCase(c.getContentEncoding())) in = new GZIPInputStream(in);
-                ByteArrayOutputStream bos = new ByteArrayOutputStream();
-                byte[] buf = new byte[16384];
-                int n;
-                while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
-                in.close();
-                body = bos.toString("UTF-8");
-            }
-            Map<String, List<String>> hs = new java.util.HashMap<String, List<String>>();
-            for (Map.Entry<String, List<String>> e : c.getHeaderFields().entrySet()) {
-                if (e.getKey() != null) hs.put(e.getKey(), e.getValue());
-            }
-            return new Response(code, c.getResponseMessage(), hs, body, c.getURL().toString());
-        }
     }
 }

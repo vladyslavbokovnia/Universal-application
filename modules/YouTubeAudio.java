@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.view.View;
+import im.manus.universalhost.Deps;
 import im.manus.universalhost.IMainViewProvider;
 import im.manus.universalhost.IPlugin;
 import im.manus.universalhost.ISettingsProvider;
@@ -26,6 +27,8 @@ import java.util.Map;
  * Ссылка попадает в список (YtAudioQueue в хосте) и качается автоматически или вручную, как выбрано в настройках.
  * Ролики без русской дорожки остаются в списке со ссылкой. Файл и превью кладутся в Music/YouTube,
  * плеер показывает превью плитками. Модуль только принимает ссылки, описывает настройки и показывает список.
+ * NewPipeExtractor и Uhm лежат не в хосте, а в зависимостях dep-newpipe.apk и dep-uhm.apk (скачиваются из релиза
+ * при первом обращении или кнопкой в разделе «Зависимости» настроек).
  */
 public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvider, IShareHandler {
 
@@ -36,7 +39,7 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvid
     private Context appCtx;
 
     @Override public String getName() { return "YouTube аудио"; }
-    @Override public int getVersion() { return 7; }
+    @Override public int getVersion() { return 8; }
     @Override public String getDescription() {
         return "Один модуль: кнопка 🎧 из скрипта YouTube TTS, список загрузок, перевод Яндекса (живые голоса) и очистка «эээ». "
                 + "Русский оригинал, иначе перевод Яндекса, иначе дубляж YouTube; что не нашлось, остаётся в списке.";
@@ -101,19 +104,30 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvid
         r.add(SettingItem.text("max_dl", "⬇ Одновременных загрузок",
                 "Сколько роликов качается с YouTube сразу (1–10). Перевод Яндекса идёт без ограничения, очистка «эээ» всегда по одной.", "3"));
         r.add(SettingItem.toggle("clean_fillers", "🧹 Вырезать «эээ» из русского оригинала",
-                "Модель Uhm на устройстве. Если она не подключена или нашла слишком много, файл остаётся как есть.", true));
+                "Модель Uhm на устройстве (зависимость dep-uhm, скачивается перед первой очисткой). Если она не скачалась или нашла слишком много, файл остаётся как есть.", true));
         r.add(SettingItem.text("lang", "🌐 Язык дорожки", "Код языка: ru, en, uk.", "ru"));
         r.add(SettingItem.choice("storage", "💾 Куда сохранять",
                 "Память телефона или SD-карта (карта должна быть подключена, приложению нужен доступ ко всем файлам). Если выбрана карта, а её нет, ссылки остаются в списке.",
                 Arrays.asList("📱 Память телефона", "💾 SD-карта"), 0));
         r.add(SettingItem.text("out_dir", "📁 Папка", "Одна папка для оригинала, дубляжа и перевода, внутри выбранного места. Рядом с аудио кладутся превью и ссылка.", "Music/YouTube"));
+        r.add(SettingItem.section("🧩 Зависимости"));
+        r.add(SettingItem.action("dep_newpipe", "🧩 NewPipe (YouTube): " + depState(Deps.NEWPIPE),
+                "Скачать или обновить библиотеку из релиза. Нужна для загрузки дорожек: без неё ссылки ждут в списке. Новая версия вступает сразу."));
+        r.add(SettingItem.action("dep_uhm", "🧩 Uhm («эээ»): " + depState(Deps.UHM),
+                "Скачать или обновить библиотеку из релиза (большой файл, лучше по Wi-Fi). Обновление вступает после перезапуска приложения."));
         r.add(SettingItem.section("🗣 Перевод Яндекса"));
         r.addAll(YtPipeline.votSettings(appCtx));
         return r;
     }
 
+    private String depState(String name) {
+        return appCtx == null ? "" : Deps.state(appCtx, name);
+    }
+
     @Override public void onSettingChanged(String key) {
         if (appCtx == null) return;
+        if ("dep_newpipe".equals(key)) { Deps.updateAsync(appCtx, Deps.NEWPIPE); return; }
+        if ("dep_uhm".equals(key)) { Deps.updateAsync(appCtx, Deps.UHM); return; }
         if (key != null && key.startsWith("vot_")) { YtPipeline.votSettingChanged(appCtx, key); return; }
         if ("auto_mode".equals(key) || "wifi_only".equals(key)) YtAudioQueue.get(appCtx).tryDrain();
     }

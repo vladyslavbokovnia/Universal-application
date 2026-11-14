@@ -8,6 +8,8 @@ import android.media.MediaFormat;
 import android.media.MediaMuxer;
 import android.media.MediaScannerConnection;
 
+import im.manus.universalhost.dep.FillerEngine;
+
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
@@ -17,28 +19,19 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
-
-import kotlin.coroutines.Continuation;
-import kotlin.coroutines.CoroutineContext;
-import kotlin.coroutines.EmptyCoroutineContext;
-import kotlin.coroutines.intrinsics.IntrinsicsKt;
 
 /**
  * Вырезает из аудиофайла паузы-«эээ» (филлеры) моделью Uhm (Desert Ant Labs, на устройстве, без сервера).
  *
- * Модель вызывается через reflection: пока в сборку не добавлена зависимость ai.desertant:uhm, класс просто не найден,
- * и вызов заканчивается понятной ошибкой, а хост собирается как обычно. Её метод detect — suspend-функция Kotlin,
- * поэтому в нужный момент подставляется свой Continuation и поток ждёт результата.
+ * Сама модель больше не в хосте: она лежит в зависимости dep-uhm.apk (см. {@link Deps}) вместе со своей
+ * нативной частью, а хост общается с ней через {@link FillerEngine}. Если зависимости ещё нет на устройстве,
+ * перед первой очисткой она скачивается из релиза (при режиме «только по Wi-Fi» — только по Wi-Fi).
  *
  * Порядок: файл декодируется в сырой PCM (MediaCodec) → моно 16 кГц кусками по 90 с (+2 с нахлёста) уходит в модель →
  * найденные отрезки склеиваются с короткой перекрёстной затухающей склейкой → результат кодируется обратно в AAC (m4a).
@@ -47,7 +40,7 @@ import kotlin.coroutines.intrinsics.IntrinsicsKt;
  */
 public final class FillerCleaner {
 
-    private static final String UHM = "ai.desertant.uhm.Uhm";
+    private static final String IMPL = "im.manus.deps.UhmImpl";
     private static final double CHUNK_SEC = 90;
     private static final double OVERLAP_SEC = 2;
     private static final double MERGE_GAP_SEC = 0.12;
@@ -63,20 +56,19 @@ public final class FillerCleaner {
         public String file;
     }
 
-    /** Модели нет в сборке (не подключена зависимость). */
+    /** Модели нет на устройстве и скачать её сейчас нельзя. */
     public static final class Unavailable extends IOException {
         Unavailable(String m) { super(m); }
     }
 
     private FillerCleaner() { }
 
+    /**
+     * Очистка всегда доступна: если зависимости Uhm (dep-uhm.apk) ещё нет, {@link #clean} скачает её из релиза.
+     * Раньше метод отвечал на вопрос, подключена ли библиотека в сборку.
+     */
     public static boolean available() {
-        try {
-            Class.forName(UHM);
-            return true;
-        } catch (Throwable t) {
-            return false;
-        }
+        return true;
     }
 
     private static final class Pcm {
@@ -86,8 +78,15 @@ public final class FillerCleaner {
 
     /** Чистит файл на месте. Возвращает отчёт; file в нём — путь результата (при count = 0 это исходный файл). */
     public static Report clean(Context ctx, File audio) throws Exception {
-        if (!available()) throw new Unavailable("Модель Uhm не подключена");
         Context app = ctx.getApplicationContext();
+        if (!Deps.installed(app, Deps.UHM)) {
+            // библиотека большая: в режиме «только по Wi-Fi» по мобильной сети не качаем
+            YtAudioQueue q = YtAudioQueue.get(app);
+            if (q.wifiOnly() && q.netKind() != 2) {
+                throw new Unavailable("Нужен Wi-Fi: скачивается библиотека Uhm (dep-uhm)");
+            }
+            Deps.ensure(app, Deps.UHM, null);
+        }
         File work = new File(app.getCacheDir(), "fillers");
         work.mkdirs();
         long stamp = System.nanoTime();
@@ -264,20 +263,10 @@ public final class FillerCleaner {
     }
 
     private static List<double[]> detectAll(Context app, RandomAccessFile raf, Pcm p) throws Exception {
-        Class<?> uhmCls = Class.forName(UHM);
-        Class<?> optCls = Class.forName("ai.desertant.uhm.Options");
-        Class<?> biasCls = Class.forName("ai.desertant.uhm.Bias");
-        @SuppressWarnings({"unchecked", "rawtypes"})
-        Object precision = Enum.valueOf((Class<? extends Enum>) biasCls.asSubclass(Enum.class), "PRECISION");
-        Constructor<?> optCtor = optCls.getConstructor(biasCls, Double.class, Double.class, double.class, boolean.class);
-        Object opts = optCtor.newInstance(precision, null, null, 0.5, false);
-        Constructor<?> uhmCtor = uhmCls.getConstructor(Context.class, String.class);
+        FillerEngine eng = Deps.create(app, Deps.UHM, IMPL, FillerEngine.class);
         String dir = new File(app.getFilesDir(), "uhm").getAbsolutePath();
-        Object uhm = uhmCtor.newInstance(app, dir);
+        eng.open(app, dir);
         try {
-            boolean ready = (Boolean) uhmCls.getMethod("isDownloaded").invoke(uhm);
-            if (!ready) callSuspend(uhmCls.getMethod("download", Continuation.class), uhm);
-            Method detect = uhmCls.getMethod("detect", float[].class, double.class, optCls, List.class, Continuation.class);
             double total = (double) p.frames / p.rate;
             List<double[]> res = new ArrayList<double[]>();
             for (double t0 = 0; t0 < total; t0 += CHUNK_SEC) {
@@ -287,53 +276,15 @@ public final class FillerCleaner {
                 if (n < 8000) { if (t0 > 0) break; else continue; }
                 float[] s = mono16k(raf, p, t0, n);
                 if (s.length < 8000) continue;
-                Object r = callSuspend(detect, uhm, s, 16000.0, opts, null);
-                List<?> fillers = (List<?>) r.getClass().getMethod("getFillers").invoke(r);
-                for (Object f : fillers) {
-                    double st = (Double) f.getClass().getMethod("getStart").invoke(f);
-                    double en = (Double) f.getClass().getMethod("getEnd").invoke(f);
+                for (double[] f : eng.detect(s)) {
+                    double st = f[0], en = f[1];
                     if (last || st < CHUNK_SEC) res.add(new double[]{t0 + st, t0 + en});
                 }
             }
             return res;
         } finally {
-            try { ((AutoCloseable) uhm).close(); } catch (Throwable ignored) { }
+            eng.close();
         }
-    }
-
-    /** Вызывает suspend-функцию Kotlin: подставляет Continuation и ждёт результата. */
-    private static Object callSuspend(Method m, Object target, Object... args) throws Exception {
-        final CountDownLatch latch = new CountDownLatch(1);
-        final Object[] box = new Object[1];
-        Continuation<Object> c = new Continuation<Object>() {
-            @Override public CoroutineContext getContext() { return EmptyCoroutineContext.INSTANCE; }
-
-            @Override public void resumeWith(Object result) {
-                box[0] = result;
-                latch.countDown();
-            }
-        };
-        Object[] full = new Object[args.length + 1];
-        System.arraycopy(args, 0, full, 0, args.length);
-        full[args.length] = c;
-        Object r;
-        try {
-            r = m.invoke(target, full);
-        } catch (InvocationTargetException e) {
-            Throwable t = e.getCause() == null ? e : e.getCause();
-            throw t instanceof Exception ? (Exception) t : new IOException(t.toString());
-        }
-        if (r == IntrinsicsKt.getCOROUTINE_SUSPENDED()) {
-            latch.await();
-            r = box[0];
-        }
-        if (r != null && r.getClass().getName().equals("kotlin.Result$Failure")) {
-            java.lang.reflect.Field f = r.getClass().getDeclaredField("exception");
-            f.setAccessible(true);
-            Throwable t = (Throwable) f.get(r);
-            throw t instanceof Exception ? (Exception) t : new IOException(String.valueOf(t));
-        }
-        return r;
     }
 
     /** Сортирует отрезки и склеивает те, что ближе MERGE_GAP_SEC друг к другу. */

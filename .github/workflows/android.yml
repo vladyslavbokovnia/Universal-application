@@ -33,21 +33,33 @@ jobs:
         set -euo pipefail
         python3 -m pip install --quiet pillow numpy scipy
         python3 ci/make_icon.py
-    # Хэш исходников хоста (без модулей): кладётся в приложение (assets) и в релиз. Приложение сравнивает свой хэш
-    # с хэшем в релизе и по точке у стрелки обновления показывает, нужно ли ставить новый APK.
+    # Хэш исходников хоста (без модулей и без зависимостей dep-newpipe, dep-uhm): кладётся в приложение (assets) и в релиз.
+    # Приложение сравнивает свой хэш с хэшем в релизе и по точке у стрелки обновления показывает, нужно ли ставить новый APK.
+    # dep-api входит в хэш: общие интерфейсы вшиты в хост.
     - name: Stamp host source hash
       shell: bash
       run: |
         set -euo pipefail
         mkdir -p app/src/main/assets
-        git ls-files -z app ci build.gradle settings.gradle gradle.properties \
+        git ls-files -z app dep-api ci build.gradle settings.gradle gradle.properties \
           | xargs -0 sha256sum | sha256sum | cut -d' ' -f1 | tr -d '\n' > host_hash.txt
         cp host_hash.txt app/src/main/assets/host_hash.txt
         echo "Host source hash: $(cat host_hash.txt)"
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
-    - name: Build APK
+    # Одна сборка делает сразу всё: app-debug.apk, dep-newpipe-debug.apk и dep-uhm-debug.apk (контейнеры зависимостей).
+    - name: Build APK and dependency containers
       run: ./gradlew assembleDebug
+    - name: Check dependency containers
+      shell: bash
+      run: |
+        set -euo pipefail
+        for d in newpipe uhm; do
+          f="dep-$d/build/outputs/apk/debug/dep-$d-debug.apk"
+          test -f "$f"
+          ls -l "$f"
+          unzip -l "$f" | grep -E 'classes[0-9]*\.dex|lib/' || true
+        done
     - name: Prepare Modules Directory
       run: mkdir -p output_modules
     - name: Compile Modules to DEX
@@ -91,8 +103,17 @@ jobs:
         name: dex-modules
         path: output_modules/*.dex
         if-no-files-found: error
-    # Страница релиза «Latest build»: APK, архив modules.zip и каждый модуль отдельным файлом .dex,
-    # скачивается без входа в GitHub. Релиз пересоздаётся при каждой сборке main.
+    - name: Upload dependency containers
+      uses: actions/upload-artifact@v4
+      with:
+        name: dep-apks
+        path: |
+          dep-newpipe/build/outputs/apk/debug/dep-newpipe-debug.apk
+          dep-uhm/build/outputs/apk/debug/dep-uhm-debug.apk
+        if-no-files-found: error
+    # Страница релиза «Latest build»: APK, архив modules.zip, каждый модуль отдельным файлом .dex
+    # и зависимости dep-newpipe.apk, dep-uhm.apk (приложение само скачивает их в files/deps), скачивается без входа в GitHub.
+    # Релиз пересоздаётся при каждой сборке main.
     - name: Publish release with APK and modules
       if: github.ref == 'refs/heads/main'
       env:
@@ -102,10 +123,12 @@ jobs:
         set -euo pipefail
         mkdir -p release_files
         cp app/build/outputs/apk/debug/app-debug.apk release_files/app-debug.apk
+        cp dep-newpipe/build/outputs/apk/debug/dep-newpipe-debug.apk release_files/dep-newpipe.apk
+        cp dep-uhm/build/outputs/apk/debug/dep-uhm-debug.apk release_files/dep-uhm.apk
         cp host_hash.txt release_files/host_hash.txt
         cp output_modules/*.dex release_files/
         (cd output_modules && zip -q -j ../release_files/modules.zip *.dex)
         short="$(git rev-parse --short HEAD)"
-        notes="Сборка из main, коммит ${short}: $(git log -1 --pretty=%s)"$'\n\n'"app-debug.apk — приложение. modules.zip — все модули одним архивом. Отдельные файлы *.dex — по одному модулю на файл (положить в Загрузки/UniversalPlugins). host_hash.txt — хэш исходников приложения: по нему приложение узнаёт, нужен ли новый APK."
+        notes="Сборка из main, коммит ${short}: $(git log -1 --pretty=%s)"$'\n\n'"app-debug.apk — приложение. modules.zip — все модули одним архивом. Отдельные файлы *.dex — по одному модулю на файл (положить в Загрузки/UniversalPlugins). dep-newpipe.apk, dep-uhm.apk — зависимости (NewPipeExtractor, Uhm): приложение скачивает их само, устанавливать не нужно. host_hash.txt — хэш исходников приложения: по нему приложение узнаёт, нужен ли новый APK."
         gh release delete latest --cleanup-tag --yes 2>/dev/null || true
         gh release create latest release_files/* --target "$GITHUB_SHA" --title "Latest build (${short})" --notes "$notes" --latest
