@@ -85,7 +85,8 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvid
                 q.toast("⚠️🔗");
                 return false;
             }
-            q.submit(url, title);
+            // кнопка 🧹 в скрипте YouTube TTS шлёт флаг clean: «эээ» вырезаются независимо от настройки
+            q.submit(url, title, intent.getBooleanExtra("clean", false));
             return true;
         } catch (Throwable t) {
             return false;
