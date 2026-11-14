@@ -26,6 +26,10 @@ import java.security.MessageDigest
  * загрузчик модулей не видит) и подменяется целиком, так что оборванная загрузка не портит рабочий модуль.
  * Модули, которых нет в релизе, не удаляются.
  *
+ * Та же кнопка обновляет и зависимости (dep-newpipe.apk, dep-uhm.apk, см. [Deps]), но только уже скачанные:
+ * неустановленную большую библиотеку (Uhm) за проход не качаем, она подтягивается при первом обращении.
+ * Счётчик «что устарело» по модулям теперь включает и устаревшие зависимости.
+ *
  * Нужно ли обновлять само приложение (APK), определяется так: сборка кладёт в приложение и в релиз файл
  * host_hash.txt, хэш исходников хоста (без модулей), и если хэши разные, значит хост изменился. Для сборок без
  * этого файла сравнивается контрольная сумма установленного APK с APK в релизе (тогда любая пересборка считается
@@ -42,6 +46,12 @@ object ModuleUpdater {
     private const val ACTION_INSTALL = "im.manus.universalhost.INSTALL_RESULT"
     private val NAME = Regex("^[A-Za-z0-9_]+\\.dex$")
 
+    /** Зависимости хоста: имя в [Deps] и подпись для сообщения пользователю. */
+    private val DEPS = listOf(
+        Deps.NEWPIPE to "NewPipe",
+        Deps.UHM to "Uhm (вступит после перезапуска)"
+    )
+
     private class Asset(val name: String, val id: String, val size: Long, val url: String, val digest: String?)
 
     class Result(
@@ -53,7 +63,7 @@ object ModuleUpdater {
         val hostNeedsUpdate: Boolean?
     )
 
-    /** Что есть нового: приложение (true/false), число модулей и число скриптов. null: узнать не удалось. */
+    /** Что есть нового: приложение (true/false), число модулей (с зависимостями) и число скриптов. null: узнать не удалось. */
     class Status(val host: Boolean?, val modules: Int?, val scripts: Int?)
 
     private fun prefs(c: Context) = c.getSharedPreferences("module_updater", Context.MODE_PRIVATE)
@@ -73,7 +83,25 @@ object ModuleUpdater {
         val assets = all.filter { NAME.matches(it.name) }
         val host = hostNeedsUpdate(context, all)
         storeHost(context, host)
-        if (assets.isEmpty()) return Result(updated, same, failed, "в релизе нет модулей", host)
+        // зависимости: только уже скачанные и только если их контрольная сумма отличается от релиза
+        var depFailed = 0
+        for ((name, label) in DEPS) {
+            try {
+                if (depNeeded(context, name, all)) {
+                    Deps.update(context, name, null, true)
+                    updated.add(label)
+                } else if (Deps.installed(context, name)) {
+                    same++
+                }
+            } catch (t: Throwable) {
+                depFailed++
+                failed.add(label + ": " + (t.message ?: t.javaClass.simpleName))
+            }
+        }
+        if (assets.isEmpty()) {
+            storeCount(context, "mod_pending", depFailed)
+            return Result(updated, same, failed, "в релизе нет модулей", host)
+        }
         val dir = PluginRegistry.pluginDir()
         val p = prefs(context)
         for (a in assets) {
@@ -102,6 +130,35 @@ object ModuleUpdater {
             a.digest != null -> !sha256(local).equals(a.digest, ignoreCase = true)
             else -> local.length() != a.size || p.getString("id_" + a.name, "") != a.id
         }
+    }
+
+    // ------------------------------------------------------------ зависимости
+
+    /**
+     * SHA-256 скачанной зависимости; null, если файла нет. Файл большой, поэтому сумма запоминается
+     * вместе с подписью «размер:время изменения» и пересчитывается, только когда файл поменялся
+     * (в том числе кнопкой в настройках модуля).
+     */
+    private fun depSha(c: Context, name: String): String? {
+        val f = Deps.file(c, name)
+        if (!f.isFile) return null
+        val p = prefs(c)
+        val sig = "${f.length()}:${f.lastModified()}"
+        if (p.getString("dep_sig_$name", "") == sig) {
+            val known = p.getString("dep_sha_$name", null)
+            if (known != null) return known
+        }
+        val h = sha256(f)
+        p.edit().putString("dep_sig_$name", sig).putString("dep_sha_$name", h).apply()
+        return h
+    }
+
+    /** Установленная зависимость отличается от релиза. Нескачанную не трогаем, без контрольной суммы в релизе сравнить нельзя. */
+    private fun depNeeded(c: Context, name: String, all: List<Asset>): Boolean {
+        val a = all.firstOrNull { it.name == "dep-$name.apk" } ?: return false
+        val remote = a.digest ?: return false
+        val local = depSha(c, name) ?: return false
+        return !local.equals(remote, ignoreCase = true)
     }
 
     /** Текст для всплывающей подсказки. */
@@ -146,7 +203,7 @@ object ModuleUpdater {
         return need
     }
 
-    /** Последнее известное число модулей, которые отличаются от релиза; null: не знаем. */
+    /** Последнее известное число модулей (и зависимостей), которые отличаются от релиза; null: не знаем. */
     fun cachedModules(context: Context): Int? {
         val p = prefs(context)
         return if (p.contains("mod_pending")) p.getInt("mod_pending", 0) else null
@@ -166,8 +223,8 @@ object ModuleUpdater {
     }
 
     /**
-     * Блокирующий вызов: ничего не скачивая, узнать, что устарело. Приложение и модули сверяются по одному запросу
-     * к GitHub, скрипты по одному запросу на каждый скрипт с адресом обновления.
+     * Блокирующий вызов: ничего не скачивая, узнать, что устарело. Приложение, модули и зависимости сверяются по
+     * одному запросу к GitHub, скрипты по одному запросу на каждый скрипт с адресом обновления.
      */
     fun checkAll(context: Context): Status {
         var host: Boolean? = null
@@ -178,7 +235,8 @@ object ModuleUpdater {
             storeHost(context, host)
             val dir = PluginRegistry.pluginDir()
             val p = prefs(context)
-            modules = all.count { NAME.matches(it.name) && moduleNeeded(it, dir, p) }
+            modules = all.count { NAME.matches(it.name) && moduleNeeded(it, dir, p) } +
+                    DEPS.count { depNeeded(context, it.first, all) }
             storeCount(context, "mod_pending", modules)
         } catch (t: Throwable) {
         }
