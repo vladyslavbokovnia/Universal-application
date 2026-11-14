@@ -1,2 +1,7 @@
 rootProject.name = "UniversalHost"
 include ':app'
+// Общие интерфейсы хоста и зависимостей (только типы JDK и Android)
+include ':dep-api'
+// Зависимости, вынесенные из хоста: каждая собирается в свой dep-<имя>.apk и грузится через DexClassLoader
+include ':dep-newpipe'
+include ':dep-uhm'

@@ -1,0 +1,31 @@
+// Зависимость NewPipeExtractor, вынесенная из хоста. Собирается в APK-контейнер dep-newpipe.apk (не устанавливается):
+// хост грузит из него classes.dex через DexClassLoader. Классы интерфейсов хоста берутся из :dep-api и в контейнер не входят.
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'im.manus.deps.newpipe'
+    compileSdk 33
+
+    defaultConfig {
+        applicationId "im.manus.deps.newpipe"
+        minSdk 24
+        targetSdk 33
+        versionCode 1
+        versionName "1.0"
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+        // NewPipeExtractor использует java.time и другое из Java 11: на minSdk 24 нужна десахаризация
+        coreLibraryDesugaringEnabled true
+    }
+}
+
+dependencies {
+    compileOnly project(':dep-api')
+    // Версия без Java records в извлекателе: D8 из AGP 8.6 не умеет их сахарить (ошибка Record desugaring).
+    implementation 'com.github.TeamNewPipe:NewPipeExtractor:v0.26.5'
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs_nio:2.1.5'
+}

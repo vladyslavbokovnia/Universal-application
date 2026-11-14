@@ -1,0 +1,39 @@
+// Зависимость Uhm (вырезание «эээ»), вынесенная из хоста. Собирается в APK-контейнер dep-uhm.apk (не устанавливается):
+// хост грузит из него classes.dex и нативные библиотеки (lib/arm64-v8a, лежат в архиве без сжатия) через DexClassLoader.
+// Классы интерфейсов хоста берутся из :dep-api и в контейнер не входят.
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'im.manus.deps.uhm'
+    compileSdk 33
+
+    defaultConfig {
+        applicationId "im.manus.deps.uhm"
+        minSdk 24
+        targetSdk 33
+        versionCode 1
+        versionName "1.0"
+        // Нативная часть Uhm есть только для arm64-v8a и x86_64; x86_64 нужен лишь эмуляторам и удваивает размер
+        ndk { abiFilters 'arm64-v8a' }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+    packaging {
+        jniLibs {
+            // .so остаются в APK без сжатия: загрузчик берёт их прямо из архива (путь вида dep-uhm.apk!/lib/arm64-v8a)
+            useLegacyPackaging = false
+        }
+    }
+}
+
+dependencies {
+    compileOnly project(':dep-api')
+    // UhmImpl обращается к Kotlin-классам (Continuation) и к самой библиотеке через reflection
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.1.21'
+    // Модель (~24 МБ) скачивается при первом запуске в files/uhm. Собрана на Kotlin 2.1, поэтому плагин Kotlin хоста не ниже 2.1.
+    implementation 'ai.desertant:uhm:4.3.0'
+}

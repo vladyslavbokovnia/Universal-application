@@ -15,7 +15,7 @@ android {
         targetSdk 33
         versionCode ciVersionCode
         versionName "1.3"
-        // Нативная часть Uhm есть только для arm64-v8a и x86_64; x86_64 нужен лишь эмуляторам и удваивает размер APK
+        // У хоста своей нативной части нет (она у Uhm, а он теперь в dep-uhm.apk); фильтр оставлен, чтобы случайная зависимость не раздувала APK
         ndk { abiFilters 'arm64-v8a' }
     }
 
@@ -43,7 +43,7 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_11
         targetCompatibility JavaVersion.VERSION_11
-        // NewPipeExtractor использует java.time и другое из Java 11: на minSdk 24 нужна десахаризация
+        // Десахаризация оставлена как была (java.time и другое из Java 11 на minSdk 24); NewPipeExtractor ушёл в dep-newpipe.apk
         coreLibraryDesugaringEnabled true
     }
     kotlinOptions {
@@ -62,12 +62,8 @@ dependencies {
     implementation 'dev.rikka.shizuku:api:13.1.5'
     implementation 'dev.rikka.shizuku:provider:13.1.5'
 
-    // Скачивание русской дорожки YouTube (модуль YouTubeAudio через YtAudioBridge). Версия без Java records
-    // в извлекателе: D8 из AGP 8.6 не умеет их сахарить (ошибка Record desugaring). Новее — после обновления AGP.
-    implementation 'com.github.TeamNewPipe:NewPipeExtractor:v0.26.5'
-
-    // Вырезание «эээ» (FillerCleaner вызывает модель через reflection): Uhm, на устройстве; модель (~24 МБ) скачивается при первом
-    // запуске в files/uhm. Нативная часть только для arm64-v8a и x86_64. Собрана на Kotlin 2.1, поэтому плагин Kotlin не ниже 2.1.
-    implementation 'ai.desertant:uhm:4.3.0'
+    // Общие интерфейсы хоста и зависимостей. Сами зависимости, NewPipeExtractor (скачивание дорожек YouTube) и Uhm (вырезание «эээ»),
+    // в хост больше не входят: это dep-newpipe.apk и dep-uhm.apk из релиза, их грузит Deps (files/deps).
+    implementation project(':dep-api')
     coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs_nio:2.1.5'
 }
