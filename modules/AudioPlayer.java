@@ -861,7 +861,15 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                         File f = dot < 0 ? null : new File(path.substring(0, dot) + ".url");
                         if (f != null && f.isFile() && f.length() < 4096) {
                             java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(new java.io.FileInputStream(f), "UTF-8"));
-                            try { String line = r.readLine(); if (line != null) u = line.trim(); } finally { r.close(); }
+                            try {
+                                // голый URL («YouTube аудио») или ярлык [InternetShortcut] с URL=... (перевод Яндекса)
+                                String line;
+                                while ((line = r.readLine()) != null) {
+                                    line = line.trim();
+                                    if (line.regionMatches(true, 0, "URL=", 0, 4)) line = line.substring(4).trim();
+                                    if (line.startsWith("http")) { u = line; break; }
+                                }
+                            } finally { r.close(); }
                         }
                     } catch (Throwable t) { }
                     final String fu = u;
