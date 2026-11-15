@@ -49,7 +49,11 @@ jobs:
       run: chmod +x gradlew
     # Одна сборка делает сразу всё: app-debug.apk, dep-newpipe-debug.apk и dep-uhm-debug.apk (контейнеры зависимостей).
     - name: Build APK and dependency containers
-      run: ./gradlew assembleDebug
+      shell: bash
+      run: |
+        # весь вывод дублируется в ci-build.log: при падении сборки из него берётся текст ошибок (шаг «Publish build log»)
+        exec > >(tee -a "$GITHUB_WORKSPACE/ci-build.log") 2>&1
+        ./gradlew assembleDebug
     - name: Check dependency containers
       shell: bash
       run: |
@@ -66,6 +70,7 @@ jobs:
       shell: bash
       run: |
         set -uo pipefail
+        exec > >(tee -a "$GITHUB_WORKSPACE/ci-build.log") 2>&1
         ANDROID_JAR="$(find "$ANDROID_SDK_ROOT/platforms" -name android.jar | sort | tail -n 1)"
         D8_TOOL="$(find "$ANDROID_SDK_ROOT/build-tools" -type f -name d8 | sort | tail -n 1)"
         APP_CLASSES="app/build/tmp/kotlin-classes/debug:app/build/intermediates/javac/debug/compileDebugJavaWithJavac/classes:app/build/intermediates/javac/debug/classes"
@@ -91,6 +96,33 @@ jobs:
         done
         test "$fail" -eq 0
         test -n "$(find output_modules -type f -name "*.dex" -print -quit)"
+    # При падении сборки текст ошибок (первые ошибки компилятора и хвост вывода) кладётся в ветку build-log, файл build-log.txt:
+    # логи Actions без входа с правами администратора не прочитать. Ветка перезаписывается при каждой неудачной сборке.
+    - name: Publish build log
+      if: failure()
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: bash
+      run: |
+        sleep 3
+        set +e
+        log="$GITHUB_WORKSPACE/ci-build.log"
+        out="$(mktemp -d)"
+        {
+          echo "Сборка упала. Коммит: $(git rev-parse --short HEAD): $(git log -1 --pretty=%s)"
+          echo
+          echo "=== Первые ошибки ==="
+          grep -nE -A4 "error:|FAILED|What went wrong|cannot find symbol|Execution failed" "$log" | head -n 160
+          echo
+          echo "=== Хвост вывода ==="
+          tail -n 60 "$log"
+        } > "$out/build-log.txt" 2>&1
+        cd "$out"
+        git init -q
+        git checkout -q -b build-log
+        git add build-log.txt
+        git -c user.name=github-actions -c user.email=actions@users.noreply.github.com commit -q -m "Лог сборки ${GITHUB_SHA::7}"
+        git push -q -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" build-log
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
