@@ -30,6 +30,15 @@ public interface YtExtractor {
         public String trackType;
     }
 
+    /** Одна видеодорожка без звука (только прямые ссылки PROGRESSIVE_HTTP, контейнер mp4). */
+    final class Vid {
+        public String url;
+        public int height;
+        public int bitrate;
+        /** Кодек H.264 (avc1): только его можно положить в mp4 без перекодирования. */
+        public boolean avc;
+    }
+
     final class Thumb {
         public String url;
         public int height;
@@ -41,6 +50,7 @@ public interface YtExtractor {
         /** Начало описания (до 300 символов): по нему определяется язык ролика. */
         public String description = "";
         public final List<Audio> audio = new ArrayList<Audio>();
+        public final List<Vid> video = new ArrayList<Vid>();
         public final List<Thumb> thumbs = new ArrayList<Thumb>();
     }
 

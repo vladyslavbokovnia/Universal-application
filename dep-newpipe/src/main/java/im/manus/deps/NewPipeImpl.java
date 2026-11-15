@@ -17,6 +17,7 @@ import org.schabi.newpipe.extractor.stream.AudioStream;
 import org.schabi.newpipe.extractor.stream.AudioTrackType;
 import org.schabi.newpipe.extractor.stream.DeliveryMethod;
 import org.schabi.newpipe.extractor.stream.StreamInfo;
+import org.schabi.newpipe.extractor.stream.VideoStream;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -84,6 +85,21 @@ public final class NewPipeImpl implements YtExtractor {
                 a.trackType = t != null ? t.name() : null;
                 v.audio.add(a);
             }
+
+            // Видео без звука (кнопка 🗣 «перевод вместе с видео»): только mp4 по прямой ссылке
+            try {
+                for (VideoStream s : info.getVideoOnlyStreams()) {
+                    if (!(s.isUrl() && s.getDeliveryMethod() == DeliveryMethod.PROGRESSIVE_HTTP)) continue;
+                    if (s.getFormat() != MediaFormat.MPEG_4) continue;
+                    Vid vd = new Vid();
+                    vd.url = s.getContent();
+                    vd.height = s.getHeight();
+                    vd.bitrate = s.getBitrate();
+                    String c = s.getCodec();
+                    vd.avc = c != null && c.toLowerCase(Locale.ROOT).startsWith("avc");
+                    v.video.add(vd);
+                }
+            } catch (Throwable ignored) { }
 
             try {
                 List<Image> imgs = info.getThumbnails();
