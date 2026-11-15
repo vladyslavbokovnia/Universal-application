@@ -89,7 +89,7 @@ public class FlashlightModule implements IPlugin, ISettingsProvider, IMainViewPr
     private Runnable uiRefresh;
 
     @Override public String getName() { return "Flashlight"; }
-    @Override public int getVersion() { return 3; }
+    @Override public int getVersion() { return 4; }
     @Override public String getDescription() { return "Фонарик с регулировкой яркости"; }
     @Override public String getIconName() { return "ic_launcher"; }
 
@@ -384,7 +384,7 @@ public class FlashlightModule implements IPlugin, ISettingsProvider, IMainViewPr
         List<SettingItem> l = new ArrayList<SettingItem>();
         String levelUnit = "%";
         if (ledNode == null && maxLevel == 1 && !probeInfo.isEmpty()) levelUnit = "% (пока не регулируется)";
-        l.add(SettingItem.section("🔦 Фонарик"));
+        l.add(SettingItem.section("Фонарик"));
         l.add(SettingItem.toggle("torch_on", "💡 Включён", "", false));
         l.add(SettingItem.slider("torch_level", "🔆 Яркость", levelUnit, 1, 100, 1, 100));
         l.add(SettingItem.slider("torch_timeout", "⏱ Автовыключение", "мин (0 — не выключать)", 0, 60, 1, 0));
