@@ -85,8 +85,9 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvid
                 q.toast("⚠️🔗");
                 return false;
             }
-            // кнопка 🧹 в скрипте YouTube TTS шлёт флаг clean: «эээ» вырезаются независимо от настройки
-            q.submit(url, title, intent.getBooleanExtra("clean", false));
+            // кнопки скрипта YouTube TTS: 🧹 шлёт флаг clean («эээ» вырезаются независимо от настройки),
+            // 🗣 шлёт флаг video (mp4: видео с YouTube + перевод Яндекса вместо оригинального звука)
+            q.submit(url, title, intent.getBooleanExtra("clean", false), intent.getBooleanExtra("video", false));
             return true;
         } catch (Throwable t) {
             return false;
@@ -104,6 +105,8 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvid
                 "Мобильная сеть не используется: ссылки ждут Wi-Fi.", false));
         r.add(SettingItem.text("max_dl", "⬇ Одновременных загрузок",
                 "Сколько роликов качается с YouTube сразу (1–10). Перевод Яндекса идёт без ограничения, очистка «эээ» всегда по одной.", "3"));
+        r.add(SettingItem.text("video_height", "🎞 Высота видео для кнопки 🗣",
+                "Видео с переводом качается не выше этой высоты, пикселей (144–2160, обычно 720). Нужен формат H.264: другие в mp4 без перекодирования не кладутся.", "720"));
         r.add(SettingItem.text("lang", "🌐 Язык дорожки", "Код языка: ru, en, uk.", "ru"));
         r.add(SettingItem.choice("storage", "💾 Куда сохранять",
                 "Память телефона или SD-карта (карта должна быть подключена, приложению нужен доступ ко всем файлам). Если выбрана карта, а её нет, ссылки остаются в списке.",

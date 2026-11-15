@@ -46,6 +46,7 @@ public final class YtAudioQueue {
     public static final String ERROR = "e";       // ошибка (остаётся в списке)
     public static final String VOT = "v";         // ждёт перевода Яндекса: слота загрузки не занимает
     public static final String CLEAN = "c";       // файл скачан, ждёт очистки от «эээ»
+    public static final String MUX = "m";         // 🗣 с видео: перевод готов, качается видео и склеивается mp4
 
     public static final class Item {
         public String url = "";
@@ -58,6 +59,8 @@ public final class YtAudioQueue {
         public String file = "";
         /** Кнопка 🧹: вырезать «эээ» из русского оригинала, даже если в настройках очистка выключена. */
         public boolean forceClean = false;
+        /** Кнопка 🗣: не аудио, а mp4 (видео с YouTube + русский перевод Яндекса вместо оригинального звука). */
+        public boolean video = false;
     }
 
     private static YtAudioQueue inst;
@@ -78,12 +81,14 @@ public final class YtAudioQueue {
     private boolean forceAll;
     private boolean votOn, cleanerOn;
     private String cleaning = "";                                     // ссылка, у которой идёт очистка
+    private final Set<String> muxing = new HashSet<String>();         // ссылки, у которых идёт склейка видео
 
     private YtAudioQueue(Context app) {
         this.app = app;
         load();
         if (hasStatus(VOT)) startVotWatcher();
         if (hasStatus(CLEAN)) startCleaner();
+        for (Item it : snapshot()) if (MUX.equals(it.status)) startMux(it);
     }
 
     // ---------------------------------------------------------- настройки и хранение
@@ -165,6 +170,7 @@ public final class YtAudioQueue {
                 it.step = o.optString("p", "o");
                 it.file = o.optString("f", "");
                 it.forceClean = o.optBoolean("fc", false);
+                it.video = o.optBoolean("vd", false);
                 if (VOT.equals(it.status)) votRestart.add(it.url);
                 items.add(it);
             }
@@ -176,7 +182,7 @@ public final class YtAudioQueue {
             JSONArray a = new JSONArray();
             for (Item it : items) {
                 a.put(new JSONObject().put("u", it.url).put("t", it.title).put("s", it.status).put("e", it.err)
-                        .put("p", it.step).put("f", it.file).put("fc", it.forceClean));
+                        .put("p", it.step).put("f", it.file).put("fc", it.forceClean).put("vd", it.video));
             }
             prefs().edit().putString("items", a.toString()).apply();
         } catch (Throwable t) { }
@@ -193,9 +199,9 @@ public final class YtAudioQueue {
 
     /** В работе: качается, ждёт перевод Яндекса или стоит в очереди на очистку. */
     public synchronized boolean isActive(String url) {
-        if (active.contains(url) || cleaning.equals(url)) return true;
+        if (active.contains(url) || cleaning.equals(url) || muxing.contains(url)) return true;
         Item it = find(url);
-        return it != null && (VOT.equals(it.status) || CLEAN.equals(it.status));
+        return it != null && (VOT.equals(it.status) || CLEAN.equals(it.status) || MUX.equals(it.status));
     }
 
     /** Значок шага для ролика в работе: ⬇ качается, 🤖⬇ дубляж YouTube, 🗣 перевод Яндекса, 🧹⏳ ждёт очистки, 🧹 чистится. */
@@ -204,6 +210,7 @@ public final class YtAudioQueue {
         if (it == null) return "⬇";
         if (active.contains(url)) return "d".equals(it.step) ? "🤖⬇" : "⬇";
         if (VOT.equals(it.status)) return "🗣";
+        if (MUX.equals(it.status)) return "🎞";
         if (CLEAN.equals(it.status)) return cleaning.equals(url) ? "🧹" : "🧹⏳";
         return "⬇";
     }
@@ -230,7 +237,9 @@ public final class YtAudioQueue {
     /** Заново: очистка, если файл уже скачан, иначе вся цепочка с начала. */
     private void retry(Item it) {
         it.err = "";
-        if ("c".equals(it.step) && it.file.length() > 0 && new File(it.file).isFile()) {
+        if (it.video && "m".equals(it.step) && it.file.length() > 0 && new File(it.file).isFile()) {
+            it.status = MUX;                    // перевод уже скачан: только видео и склейка
+        } else if ("c".equals(it.step) && it.file.length() > 0 && new File(it.file).isFile()) {
             it.status = CLEAN;
         } else {
             it.status = QUEUED;
@@ -246,6 +255,11 @@ public final class YtAudioQueue {
 
     /** forceClean: после загрузки русского оригинала «эээ» вырезаются независимо от настройки модуля. */
     public synchronized void submit(String url, String title, boolean forceClean) {
+        submit(url, title, forceClean, false);
+    }
+
+    /** video: mp4 с переводом Яндекса вместо аудио (кнопка 🗣 в скрипте YouTube TTS). */
+    public synchronized void submit(String url, String title, boolean forceClean, boolean video) {
         Item it = find(url);
         if (it == null) {
             it = new Item();
@@ -254,11 +268,16 @@ public final class YtAudioQueue {
         }
         if (title != null && title.length() > 0) it.title = title;
         if (forceClean) it.forceClean = true;
-        boolean busy = active.contains(url) || cleaning.equals(url) || VOT.equals(it.status) || CLEAN.equals(it.status);
-        if (!busy) retry(it);
+        boolean busy = active.contains(url) || cleaning.equals(url) || muxing.contains(url)
+                || VOT.equals(it.status) || CLEAN.equals(it.status) || MUX.equals(it.status);
+        if (!busy) {
+            it.video = video;
+            retry(it);
+        }
         save();
         changed();
         if (CLEAN.equals(it.status)) startCleaner();
+        if (MUX.equals(it.status)) startMux(it);
         if (autoMode()) {
             toast("📋 В списке. Сеть сейчас: " + netLabel(netKind()));
             runNext();
@@ -269,7 +288,7 @@ public final class YtAudioQueue {
 
     public synchronized void remove(String url) {
         Item it = find(url);
-        if (it != null && !active.contains(url) && !cleaning.equals(url)) items.remove(it);
+        if (it != null && !active.contains(url) && !cleaning.equals(url) && !muxing.contains(url)) items.remove(it);
         save();
         changed();
     }
@@ -277,7 +296,7 @@ public final class YtAudioQueue {
     /** Убирает всё, что сейчас не качается и не чистится. */
     public synchronized void clear() {
         List<Item> keep = new ArrayList<Item>();
-        for (Item it : items) if (active.contains(it.url) || cleaning.equals(it.url)) keep.add(it);
+        for (Item it : items) if (active.contains(it.url) || cleaning.equals(it.url) || muxing.contains(it.url)) keep.add(it);
         items.clear();
         items.addAll(keep);
         save();
@@ -288,6 +307,7 @@ public final class YtAudioQueue {
         if (QUEUED.equals(it.status)) return "Ждёт загрузки";
         if (VOT.equals(it.status)) return "Яндекс переводит";
         if (CLEAN.equals(it.status)) return "Ждёт очистки от «эээ»";
+        if (MUX.equals(it.status)) return "Склеиваю видео с переводом";
         return it.err == null ? "" : it.err;
     }
 
@@ -411,8 +431,9 @@ public final class YtAudioQueue {
         boolean any = false;
         for (Item it : items) {
             if (!active.contains(it.url) && ERROR.equals(it.status)) retry(it);
-            if (QUEUED.equals(it.status) || CLEAN.equals(it.status)) any = true;
+            if (QUEUED.equals(it.status) || CLEAN.equals(it.status) || MUX.equals(it.status)) any = true;
         }
+        for (Item it : items) if (MUX.equals(it.status)) startMux(it);
         if (!any) { toast("📭"); return; }
         forceAll = true;
         save();
@@ -425,12 +446,18 @@ public final class YtAudioQueue {
     public synchronized void downloadOne(Item it) {
         if (active.contains(it.url) || cleaning.equals(it.url)) return;
         if (VOT.equals(it.status)) { toast("🗣"); return; }
+        if (MUX.equals(it.status)) { toast("🎞"); startMux(it); return; }
         if (CLEAN.equals(it.status)) { toast("🧹"); startCleaner(); return; }
         retry(it);
         save();
         if (CLEAN.equals(it.status)) {
             changed();
             startCleaner();
+            return;
+        }
+        if (MUX.equals(it.status)) {
+            changed();
+            startMux(it);
             return;
         }
         int k = netKind();
@@ -459,6 +486,11 @@ public final class YtAudioQueue {
         }
         active.add(it.url);
         changed();
+        if (it.video && "o".equals(it.step)) {              // 🗣 с видео: дорожку YouTube не качаем, сразу перевод Яндекса
+            toast("🗣");
+            goVot(it);
+            return;
+        }
         String lang = prefs().getString("lang", "ru");
         final boolean dub = "d".equals(it.step);
         toast(dub ? "🤖" : "🎧");
@@ -536,6 +568,10 @@ public final class YtAudioQueue {
                         it.status = VOT;
                         it.step = "v";
                         toast("🗣");
+                    } else if (it.video) {
+                        it.status = ERROR;
+                        it.err = "Перевод Яндекса не принял ссылку";
+                        toast("⚠️");
                     } else {
                         it.status = QUEUED;
                         it.step = "d";
@@ -581,7 +617,19 @@ public final class YtAudioQueue {
             }
             for (Item it : waiting) {
                 String[] st = YtPipeline.votState(app, it.url);
-                if ("done".equals(st[0])) {
+                if ("done".equals(st[0]) && it.video) {
+                    synchronized (this) {
+                        it.status = MUX;                                      // перевод скачан: дальше видео и склейка
+                        it.step = "m";
+                        it.file = st[1];
+                        it.err = "";
+                        save();
+                        changed();
+                        toast("🎞⏳");
+                    }
+                    YtPipeline.votRemove(app, it.url);
+                    startMux(it);
+                } else if ("done".equals(st[0])) {
                     synchronized (this) {
                         items.remove(it);
                         save();
@@ -589,6 +637,14 @@ public final class YtAudioQueue {
                         toast("✅");
                     }
                     YtPipeline.votRemove(app, it.url);                        // запись в списке VOT больше не нужна, файл остаётся
+                } else if (it.video && ("err".equals(st[0]) || "gone".equals(st[0]))) {
+                    synchronized (this) {
+                        it.status = ERROR;                                    // для видео дубляж YouTube не подходит
+                        it.err = "gone".equals(st[0]) ? "Перевод Яндекса пропал" : "Перевод Яндекса: " + st[1];
+                        save();
+                        changed();
+                        toast("⚠️");
+                    }
                 } else if ("err".equals(st[0]) || "gone".equals(st[0])) {
                     synchronized (this) {
                         it.status = QUEUED;                                   // VOT не справился: дубляж YouTube
@@ -603,6 +659,71 @@ public final class YtAudioQueue {
             }
             try { Thread.sleep(3000); } catch (InterruptedException e) { synchronized (this) { votOn = false; } return; }
         }
+    }
+
+    // ---------------------------------------------------------- 🗣 с видео: склейка mp4
+
+    /** Потолок высоты видео (настройка video_height, по умолчанию 720). */
+    private int videoHeight() {
+        try {
+            return Math.max(144, Math.min(2160, Integer.parseInt(prefs().getString("video_height", "720").trim())));
+        } catch (Throwable t) {
+            return 720;
+        }
+    }
+
+    /** Качает видеодорожку и склеивает её с готовым переводом в mp4; идёт в фоне, по одной на ролик. */
+    private void startMux(final Item it) {
+        synchronized (this) {
+            if (muxing.contains(it.url)) return;
+            muxing.add(it.url);
+        }
+        changed();
+        io.execute(new Runnable() {
+            @Override public void run() {
+                String err = null;
+                File vid = null, aac = null, out = null;
+                File tr = it.file.length() > 0 ? new File(it.file) : null;
+                try {
+                    File dir = mediaDir(app);
+                    if (dir == null) throw new IOException("SD-карта не найдена");
+                    if (tr == null || !tr.isFile()) throw new IOException("Файл перевода не найден");
+                    int k = netKind();
+                    if (k == 0) throw new IOException("Нет сети: нажмите на плитку, когда она появится");
+                    Network net = wifiOnly() && k == 2 ? wifiNetwork() : null;
+                    if (!netFits(k)) throw new IOException("Нужен Wi-Fi, сейчас: " + netLabel(k));
+                    vid = YtAudioBridge.fetchVideo(app, it.url, dir, videoHeight(), net);
+                    aac = FillerCleaner.toAac(tr, dir);
+                    String nm = tr.getName();
+                    int dot = nm.lastIndexOf('.');
+                    String base = dot > 0 ? nm.substring(0, dot) : nm;
+                    out = new File(dir, base + ".mp4");
+                    for (int n = 2; out.exists(); n++) out = new File(dir, base + " (" + n + ").mp4");
+                    YtMux.mux(vid, aac, out);
+                    android.media.MediaScannerConnection.scanFile(app, new String[]{out.getAbsolutePath()}, null, null);
+                } catch (Throwable e) {
+                    String m = e.getMessage();
+                    err = m != null && m.length() > 0 ? m : String.valueOf(e);
+                    if (err.length() > 120) err = err.substring(0, 120);
+                } finally {
+                    if (vid != null) vid.delete();
+                    if (aac != null && tr != null && !aac.equals(tr)) aac.delete();
+                }
+                synchronized (YtAudioQueue.this) {
+                    muxing.remove(it.url);
+                    if (err == null) {
+                        items.remove(it);
+                        toast("✅");
+                    } else {
+                        it.status = ERROR;
+                        it.err = err;
+                        toast("⚠️");
+                    }
+                    save();
+                    changed();
+                }
+            }
+        });
     }
 
     // ---------------------------------------------------------- очистка от «эээ»

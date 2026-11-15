@@ -148,6 +148,41 @@ public final class FillerCleaner {
         }
     }
 
+    /**
+     * Для склейки видео с переводом: файл со звуком AAC в контейнере m4a. Если перевод уже такой, возвращается он сам;
+     * иначе (mp3, ogg…) звук перекодируется во временный m4a в tmpDir, его удаляет вызывающий.
+     */
+    static File toAac(File src, File tmpDir) throws IOException {
+        String mime = null;
+        MediaExtractor ex = new MediaExtractor();
+        try {
+            ex.setDataSource(src.getAbsolutePath());
+            for (int i = 0; i < ex.getTrackCount(); i++) {
+                String m = ex.getTrackFormat(i).getString(MediaFormat.KEY_MIME);
+                if (m != null && m.startsWith("audio/")) { mime = m; break; }
+            }
+        } finally {
+            try { ex.release(); } catch (Throwable ignored) { }
+        }
+        if (mime == null) throw new IOException("В переводе нет звука");
+        if ("audio/mp4a-latm".equals(mime) && src.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".m4a")) return src;
+        File pcm = new File(tmpDir, "yv-" + System.nanoTime() + ".pcm");
+        File aac = new File(tmpDir, "yv-" + System.nanoTime() + ".m4a");
+        try {
+            Pcm p = decode(src, pcm);
+            encode(pcm, p.rate, p.ch, aac);
+            return aac;
+        } catch (IOException e) {
+            aac.delete();
+            throw e;
+        } catch (RuntimeException e) {
+            aac.delete();
+            throw new IOException(String.valueOf(e));
+        } finally {
+            pcm.delete();
+        }
+    }
+
     // ------------------------------------------------------------ декодирование
 
     private static Pcm decode(File src, File pcm) throws IOException {

@@ -266,6 +266,46 @@ public final class YtAudioBridge {
         return out;
     }
 
+    /**
+     * Для «🗣 перевод вместе с видео»: скачивает видеодорожку ролика (mp4, H.264, без звука) во временный файл в dir.
+     * maxHeight: потолок высоты; если все дорожки выше, берётся самая низкая. Удалить файл должен вызывающий.
+     */
+    public static File fetchVideo(Context ctx, String url, File dir, int maxHeight, Network net) throws Exception {
+        Network prev = NET.get();
+        NET.set(net);
+        try {
+            YtExtractor ex = extractor(ctx);
+            YtExtractor.Video info = ex.fetch(url, OPENER);
+            if (info.video.isEmpty()) throw new UserError("Нет видеопотоков: обновите NewPipe в зависимостях");
+            YtExtractor.Vid pick = null;
+            for (YtExtractor.Vid s : info.video) {
+                if (!s.avc || (maxHeight > 0 && s.height > maxHeight)) continue;
+                if (pick == null || s.height > pick.height || (s.height == pick.height && s.bitrate > pick.bitrate)) pick = s;
+            }
+            if (pick == null) {
+                for (YtExtractor.Vid s : info.video) {
+                    if (s.avc && (pick == null || s.height < pick.height)) pick = s;
+                }
+            }
+            if (pick == null) throw new UserError("Нет видео в формате H.264");
+            if (!dir.exists() && !dir.mkdirs()) throw new UserError("Не создать папку " + dir);
+            File out = new File(dir, "yv-" + System.currentTimeMillis() + ".mp4");
+            try {
+                download(ex, pick.url, out, new Listener() {
+                    @Override public void onStatus(String s) { }
+                    @Override public void onDone(String audioPath, String error) { }
+                });
+            } catch (Throwable e) {
+                out.delete();
+                if (e instanceof Exception) throw (Exception) e;
+                throw new IOException(e.toString());
+            }
+            return out;
+        } finally {
+            if (prev != null) NET.set(prev); else NET.remove();
+        }
+    }
+
     /** Язык видео по тексту (название, канал, начало описания): пока умеем только русский (кириллица без украинских букв). */
     private static boolean looksLike(YtExtractor.Video info, String lang) {
         if (!"ru".equalsIgnoreCase(lang)) return false;
