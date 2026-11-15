@@ -41,11 +41,13 @@ import java.util.concurrent.Executors;
  * Flashlight — фонарик с регулировкой яркости.
  *
  * Два способа менять яркость:
- *  1) Через Shizuku (работает на Android 11 и ниже): модуль ищет у светодиода вспышки узел яркости
- *     /sys/class/leds/*torch* (или *flash*) и пишет в него уровень от 1 до max_brightness. Сработает только если
- *     запись в этот узел разрешена тому режиму, в котором запущен Shizuku (обычно нужен root-режим; в режиме adb
- *     многие телефоны запись запрещают). Что нашлось, показывает кнопка «Найти регулировку яркости» в настройках.
- *  2) Штатный API Android 13+ (CameraManager.turnOnTorchWithStrengthLevel), если вспышка поддерживает уровни.
+ *  1) Штатный API Android 13+ (CameraManager.turnOnTorchWithStrengthLevel), если вспышка поддерживает уровни.
+ *     Если он доступен, используется всегда и Shizuku не нужен.
+ *  2) Через Shizuku (запасной путь для Android 12 и ниже или вспышки без уровней): модуль ищет у светодиода
+ *     вспышки узел яркости /sys/class/leds/*torch* (или *flash*) и пишет в него уровень от 1 до max_brightness.
+ *     Сработает только если запись в этот узел разрешена тому режиму, в котором запущен Shizuku (обычно нужен
+ *     root-режим; в режиме adb многие телефоны запись запрещают). Что нашлось, показывает кнопка
+ *     «Найти регулировку яркости» в настройках.
  * Если не подошёл ни один способ, фонарик работает как обычный (включён / выключен), ползунок неактивен.
  *
  * Управление:
@@ -87,7 +89,7 @@ public class FlashlightModule implements IPlugin, ISettingsProvider, IMainViewPr
     private Runnable uiRefresh;
 
     @Override public String getName() { return "Flashlight"; }
-    @Override public int getVersion() { return 2; }
+    @Override public int getVersion() { return 3; }
     @Override public String getDescription() { return "Фонарик с регулировкой яркости"; }
     @Override public String getIconName() { return "ic_launcher"; }
 
@@ -197,7 +199,10 @@ public class FlashlightModule implements IPlugin, ISettingsProvider, IMainViewPr
         io().execute(new Runnable() {
             @Override public void run() {
                 String msg;
-                if (!ShizukuBridge.hasPermission()) {
+                if (Build.VERSION.SDK_INT >= 33 && maxLevel > 1) {
+                    // штатный способ доступен: запись в sysfs не нужна
+                    msg = "Яркость регулируется штатным способом Android, уровней вспышки: " + maxLevel;
+                } else if (!ShizukuBridge.hasPermission()) {
                     msg = "Shizuku не запущен или нет разрешения: яркость через Shizuku недоступна";
                 } else {
                     ShizukuResult r = ShizukuBridge.exec(PROBE_SCRIPT);
@@ -383,8 +388,8 @@ public class FlashlightModule implements IPlugin, ISettingsProvider, IMainViewPr
         l.add(SettingItem.toggle("torch_on", "💡 Включён", "", false));
         l.add(SettingItem.slider("torch_level", "🔆 Яркость", levelUnit, 1, 100, 1, 100));
         l.add(SettingItem.slider("torch_timeout", "⏱ Автовыключение", "мин (0 — не выключать)", 0, 60, 1, 0));
-        l.add(SettingItem.action("torch_probe", "🔍 Найти регулировку яркости",
-                probeInfo.isEmpty() ? "Через Shizuku; результат покажется всплывающей подсказкой" : probeInfo));
+        l.add(SettingItem.action("torch_probe", "🔍 Проверить регулировку яркости",
+                probeInfo.isEmpty() ? "Результат покажется всплывающей подсказкой" : probeInfo));
         return l;
     }
 
