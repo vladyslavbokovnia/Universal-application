@@ -85,9 +85,10 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvid
                 q.toast("⚠️🔗");
                 return false;
             }
-            // кнопки скрипта YouTube TTS: 🧹 шлёт флаг clean («эээ» вырезаются независимо от настройки),
-            // 🗣 шлёт флаг video (mp4: видео с YouTube + перевод Яндекса вместо оригинального звука)
-            q.submit(url, title, intent.getBooleanExtra("clean", false), intent.getBooleanExtra("video", false));
+            // кнопки скрипта YouTube TTS: 🧹 шлёт флаг clean («эээ» вырезаются независимо от настройки);
+            // 🗣 шлёт тип text/x-votaudio (или флаг video): mp4 с видео YouTube и переводом Яндекса вместо звука
+            boolean video = intent.getBooleanExtra("video", false) || MIME_VOT.equals(intent.getType());
+            q.submit(url, title, intent.getBooleanExtra("clean", false), video);
             return true;
         } catch (Throwable t) {
             return false;
