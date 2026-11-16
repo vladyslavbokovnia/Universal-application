@@ -31,7 +31,6 @@ import android.media.MediaMetadata;
 import android.media.MediaPlayer;
 import android.media.MediaScannerConnection;
 import android.media.PlaybackParams;
-import android.media.ToneGenerator;
 import android.media.session.MediaController;
 import android.media.session.MediaSession;
 import android.media.session.MediaSessionManager;
@@ -138,6 +137,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             {"speed_up", "🐇 Быстрее"},
             {"speed_down", "🐢 Медленнее"},
             {"speed_reset", "1× Обычная скорость"},
+            {"reverse", "🔃 Обратный порядок вкл/выкл"},
             {"focus", "🎯 Фокус для геймпада вкл/выкл"},
     };
 
@@ -180,7 +180,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     };
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 14; }
+    @Override public int getVersion() { return 15; }
     @Override public String getDescription() {
         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
@@ -640,12 +640,12 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     }
 
     public void next() {
-        int i = stepIdx(1);
+        int i = stepIdx(reverseOn() ? -1 : 1);
         if (i >= 0) playAt(i);
     }
 
     public void prev() {
-        int i = stepIdx(-1);
+        int i = stepIdx(reverseOn() ? 1 : -1);
         if (i >= 0) playAt(i);
     }
 
@@ -1009,7 +1009,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             if (n <= 0) throw new Exception("система отказала");
         } catch (Throwable th) {
             toast("Не удалось удалить");
-            tone(ToneGenerator.TONE_PROP_NACK);
+            speak("Не удалось удалить");
             return;
         }
         tracks.remove(i);
@@ -1055,6 +1055,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             if (i < cur) cur--;
         }
         toast("Удалено");
+        speak("Удалено");
         refreshUiAll();
     }
 
@@ -1218,7 +1219,23 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
     private void toggleStopAfter() {
         stopAfter = !stopAfter;
-        tone(stopAfter ? ToneGenerator.TONE_PROP_ACK : ToneGenerator.TONE_PROP_BEEP);
+        speak(stopAfter ? "Остановлюсь после этого трека" : "Продолжу играть дальше");
+    }
+
+    /** Обратный порядок: «вперёд» идёт к предыдущей песне списка, а доиграв трек, плеер берёт предыдущую. */
+    private boolean reverseOn() {
+        SharedPreferences p = prefs();
+        return p != null && p.getBoolean("reverse", false);
+    }
+
+    /** Переключатель «обратный порядок»: кнопка на экране, настройка или кнопка геймпада; результат озвучивается. */
+    private void toggleReverse() {
+        SharedPreferences p = prefs();
+        if (p == null) return;
+        boolean now = !p.getBoolean("reverse", false);
+        p.edit().putBoolean("reverse", now).apply();
+        refreshUiHead();
+        speak(now ? "Обратный порядок включён" : "Обычный порядок");
     }
 
     private BroadcastReceiver noisyRx;
@@ -1325,27 +1342,6 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         return plLoad(key).size();
     }
 
-    /** Громкость звуковых сигналов 10-100 (настройка «Громкость сигналов»); по умолчанию максимум. */
-    private int toneVolume() {
-        SharedPreferences p = prefs();
-        int v = p == null ? 100 : p.getInt("tone_vol", 100);
-        return Math.max(10, Math.min(100, v));
-    }
-
-    /** Звуковой отклик, чтобы не смотреть на экран. */
-    private void tone(int type) {
-        try {
-            final ToneGenerator tg = new ToneGenerator(AudioManager.STREAM_MUSIC, toneVolume());
-            tg.startTone(type, 250);
-            Handler hh = h;
-            if (hh != null) {
-                hh.postDelayed(new Runnable() {
-                    @Override public void run() { try { tg.release(); } catch (Throwable t) { } }
-                }, 700);
-            }
-        } catch (Throwable t) { }
-    }
-
     /** Что сейчас слушаем: свой трек, а если свой не играет, то трек чужого плеера (по названию и исполнителю). */
     private String[] currentEntry() {
         if (isPlaying()) return ownEntry();
@@ -1380,14 +1376,14 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
      */
     private void addCurrentTo(String key) {
         String[] e = currentEntry();
-        if (e == null) { tone(ToneGenerator.TONE_PROP_NACK); return; }
+        if (e == null) { speak("Сейчас ничего не играет"); return; }
         List<String[]> l = plLoad(key);
         for (String[] x : l) {
-            if (sameEntry(x, e)) { tone(ToneGenerator.TONE_PROP_BEEP); return; }
+            if (sameEntry(x, e)) { speak(key.equals(PL_FAV) ? "Уже в избранном" : "Уже в списке «Послушать позже»"); return; }
         }
         l.add(e);
         plSave(key, l);
-        tone(key.equals(PL_FAV) ? ToneGenerator.TONE_PROP_ACK : ToneGenerator.TONE_PROP_PROMPT);
+        speak(key.equals(PL_FAV) ? "Добавлено в избранное" : "Добавлено в «Послушать позже»");
         refreshUiAll();
     }
 
@@ -1475,7 +1471,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             speak(listName(listSrc));
             return;
         }
-        tone(ToneGenerator.TONE_PROP_NACK);
+        speak("Других списков нет");
     }
 
     /** Удалённый с устройства трек убираем из обоих плейлистов (по адресу). */
@@ -1503,7 +1499,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     /** Удаление с геймпада: первое нажатие даёт сигнал «подтверди», второе в течение 4 секунд удаляет файл. */
     private void deleteCurrentConfirm() {
         if (cur < 0 || cur >= tracks.size() || mp == null || !prepared) {
-            tone(ToneGenerator.TONE_PROP_NACK);
+            speak("Нечего удалять");
             return;
         }
         long now = SystemClock.uptimeMillis();
@@ -1513,7 +1509,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             return;
         }
         delArmedAt = now;
-        tone(ToneGenerator.TONE_CDMA_ABBR_ALERT);
+        speak("Удалить? Нажми ещё раз");
     }
 
     private TextToSpeech tts;
@@ -1527,7 +1523,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     private void sayCurrent() {
         String[] e = currentEntry();
         if (e == null || e[1] == null || e[1].length() == 0) {
-            tone(ToneGenerator.TONE_PROP_NACK);
+            speak("Сейчас ничего не играет");
             return;
         }
         String text = e[1];
@@ -1536,12 +1532,13 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             boolean byIdx = queue == null || queue.length == 0;
             int[] q = effectiveQueue();
             int p = queuePos(q);
+            boolean rev = reverseOn();
             int left;
             if (p >= 0) {
-                left = q.length - 1 - p;
+                left = rev ? p : q.length - 1 - p;
             } else if (byIdx) {
                 left = 0;
-                for (int k = 0; k < q.length; k++) if (q[k] > cur) left++;
+                for (int k = 0; k < q.length; k++) if (rev ? q[k] < cur : q[k] > cur) left++;
             } else {
                 left = q.length;
             }
@@ -1590,7 +1587,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     private void sayPercent() {
         float f = currentFraction();
         if (f < 0f) {
-            tone(ToneGenerator.TONE_PROP_NACK);
+            speak("Нет данных о треке");
             return;
         }
         int pct = Math.max(0, Math.min(100, Math.round(f * 100f)));
@@ -1624,7 +1621,6 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         String text = ttsPending;
         ttsPending = null;
         if (text == null || tts == null || !ttsReady) {
-            if (text != null) tone(ToneGenerator.TONE_PROP_NACK);
             return;
         }
         boolean cyr = false;
@@ -1681,7 +1677,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     private void toggleTouchLock() {
         if (touchShield != null) {
             unlockTouch();
-            tone(ToneGenerator.TONE_PROP_ACK);
+            speak("Касания разблокированы");
             return;
         }
         Context c = appCtx;
@@ -1705,7 +1701,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             } else {
                 PlayerView v = boundView;
                 if (v == null || !(v.getRootView() instanceof ViewGroup)) {
-                    tone(ToneGenerator.TONE_PROP_NACK);
+                    speak("Не удалось заблокировать касания");
                     return;
                 }
                 ViewGroup root = (ViewGroup) v.getRootView();
@@ -1718,10 +1714,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 @Override public void onReceive(Context ctx, Intent intent) { unlockTouch(); }
             };
             c.registerReceiver(screenOffRx, new IntentFilter(Intent.ACTION_SCREEN_OFF));
-            tone(ToneGenerator.TONE_PROP_PROMPT);
+            speak("Касания заблокированы");
         } catch (Throwable t) {
             unlockTouch();
-            tone(ToneGenerator.TONE_PROP_NACK);
+            speak("Не удалось заблокировать касания");
         }
     }
 
@@ -1916,7 +1912,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         if (p == null) return;
         boolean now = !p.getBoolean("pad_focus", false);
         p.edit().putBoolean("pad_focus", now).apply();
-        tone(now ? ToneGenerator.TONE_PROP_ACK : ToneGenerator.TONE_PROP_BEEP);
+        speak(now ? "Фокус для геймпада включён" : "Фокус для геймпада выключен");
         updateFocusCatcher();
     }
 
@@ -2310,6 +2306,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         if (a.equals("later")) { addCurrentTo(PL_LATER); return; }
         if (a.equals("fav")) { addCurrentTo(PL_FAV); return; }
         if (a.equals("pl_switch")) { switchList(); return; }
+        if (a.equals("reverse")) { toggleReverse(); return; }
         if (a.equals("delete")) { deleteCurrentConfirm(); return; }
         if (a.equals("say")) { sayCurrent(); return; }
         if (a.equals("say_pct")) { sayPercent(); return; }
@@ -2354,6 +2351,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     @Override public List<SettingItem> getSettingsSchema() {
         List<SettingItem> r = new ArrayList<SettingItem>();
         r.add(SettingItem.section("🎵 Плеер"));
+        r.add(SettingItem.toggle("reverse", "🔃 Обратный порядок",
+                "Играть список с конца: «вперёд» идёт к предыдущей песне", false));
         r.add(SettingItem.toggle("newest_first", "🆕 Новые песни сверху",
                 "Список по порядку загрузки на устройство; выключено: старые сверху, новые внизу", false));
         r.add(SettingItem.toggle("resume", "📍 Помнить место в треке",
@@ -2372,8 +2371,6 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 "Прозрачное окно поверх экрана принимает стики и кнопки, пока геймпад подключён и окно плеера закрыто (Android 11). Минус: приложение под ним теряет фокус (клавиатура, «Назад»)", false));
         r.add(SettingItem.toggle("pad_focus_fullscreen", "📺 Скрывать строку состояния",
                 "Пока работает окно фокуса: строка состояния скрыта (потянуть с верхнего края, чтобы показать на время)", true));
-        r.add(SettingItem.slider("tone_vol", "🔔 Громкость сигналов",
-                "Писки при удалении, плейлистах, блокировке касаний", 10, 100, 5, 100));
         r.add(SettingItem.section("🎮 Геймпад (окно открыто)"));
         r.add(SettingItem.toggle("intercept", "🚫 Перехват кнопок",
                 "Включено: назначенная кнопка только для плеера", true));
@@ -2394,6 +2391,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             if (m != null) m.reset();
         } else if ("remote_any".equals(key)) {
             if (!remoteAny()) ensureSession();
+        } else if ("reverse".equals(key)) {
+            refreshUiHead();
         } else if ("newest_first".equals(key)) {
             loadTracks();                            // новый порядок списка; текущий трек находится по id
             refreshUiAll();
@@ -2442,6 +2441,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         private final TextView trackHead;
         private final LinearLayout trackRows;
         private final TextView status;
+        private Button bRev;
         private boolean padOpen = false;
         private int listMode = 0;                  // 0 все песни, 1 «Послушать позже», 2 «Избранное»
         private Button bAll;
@@ -2509,6 +2509,11 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             ctrls.addView(bPrev);
             ctrls.addView(bPlay);
             ctrls.addView(bNext);
+            bRev = new Button(ctx);
+            bRev.setOnClickListener(new OnClickListener() {
+                @Override public void onClick(View v) { toggleReverse(); }
+            });
+            ctrls.addView(bRev);
             body.addView(ctrls);
 
             // списки: все песни / «Послушать позже» / «Избранное», справа «🔄» (найти новые песни)
@@ -2728,6 +2733,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             status.setText("Геймпад работает, пока это окно открыто и в фокусе.\n"
                     + "Циферблат по треку: нажми стик на картинке 🎮 и включи его там.\n\n" + focusReport());
             if (bAll != null) updateListButtons();
+            if (bRev != null) bRev.setText(reverseOn() ? "🔃 ●" : "🔃");
             if (cur != markedCur) markCurrent(true);
         }
 
