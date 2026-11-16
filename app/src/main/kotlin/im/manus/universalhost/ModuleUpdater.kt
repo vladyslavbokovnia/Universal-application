@@ -49,7 +49,8 @@ object ModuleUpdater {
     /** Зависимости хоста: имя в [Deps] и подпись для сообщения пользователю. */
     private val DEPS = listOf(
         Deps.NEWPIPE to "NewPipe",
-        Deps.UHM to "Uhm (вступит после перезапуска)"
+        Deps.UHM to "Uhm (вступит после перезапуска)",
+        Deps.STEADY to "Steady"
     )
 
     private class Asset(val name: String, val id: String, val size: Long, val url: String, val digest: String?)

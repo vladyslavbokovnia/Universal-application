@@ -37,6 +37,7 @@ public final class Deps {
 
     public static final String NEWPIPE = "newpipe";
     public static final String UHM = "uhm";
+    public static final String STEADY = "steady";
 
     private static final String API =
             "https://api.github.com/repos/vladyslavbokovnia/Universal-application/releases/tags/latest";
@@ -75,11 +76,71 @@ public final class Deps {
         return file(c, name).isFile();
     }
 
-    /** Для строки в настройках. */
+    /** Папка с данными модели, которые зависимость докачивает сама (у Uhm это files/uhm); у остальных null. */
+    public static File dataDir(Context c, String name) {
+        return UHM.equals(name) ? new File(c.getFilesDir(), "uhm") : null;
+    }
+
+    private static long treeSize(File f) {
+        if (f == null || !f.exists()) return 0;
+        if (f.isFile()) return f.length();
+        long n = 0;
+        File[] a = f.listFiles();
+        if (a != null) for (File x : a) n += treeSize(x);
+        return n;
+    }
+
+    private static void rmTree(File f) {
+        if (f == null || !f.exists()) return;
+        File[] a = f.listFiles();
+        if (a != null) for (File x : a) rmTree(x);
+        f.setWritable(true);
+        f.delete();
+    }
+
+    /** Для строки в настройках: сам файл и данные модели вместе. */
     public static String state(Context c, String name) {
         File f = file(c, name);
         if (!f.isFile()) return "не скачана";
-        return "скачана, " + Math.max(1, Math.round(f.length() / 1048576.0)) + " МБ";
+        long total = f.length() + treeSize(dataDir(c, name));
+        return "скачана, " + Math.max(1, Math.round(total / 1048576.0)) + " МБ";
+    }
+
+    /**
+     * Удаляет зависимость с устройства: файл, кэш кода и данные модели. Скачать её можно снова, когда понадобится.
+     * Нативный код Uhm, уже загруженный в этом запуске, остаётся в памяти до перезапуска приложения.
+     */
+    public static void delete(Context c, String name) {
+        synchronized (LOCK) {
+            if (!UHM.equals(name)) evict(name);
+            File f = file(c, name);
+            f.setWritable(true);
+            f.delete();
+            new File(f.getPath() + ".tmp").delete();
+            rmTree(new File(c.getCodeCacheDir(), "dep-" + name));
+            rmTree(dataDir(c, name));
+        }
+    }
+
+    /** То же в фоне, с уведомлением 🗑🧩. */
+    public static void deleteAsync(Context c, final String name) {
+        final Context a = c.getApplicationContext();
+        Thread t = new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    delete(a, name);
+                    YtNotify.show(a, "🗑🧩", "🧩");
+                } catch (Throwable e) {
+                    YtNotify.show(a, "⚠️🧩", "⚠️");
+                }
+            }
+        }, "DepDelete");
+        t.start();
+    }
+
+    /** Выгружает зависимость из памяти, файл остаётся (Uhm с нативными библиотеками выгрузить нельзя). */
+    public static void release(String name) {
+        if (!UHM.equals(name)) evict(name);
     }
 
     // ------------------------------------------------------------ загрузка классов

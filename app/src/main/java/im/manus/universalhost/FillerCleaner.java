@@ -40,7 +40,11 @@ import java.util.List;
  */
 public final class FillerCleaner {
 
-    private static final String IMPL = "im.manus.deps.UhmImpl";
+    /** Движки очистки по номеру настройки clean_engine: зависимость, класс в ней, папка данных и название для сообщений. */
+    private static final String[] ENG_DEP = {Deps.UHM, Deps.STEADY};
+    private static final String[] ENG_IMPL = {"im.manus.deps.UhmImpl", "im.manus.deps.SteadyImpl"};
+    private static final String[] ENG_DIR = {"uhm", "steady"};
+    private static final String[] ENG_NAME = {"библиотека Uhm (dep-uhm)", "библиотека Steady (dep-steady)"};
     private static final double CHUNK_SEC = 90;
     private static final double OVERLAP_SEC = 2;
     private static final double MERGE_GAP_SEC = 0.12;
@@ -79,13 +83,15 @@ public final class FillerCleaner {
     /** Чистит файл на месте. Возвращает отчёт; file в нём — путь результата (при count = 0 это исходный файл). */
     public static Report clean(Context ctx, File audio) throws Exception {
         Context app = ctx.getApplicationContext();
-        if (!Deps.installed(app, Deps.UHM)) {
-            // библиотека большая: в режиме «только по Wi-Fi» по мобильной сети не качаем
+        int eng = YtAudioQueue.get(app).cleanEngine();
+        if (eng < 0 || eng >= ENG_DEP.length) eng = 0;
+        if (!Deps.installed(app, ENG_DEP[eng])) {
+            // библиотека может быть большой: в режиме «только по Wi-Fi» по мобильной сети не качаем
             YtAudioQueue q = YtAudioQueue.get(app);
             if (q.wifiOnly() && q.netKind() != 2) {
-                throw new Unavailable("Нужен Wi-Fi: скачивается библиотека Uhm (dep-uhm)");
+                throw new Unavailable("Нужен Wi-Fi: скачивается " + ENG_NAME[eng]);
             }
-            Deps.ensure(app, Deps.UHM, null);
+            Deps.ensure(app, ENG_DEP[eng], null);
         }
         File work = new File(app.getCacheDir(), "fillers");
         work.mkdirs();
@@ -103,7 +109,7 @@ public final class FillerCleaner {
             rep.file = audio.getAbsolutePath();
 
             raf = new RandomAccessFile(pcmFile, "r");
-            List<double[]> found = detectAll(app, raf, p);
+            List<double[]> found = detectAll(app, raf, p, eng);
             List<double[]> merged = merge(found);
             double removed = 0;
             for (double[] c : merged) removed += c[1] - c[0];
@@ -297,9 +303,9 @@ public final class FillerCleaner {
         return cut;
     }
 
-    private static List<double[]> detectAll(Context app, RandomAccessFile raf, Pcm p) throws Exception {
-        FillerEngine eng = Deps.create(app, Deps.UHM, IMPL, FillerEngine.class);
-        String dir = new File(app.getFilesDir(), "uhm").getAbsolutePath();
+    private static List<double[]> detectAll(Context app, RandomAccessFile raf, Pcm p, int which) throws Exception {
+        FillerEngine eng = Deps.create(app, ENG_DEP[which], ENG_IMPL[which], FillerEngine.class);
+        String dir = new File(app.getFilesDir(), ENG_DIR[which]).getAbsolutePath();
         eng.open(app, dir);
         try {
             double total = (double) p.frames / p.rate;
@@ -319,6 +325,7 @@ public final class FillerCleaner {
             return res;
         } finally {
             eng.close();
+            Deps.release(ENG_DEP[which]);              // легкие движки выгружаются из памяти сразу после очистки
         }
     }
 

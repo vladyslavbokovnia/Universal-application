@@ -110,6 +110,11 @@ public final class YtAudioQueue {
         }
     }
 
+    /** Движок очистки «эээ»: 0 Uhm, 1 Steady (настройка clean_engine в модуле). */
+    public int cleanEngine() {
+        return prefs().getInt("clean_engine", 0);
+    }
+
     private boolean cleanWanted() {
         return prefs().getBoolean("clean_fillers", true) && FillerCleaner.available();
     }

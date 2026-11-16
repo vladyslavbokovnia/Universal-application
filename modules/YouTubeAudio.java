@@ -116,10 +116,18 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvid
         r.add(SettingItem.section("🧩 Зависимости"));
         r.add(SettingItem.action("dep_newpipe", "🧩 NewPipe (YouTube): " + depState(Deps.NEWPIPE),
                 "Скачать или обновить библиотеку из релиза. Нужна для загрузки дорожек: без неё ссылки ждут в списке. Новая версия вступает сразу."));
+        addDelete(r, "del_newpipe", "NewPipe", Deps.NEWPIPE);
         r.add(SettingItem.toggle("clean_fillers", "🧹 Вырезать «эээ» из русского оригинала",
-                "Включено: после загрузки русского оригинала «эээ» вырезаются моделью ниже. Кнопка 🧹 в меню скрипта вырезает «эээ» в любом случае. Если модель не скачалась или нашла слишком много, файл остаётся как есть.", true));
+                "Включено: после загрузки русского оригинала «эээ» вырезаются выбранным ниже движком. Кнопка 🧹 в меню скрипта вырезает «эээ» в любом случае. Если движок не скачался или нашёл слишком много, файл остаётся как есть.", true));
+        r.add(SettingItem.choice("clean_engine", "🧪 Движок очистки «эээ»",
+                "Работает только выбранный: остальные в память не загружаются, их можно удалить кнопками ниже. Uhm: модель на английском, для русской речи перенос. Steady: без модели, ищет долгие ровные гласные, от языка не зависит; ошибается на протянутых словах.",
+                Arrays.asList("Uhm (модель)", "Steady (ровные гласные)"), 0));
         r.add(SettingItem.action("dep_uhm", "🧩 Uhm («эээ»): " + depState(Deps.UHM),
                 "Скачать или обновить библиотеку из релиза (большой файл, лучше по Wi-Fi). Обновление вступает после перезапуска приложения."));
+        addDelete(r, "del_uhm", "Uhm", Deps.UHM);
+        r.add(SettingItem.action("dep_steady", "🧩 Steady («эээ»): " + depState(Deps.STEADY),
+                "Скачать или обновить лёгкую библиотеку из релиза (без модели, меньше мегабайта)."));
+        addDelete(r, "del_steady", "Steady", Deps.STEADY);
         r.add(SettingItem.section("🗣 Перевод Яндекса"));
         r.addAll(YtPipeline.votSettings(appCtx));
         return r;
@@ -129,10 +137,21 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvid
         return appCtx == null ? "" : Deps.state(appCtx, name);
     }
 
+    /** Кнопка «удалить зависимость» показывается, только пока она скачана. */
+    private void addDelete(List<SettingItem> r, String key, String title, String dep) {
+        if (appCtx == null || !Deps.installed(appCtx, dep)) return;
+        r.add(SettingItem.action(key, "🗑 Удалить " + title + " (" + depState(dep) + ")",
+                "Стирает файлы с телефона. Скачать снова можно кнопкой выше. Нативный код Uhm, уже загруженный в этом запуске, освободится после перезапуска приложения."));
+    }
+
     @Override public void onSettingChanged(String key) {
         if (appCtx == null) return;
         if ("dep_newpipe".equals(key)) { Deps.updateAsync(appCtx, Deps.NEWPIPE); return; }
         if ("dep_uhm".equals(key)) { Deps.updateAsync(appCtx, Deps.UHM); return; }
+        if ("dep_steady".equals(key)) { Deps.updateAsync(appCtx, Deps.STEADY); return; }
+        if ("del_newpipe".equals(key)) { Deps.deleteAsync(appCtx, Deps.NEWPIPE); return; }
+        if ("del_uhm".equals(key)) { Deps.deleteAsync(appCtx, Deps.UHM); return; }
+        if ("del_steady".equals(key)) { Deps.deleteAsync(appCtx, Deps.STEADY); return; }
         if (key != null && key.startsWith("vot_")) { YtPipeline.votSettingChanged(appCtx, key); return; }
         if ("auto_mode".equals(key) || "wifi_only".equals(key)) YtAudioQueue.get(appCtx).tryDrain();
     }
