@@ -41,10 +41,11 @@ import java.util.List;
 public final class FillerCleaner {
 
     /** Движки очистки по номеру настройки clean_engine: зависимость, класс в ней, папка данных и название для сообщений. */
-    private static final String[] ENG_DEP = {Deps.UHM, Deps.STEADY};
-    private static final String[] ENG_IMPL = {"im.manus.deps.UhmImpl", "im.manus.deps.SteadyImpl"};
-    private static final String[] ENG_DIR = {"uhm", "steady"};
-    private static final String[] ENG_NAME = {"библиотека Uhm (dep-uhm)", "библиотека Steady (dep-steady)"};
+    private static final String[] ENG_DEP = {Deps.UHM, Deps.STEADY, Deps.GIGAAM};
+    private static final String[] ENG_IMPL = {"im.manus.deps.UhmImpl", "im.manus.deps.SteadyImpl", "im.manus.deps.GigaamImpl"};
+    private static final String[] ENG_DIR = {"uhm", "steady", "gigaam"};
+    private static final String[] ENG_NAME = {"библиотека Uhm (dep-uhm)", "библиотека Steady (dep-steady)",
+            "библиотека GigaAM (dep-gigaam, потом модель около 230 МБ)"};
     private static final double CHUNK_SEC = 90;
     private static final double OVERLAP_SEC = 2;
     private static final double MERGE_GAP_SEC = 0.12;

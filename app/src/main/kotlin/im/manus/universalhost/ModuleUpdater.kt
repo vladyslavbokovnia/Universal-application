@@ -50,7 +50,8 @@ object ModuleUpdater {
     private val DEPS = listOf(
         Deps.NEWPIPE to "NewPipe",
         Deps.UHM to "Uhm (вступит после перезапуска)",
-        Deps.STEADY to "Steady"
+        Deps.STEADY to "Steady",
+        Deps.GIGAAM to "GigaAM (вступит после перезапуска)"
     )
 
     private class Asset(val name: String, val id: String, val size: Long, val url: String, val digest: String?)

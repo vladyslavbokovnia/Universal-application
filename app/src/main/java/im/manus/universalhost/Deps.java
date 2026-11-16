@@ -38,6 +38,12 @@ public final class Deps {
     public static final String NEWPIPE = "newpipe";
     public static final String UHM = "uhm";
     public static final String STEADY = "steady";
+    public static final String GIGAAM = "gigaam";
+
+    /** Зависимости с нативными библиотеками: уже загруженный код нельзя выгрузить до перезапуска приложения. */
+    private static boolean isNative(String name) {
+        return UHM.equals(name) || GIGAAM.equals(name);
+    }
 
     private static final String API =
             "https://api.github.com/repos/vladyslavbokovnia/Universal-application/releases/tags/latest";
@@ -78,7 +84,9 @@ public final class Deps {
 
     /** Папка с данными модели, которые зависимость докачивает сама (у Uhm это files/uhm); у остальных null. */
     public static File dataDir(Context c, String name) {
-        return UHM.equals(name) ? new File(c.getFilesDir(), "uhm") : null;
+        if (UHM.equals(name)) return new File(c.getFilesDir(), "uhm");
+        if (GIGAAM.equals(name)) return new File(c.getFilesDir(), "gigaam");
+        return null;
     }
 
     private static long treeSize(File f) {
@@ -112,7 +120,7 @@ public final class Deps {
      */
     public static void delete(Context c, String name) {
         synchronized (LOCK) {
-            if (!UHM.equals(name)) evict(name);
+            if (!isNative(name)) evict(name);
             File f = file(c, name);
             f.setWritable(true);
             f.delete();
@@ -140,7 +148,7 @@ public final class Deps {
 
     /** Выгружает зависимость из памяти, файл остаётся (Uhm с нативными библиотеками выгрузить нельзя). */
     public static void release(String name) {
-        if (!UHM.equals(name)) evict(name);
+        if (!isNative(name)) evict(name);
     }
 
     // ------------------------------------------------------------ загрузка классов
@@ -234,7 +242,7 @@ public final class Deps {
             } finally {
                 tmp.delete();
             }
-            if (!UHM.equals(name)) evict(name);
+            if (!isNative(name)) evict(name);
             return true;
         }
     }
