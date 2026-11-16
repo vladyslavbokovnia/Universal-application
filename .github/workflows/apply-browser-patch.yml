@@ -54,6 +54,14 @@ jobs:
         run: |
           set -euo pipefail
           base64 -d ci/debug.keystore.b64 > ci/debug.keystore
+      # Библиотека sherpa-onnx для dep-gigaam лежит в релизах проекта k2-fsa, а не в Maven: без неё модуль не соберётся
+      - name: Download sherpa-onnx AAR for dep-gigaam
+        if: steps.apply.outputs.has_patches == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dep-gigaam/libs
+          curl -fL --retry 3 -o dep-gigaam/libs/sherpa-onnx.aar "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.12.39/sherpa-onnx-static-link-onnxruntime-1.12.39.aar"
       - name: Build host
         if: steps.apply.outputs.has_patches == 'true'
         shell: bash
