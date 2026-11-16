@@ -1,0 +1,228 @@
+diff --git a/modules/AudioPlayer.java b/modules/AudioPlayer.java
+--- a/modules/AudioPlayer.java
++++ b/modules/AudioPlayer.java
+@@ -33,3 +33,2 @@
+ import android.media.PlaybackParams;
+-import android.media.ToneGenerator;
+ import android.media.session.MediaController;
+@@ -120,3 +120,4 @@
+             {"speed_reset", "1× Обычная скорость"},
++            {"reverse", "🔃 Обратный порядок вкл/выкл"},
+             {"focus", "🎯 Фокус для геймпада вкл/выкл"},
+     };
+@@ -158,2 +158,2 @@
+-    @Override public int getVersion() { return 14; }
++    @Override public int getVersion() { return 15; }
+     @Override public String getDescription() {
+@@ -436,4 +436,4 @@
+     public void next() {
+-        int i = stepIdx(1);
++        int i = stepIdx(reverseOn() ? -1 : 1);
+         if (i >= 0) playAt(i);
+     }
+@@ -441,4 +441,4 @@
+     public void prev() {
+-        int i = stepIdx(-1);
++        int i = stepIdx(reverseOn() ? 1 : -1);
+         if (i >= 0) playAt(i);
+     }
+@@ -716,4 +716,4 @@
+             toast("Не удалось удалить");
+-            tone(ToneGenerator.TONE_PROP_NACK);
++            speak("Не удалось удалить");
+             return;
+         }
+@@ -760,3 +760,4 @@
+         toast("Удалено");
++        speak("Удалено");
+         refreshUiAll();
+     }
+@@ -925,6 +925,22 @@
+     private void toggleStopAfter() {
+         stopAfter = !stopAfter;
+-        tone(stopAfter ? ToneGenerator.TONE_PROP_ACK : ToneGenerator.TONE_PROP_BEEP);
++        speak(stopAfter ? "Остановлюсь после этого трека" : "Продолжу играть дальше");
+     }
++
++    /** Обратный порядок: «вперёд» идёт к предыдущей песне списка, а доиграв трек, плеер берёт предыдущую. */
++    private boolean reverseOn() {
++        SharedPreferences p = prefs();
++        return p != null && p.getBoolean("reverse", false);
++    }
++
++    /** Переключатель «обратный порядок»: кнопка на экране, настройка или кнопка геймпада; результат озвучивается. */
++    private void toggleReverse() {
++        SharedPreferences p = prefs();
++        if (p == null) return;
++        boolean now = !p.getBoolean("reverse", false);
++        p.edit().putBoolean("reverse", now).apply();
++        refreshUiHead();
++        speak(now ? "Обратный порядок включён" : "Обычный порядок");
++    }
+ 
+     private BroadcastReceiver noisyRx;
+@@ -1010,24 +1026,3 @@
+         return plLoad(key).size();
+     }
+-
+-    /** Громкость звуковых сигналов 10-100 (настройка «Громкость сигналов»); по умолчанию максимум. */
+-    private int toneVolume() {
+-        SharedPreferences p = prefs();
+-        int v = p == null ? 100 : p.getInt("tone_vol", 100);
+-        return Math.max(10, Math.min(100, v));
+-    }
+-
+-    /** Звуковой отклик, чтобы не смотреть на экран. */
+-    private void tone(int type) {
+-        try {
+-            final ToneGenerator tg = new ToneGenerator(AudioManager.STREAM_MUSIC, toneVolume());
+-            tg.startTone(type, 250);
+-            Handler hh = h;
+-            if (hh != null) {
+-                hh.postDelayed(new Runnable() {
+-                    @Override public void run() { try { tg.release(); } catch (Throwable t) { } }
+-                }, 700);
+-            }
+-        } catch (Throwable t) { }
+-    }
+ 
+@@ -1050,12 +1050,12 @@
+     private void addCurrentTo(String key) {
+         String[] e = currentEntry();
+-        if (e == null) { tone(ToneGenerator.TONE_PROP_NACK); return; }
++        if (e == null) { speak("Сейчас ничего не играет"); return; }
+         List<String[]> l = plLoad(key);
+         for (String[] x : l) {
+-            if (sameEntry(x, e)) { tone(ToneGenerator.TONE_PROP_BEEP); return; }
++            if (sameEntry(x, e)) { speak(key.equals(PL_FAV) ? "Уже в избранном" : "Уже в списке «Послушать позже»"); return; }
+         }
+         l.add(e);
+         plSave(key, l);
+-        tone(key.equals(PL_FAV) ? ToneGenerator.TONE_PROP_ACK : ToneGenerator.TONE_PROP_PROMPT);
++        speak(key.equals(PL_FAV) ? "Добавлено в избранное" : "Добавлено в «Послушать позже»");
+         refreshUiAll();
+     }
+@@ -1140,5 +1140,5 @@
+             speak(listName(listSrc));
+             return;
+         }
+-        tone(ToneGenerator.TONE_PROP_NACK);
++        speak("Других списков нет");
+     }
+@@ -1180,13 +1180,13 @@
+         if (cur < 0 || cur >= tracks.size() || mp == null || !prepared) {
+-            tone(ToneGenerator.TONE_PROP_NACK);
++            speak("Нечего удалять");
+             return;
+         }
+         long now = SystemClock.uptimeMillis();
+         if (delArmedAt != 0 && now - delArmedAt <= 4000) {
+             delArmedAt = 0;
+             deleteTrack(cur);
+             return;
+         }
+         delArmedAt = now;
+-        tone(ToneGenerator.TONE_CDMA_ABBR_ALERT);
++        speak("Удалить? Нажми ещё раз");
+     }
+@@ -1198,5 +1198,5 @@
+         if (e == null || e[1] == null || e[1].length() == 0) {
+-            tone(ToneGenerator.TONE_PROP_NACK);
++            speak("Сейчас ничего не играет");
+             return;
+         }
+         String text = e[1];
+@@ -1214,10 +1214,11 @@
+             int p = queuePos(q);
++            boolean rev = reverseOn();
+             int left;
+             if (p >= 0) {
+-                left = q.length - 1 - p;
++                left = rev ? p : q.length - 1 - p;
+             } else if (byIdx) {
+                 left = 0;
+-                for (int k = 0; k < q.length; k++) if (q[k] > cur) left++;
++                for (int k = 0; k < q.length; k++) if (rev ? q[k] < cur : q[k] > cur) left++;
+             } else {
+                 left = q.length;
+             }
+@@ -1262,5 +1263,5 @@
+         if (f < 0f) {
+-            tone(ToneGenerator.TONE_PROP_NACK);
++            speak("Нет данных о треке");
+             return;
+         }
+         int pct = Math.max(0, Math.min(100, Math.round(f * 100f)));
+@@ -1330,5 +1331,4 @@
+         if (text == null || tts == null || !ttsReady) {
+-            if (text != null) tone(ToneGenerator.TONE_PROP_NACK);
+             return;
+         }
+         boolean cyr = false;
+@@ -1380,5 +1381,5 @@
+         if (touchShield != null) {
+             unlockTouch();
+-            tone(ToneGenerator.TONE_PROP_ACK);
++            speak("Касания разблокированы");
+             return;
+         }
+@@ -1395,4 +1396,4 @@
+                 if (v == null || !(v.getRootView() instanceof ViewGroup)) {
+-                    tone(ToneGenerator.TONE_PROP_NACK);
++                    speak("Не удалось заблокировать касания");
+                     return;
+                 }
+@@ -1410,7 +1411,7 @@
+             c.registerReceiver(screenOffRx, new IntentFilter(Intent.ACTION_SCREEN_OFF));
+-            tone(ToneGenerator.TONE_PROP_PROMPT);
++            speak("Касания заблокированы");
+         } catch (Throwable t) {
+             unlockTouch();
+-            tone(ToneGenerator.TONE_PROP_NACK);
++            speak("Не удалось заблокировать касания");
+         }
+     }
+@@ -1580,4 +1582,4 @@
+         p.edit().putBoolean("pad_focus", now).apply();
+-        tone(now ? ToneGenerator.TONE_PROP_ACK : ToneGenerator.TONE_PROP_BEEP);
++        speak(now ? "Фокус для геймпада включён" : "Фокус для геймпада выключен");
+         updateFocusCatcher();
+     }
+@@ -1850,3 +1852,4 @@
+         if (a.equals("pl_switch")) { switchList(); return; }
++        if (a.equals("reverse")) { toggleReverse(); return; }
+         if (a.equals("delete")) { deleteCurrentConfirm(); return; }
+         if (a.equals("say")) { sayCurrent(); return; }
+@@ -1890,2 +1893,4 @@
+         r.add(SettingItem.section("🎵 Плеер"));
++        r.add(SettingItem.toggle("reverse", "🔃 Обратный порядок",
++                "Играть список с конца: «вперёд» идёт к предыдущей песне", false));
+         r.add(SettingItem.toggle("newest_first", "🆕 Новые песни сверху",
+@@ -1905,3 +1909,1 @@
+-        r.add(SettingItem.slider("tone_vol", "🔔 Громкость сигналов",
+-                "Писки при удалении, плейлистах, блокировке касаний", 10, 100, 5, 100));
+         r.add(SettingItem.section("🎮 Геймпад (окно открыто)"));
+@@ -1920,3 +1925,5 @@
+         } else if ("remote_any".equals(key)) {
+             if (!remoteAny()) ensureSession();
++        } else if ("reverse".equals(key)) {
++            refreshUiHead();
+         } else if ("newest_first".equals(key)) {
+@@ -1950,2 +1957,3 @@
+         private final TextView status;
++        private Button bRev;
+         private boolean padOpen = false;
+@@ -2020,3 +2028,8 @@
+             ctrls.addView(bPlay);
+             ctrls.addView(bNext);
++            bRev = new Button(ctx);
++            bRev.setOnClickListener(new OnClickListener() {
++                @Override public void onClick(View v) { toggleReverse(); }
++            });
++            ctrls.addView(bRev);
+             body.addView(ctrls);
+@@ -2090,3 +2103,4 @@
+             if (bAll != null) updateListButtons();
++            if (bRev != null) bRev.setText(reverseOn() ? "🔃 ●" : "🔃");
+             if (cur != markedCur) markCurrent(true);
+         }
