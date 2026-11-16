@@ -180,7 +180,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     };
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 13; }
+    @Override public int getVersion() { return 14; }
     @Override public String getDescription() {
         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
@@ -849,7 +849,49 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     // Ссылка на видео лежит рядом с песней: то же имя, расширение .url (кладёт модуль «YouTube аудио»).
     private final java.util.HashMap<String, String> linkCache = new java.util.HashMap<String, String>();   // путь -> ссылка, "" = нет
 
-    /** Показывает значок 🔗 у песни, для которой сохранена ссылка; файл читается в фоне. */
+    /** Читает ссылку из файла .url рядом с песней; "" — файла нет. Вызывать можно из любого потока. */
+    private static String readLinkFile(String path) {
+        String u = "";
+        if (path == null) return u;
+        try {
+            int dot = path.lastIndexOf('.');
+            File f = dot < 0 ? null : new File(path.substring(0, dot) + ".url");
+            if (f != null && f.isFile() && f.length() < 4096) {
+                java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(new java.io.FileInputStream(f), "UTF-8"));
+                try {
+                    // голый URL («YouTube аудио») или ярлык [InternetShortcut] с URL=... (перевод Яндекса)
+                    String line;
+                    while ((line = r.readLine()) != null) {
+                        line = line.trim();
+                        if (line.regionMatches(true, 0, "URL=", 0, 4)) line = line.substring(4).trim();
+                        if (line.startsWith("http")) { u = line; break; }
+                    }
+                } finally { r.close(); }
+            }
+        } catch (Throwable t) { }
+        return u;
+    }
+
+    /** Ссылка на видео песни (с кэшем, в главном потоке); "" — это не видео. */
+    String linkOf(String path) {
+        if (path == null) return "";
+        String c = linkCache.get(path);
+        if (c == null) {
+            c = readLinkFile(path);
+            linkCache.put(path, c);
+        }
+        return c;
+    }
+
+    /** Видео из «YouTube аудио»: играет как аудио, на плитке значок 🎬; в списке «🎬 Видео» тап открывает видео. */
+    void playVideo(Context c, Track tr) {
+        String u = tr == null ? "" : linkOf(tr.path);
+        if (u.length() == 0) { toast("У этой песни нет видео"); return; }
+        pause();                                    // звук видео не должен накладываться на аудио
+        openInBrowser(c, u);
+    }
+
+    /** Показывает значок 🎬 у песни, для которой сохранена ссылка на видео; файл читается в фоне. */
     void loadLink(final String path, final View badge) {
         if (path == null || h == null) return;
         String c = linkCache.get(path);
@@ -861,24 +903,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         try {
             coverPool.execute(new Runnable() {
                 @Override public void run() {
-                    String u = "";
-                    try {
-                        int dot = path.lastIndexOf('.');
-                        File f = dot < 0 ? null : new File(path.substring(0, dot) + ".url");
-                        if (f != null && f.isFile() && f.length() < 4096) {
-                            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(new java.io.FileInputStream(f), "UTF-8"));
-                            try {
-                                // голый URL («YouTube аудио») или ярлык [InternetShortcut] с URL=... (перевод Яндекса)
-                                String line;
-                                while ((line = r.readLine()) != null) {
-                                    line = line.trim();
-                                    if (line.regionMatches(true, 0, "URL=", 0, 4)) line = line.substring(4).trim();
-                                    if (line.startsWith("http")) { u = line; break; }
-                                }
-                            } finally { r.close(); }
-                        }
-                    } catch (Throwable t) { }
-                    final String fu = u;
+                    final String fu = readLinkFile(path);
                     h.post(new Runnable() {
                         @Override public void run() {
                             linkCache.put(path, fu);
@@ -2422,6 +2447,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         private Button bAll;
         private Button bLater;
         private Button bFav;
+        private Button bVideo;
         // строки общего списка: чтобы менять пометку «▶» только у двух строк и не перерисовывать весь список
         private final List<TextView> rowMarks = new ArrayList<TextView>();   // значок «▶» на плитке
         private final List<View> rowViews = new ArrayList<View>();
@@ -2491,6 +2517,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             bAll = listButton(ctx, 0);
             bLater = listButton(ctx, 1);
             bFav = listButton(ctx, 2);
+            bVideo = listButton(ctx, 3);
             Button bScan = new Button(ctx);
             bScan.setText("🔄");
             bScan.setOnClickListener(new OnClickListener() {
@@ -2499,6 +2526,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             lists.addView(bAll, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
             lists.addView(bLater, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
             lists.addView(bFav, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
+            lists.addView(bVideo, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
             lists.addView(bScan, new LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT));
             body.addView(lists);
 
@@ -2630,6 +2658,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             bAll.setText((listMode == 0 ? "● " : "") + "♫ " + generalArray().length);
             bLater.setText((listMode == 1 ? "● " : "") + "🕓 " + plCount(PL_LATER));
             bFav.setText((listMode == 2 ? "● " : "") + "⭐ " + plCount(PL_FAV));
+            bVideo.setText((listMode == 3 ? "● " : "") + "🎬 " + videoIdx().size());
         }
 
         private void togglePad() {
@@ -2773,7 +2802,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
             LinearLayout bar = new LinearLayout(ctx);
             bar.setOrientation(LinearLayout.HORIZONTAL);
-            final TextView link = badge(ctx, "\uD83D\uDD17");
+            final TextView link = badge(ctx, "\uD83C\uDFAC");   // \uD83C\uDFAC: \u044D\u0442\u043E \u0432\u0438\u0434\u0435\u043E, \u0442\u0430\u043F \u043E\u0442\u043A\u0440\u044B\u0432\u0430\u0435\u0442 \u0435\u0433\u043E
             link.setVisibility(View.GONE);
             link.setOnClickListener(new OnClickListener() {
                 @Override public void onClick(View v) {
@@ -2874,6 +2903,32 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             fillTiles(ctx, tiles);
         }
 
+        /** Номера песен, у которых рядом лежит ссылка на видео (из любых списков, в порядке медиатеки). */
+        private List<Integer> videoIdx() {
+            List<Integer> r = new ArrayList<Integer>();
+            for (int i = 0; i < tracks.size(); i++) {
+                if (linkOf(tracks.get(i).path).length() > 0) r.add(Integer.valueOf(i));
+            }
+            return r;
+        }
+
+        /** Список «🎬 Видео»: тап по плитке открывает видео (аудио ставится на паузу), «🗑» удаляет песню. */
+        private void buildVideoRows(final Context ctx) {
+            List<Integer> vi = videoIdx();
+            trackHead.setText("🎬 " + vi.size());
+            List<View> tiles = new ArrayList<View>();
+            for (int k = 0; k < vi.size(); k++) {
+                final int idx = vi.get(k).intValue();
+                final Track tr = tracks.get(idx);
+                tiles.add(buildTile(ctx, tr, tr.title, new Runnable() {
+                    @Override public void run() { playVideo(getContext(), tr); }
+                }, new String[]{"🗑"}, new Runnable[]{new Runnable() {
+                    @Override public void run() { askDelete(getContext(), idx); }
+                }}, null));
+            }
+            fillTiles(ctx, tiles);
+        }
+
         private void buildTrackRows() {
             trackRows.removeAllViews();
             rowMarks.clear();
@@ -2881,6 +2936,11 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             rowIdx.clear();
             final Context ctx = getContext();
             updateListButtons();
+            if (listMode == 3) {
+                markedCur = -2;
+                buildVideoRows(ctx);
+                return;
+            }
             if (listMode != 0) {
                 markedCur = -2;
                 buildPlaylistRows(ctx);
