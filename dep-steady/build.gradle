@@ -1,0 +1,27 @@
+// Зависимость Steady (вырезание «эээ» без модели): лёгкий поиск долгих ровных гласных на чистой Java, без нативных библиотек.
+// Собирается в APK-контейнер dep-steady.apk (не устанавливается): хост грузит из него classes.dex через DexClassLoader.
+// Классы интерфейсов хоста берутся из :dep-api и в контейнер не входят.
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'im.manus.deps.steady'
+    compileSdk 33
+
+    defaultConfig {
+        applicationId "im.manus.deps.steady"
+        minSdk 24
+        targetSdk 33
+        versionCode 1
+        versionName "1.0"
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+}
+
+dependencies {
+    compileOnly project(':dep-api')
+}

@@ -5,3 +5,4 @@ include ':dep-api'
 // Зависимости, вынесенные из хоста: каждая собирается в свой dep-<имя>.apk и грузится через DexClassLoader
 include ':dep-newpipe'
 include ':dep-uhm'
+include ':dep-steady'
