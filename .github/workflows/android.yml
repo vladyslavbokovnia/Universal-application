@@ -33,7 +33,7 @@ jobs:
         set -euo pipefail
         python3 -m pip install --quiet pillow numpy scipy
         python3 ci/make_icon.py
-    # Хэш исходников хоста (без модулей и без зависимостей dep-newpipe, dep-uhm, dep-steady): кладётся в приложение (assets) и в релиз.
+    # Хэш исходников хоста (без модулей и без зависимостей dep-newpipe, dep-uhm, dep-steady, dep-gigaam): кладётся в приложение (assets) и в релиз.
     # Приложение сравнивает свой хэш с хэшем в релизе и по точке у стрелки обновления показывает, нужно ли ставить новый APK.
     # dep-api входит в хэш: общие интерфейсы вшиты в хост.
     - name: Stamp host source hash
@@ -47,7 +47,15 @@ jobs:
         echo "Host source hash: $(cat host_hash.txt)"
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
-    # Одна сборка делает сразу всё: app-debug.apk и контейнеры зависимостей dep-newpipe-debug.apk, dep-uhm-debug.apk, dep-steady-debug.apk.
+    # Библиотека sherpa-onnx для dep-gigaam лежит в релизах проекта k2-fsa, а не в Maven: перед сборкой её AAR кладётся в dep-gigaam/libs.
+    - name: Download sherpa-onnx AAR for dep-gigaam
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p dep-gigaam/libs
+        curl -fL --retry 3 -o dep-gigaam/libs/sherpa-onnx.aar "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.12.39/sherpa-onnx-static-link-onnxruntime-1.12.39.aar"
+        ls -l dep-gigaam/libs
+    # Одна сборка делает сразу всё: app-debug.apk и контейнеры зависимостей dep-newpipe-debug.apk, dep-uhm-debug.apk, dep-steady-debug.apk, dep-gigaam-debug.apk.
     - name: Build APK and dependency containers
       shell: bash
       run: |
@@ -58,7 +66,7 @@ jobs:
       shell: bash
       run: |
         set -euo pipefail
-        for d in newpipe uhm steady; do
+        for d in newpipe uhm steady gigaam; do
           f="dep-$d/build/outputs/apk/debug/dep-$d-debug.apk"
           test -f "$f"
           ls -l "$f"
@@ -143,9 +151,10 @@ jobs:
           dep-newpipe/build/outputs/apk/debug/dep-newpipe-debug.apk
           dep-uhm/build/outputs/apk/debug/dep-uhm-debug.apk
           dep-steady/build/outputs/apk/debug/dep-steady-debug.apk
+          dep-gigaam/build/outputs/apk/debug/dep-gigaam-debug.apk
         if-no-files-found: error
     # Страница релиза «Latest build»: APK, архив modules.zip, каждый модуль отдельным файлом .dex
-    # и зависимости dep-newpipe.apk, dep-uhm.apk, dep-steady.apk (приложение само скачивает их в files/deps), скачивается без входа в GitHub.
+    # и зависимости dep-newpipe.apk, dep-uhm.apk, dep-steady.apk, dep-gigaam.apk (приложение само скачивает их в files/deps), скачивается без входа в GitHub.
     # Релиз пересоздаётся при каждой сборке main.
     - name: Publish release with APK and modules
       if: github.ref == 'refs/heads/main'
@@ -159,10 +168,11 @@ jobs:
         cp dep-newpipe/build/outputs/apk/debug/dep-newpipe-debug.apk release_files/dep-newpipe.apk
         cp dep-uhm/build/outputs/apk/debug/dep-uhm-debug.apk release_files/dep-uhm.apk
         cp dep-steady/build/outputs/apk/debug/dep-steady-debug.apk release_files/dep-steady.apk
+        cp dep-gigaam/build/outputs/apk/debug/dep-gigaam-debug.apk release_files/dep-gigaam.apk
         cp host_hash.txt release_files/host_hash.txt
         cp output_modules/*.dex release_files/
         (cd output_modules && zip -q -j ../release_files/modules.zip *.dex)
         short="$(git rev-parse --short HEAD)"
-        notes="Сборка из main, коммит ${short}: $(git log -1 --pretty=%s)"$'\n\n'"app-debug.apk — приложение. modules.zip — все модули одним архивом. Отдельные файлы *.dex — по одному модулю на файл (положить в Загрузки/UniversalPlugins). dep-newpipe.apk, dep-uhm.apk, dep-steady.apk — зависимости (NewPipeExtractor, Uhm, Steady): приложение скачивает их само, устанавливать не нужно. host_hash.txt — хэш исходников приложения: по нему приложение узнаёт, нужен ли новый APK."
+        notes="Сборка из main, коммит ${short}: $(git log -1 --pretty=%s)"$'\n\n'"app-debug.apk — приложение. modules.zip — все модули одним архивом. Отдельные файлы *.dex — по одному модулю на файл (положить в Загрузки/UniversalPlugins). dep-newpipe.apk, dep-uhm.apk, dep-steady.apk, dep-gigaam.apk — зависимости (NewPipeExtractor, Uhm, Steady, GigaAM): приложение скачивает их само, устанавливать не нужно. host_hash.txt — хэш исходников приложения: по нему приложение узнаёт, нужен ли новый APK."
         gh release delete latest --cleanup-tag --yes 2>/dev/null || true
         gh release create latest release_files/* --target "$GITHUB_SHA" --title "Latest build (${short})" --notes "$notes" --latest
