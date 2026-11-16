@@ -152,6 +152,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         Uri uri;
         /** Путь к файлу из медиатеки (по нему ищется превью .jpg рядом); у песен из «Поделиться» его нет. */
         String path;
+        /** Готовое видео (mp4 из папки «Видео»): в списках играет звуком, значок 🎬 и список «Видео» играют картинку. */
+        boolean video;
     }
 
     private Context appCtx;
@@ -180,7 +182,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     };
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 15; }
+    @Override public int getVersion() { return 16; }
     @Override public String getDescription() {
         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
@@ -269,7 +271,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 ? Manifest.permission.READ_MEDIA_AUDIO
                 : Manifest.permission.READ_EXTERNAL_STORAGE;
         String[] req = Build.VERSION.SDK_INT >= 33
-                ? new String[]{audio, Manifest.permission.POST_NOTIFICATIONS}
+                ? new String[]{audio, Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.POST_NOTIFICATIONS}
                 : new String[]{audio};
         try { act.requestPermissions(req, NOTIF_ID); } catch (Throwable t) { }
     }
@@ -340,6 +342,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                     if (t.artist == null || t.artist.length() == 0) t.artist = "Неизвестный исполнитель";
                     t.dur = c.getLong(3);
                     t.path = c.getString(4);
+                    t.video = isVideoName(t.path);
                     t.uri = ContentUris.withAppendedId(uri, t.id);
                     tracks.add(t);
                 }
@@ -348,6 +351,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             } finally {
                 if (c != null) try { c.close(); } catch (Throwable t) { }
             }
+            loadVideos(order);
         }
         if (curId != Long.MIN_VALUE) {
             cur = -1;
@@ -371,6 +375,55 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             }
         }
     }
+
+    private static boolean isVideoName(String p) {
+        if (p == null) return false;
+        String s = p.toLowerCase(Locale.ROOT);
+        return s.endsWith(".mp4") || s.endsWith(".mkv") || s.endsWith(".webm") || s.endsWith(".m4v") || s.endsWith(".mov");
+    }
+
+    /**
+     * Готовые видео с переводом лежат в папке «Видео» рядом с аудио и попадают в медиатеку как видео, а не как музыка.
+     * Добавляем их в общий список (они играют звуком, как остальные песни); по значку 🎬 и в списке «Видео»
+     * они играют картинкой. Видео из других папок (камера и т.п.) не берём.
+     */
+    private void loadVideos(String order) {
+        HashSet<String> have = new HashSet<String>();
+        for (Track t : tracks) if (t.path != null) have.add(t.path);
+        Uri vuri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
+        String[] proj = {
+                MediaStore.Video.Media._ID,
+                MediaStore.Video.Media.TITLE,
+                MediaStore.Video.Media.DURATION,
+                MediaStore.Video.Media.DATA
+        };
+        Cursor c = null;
+        try {
+            c = appCtx.getContentResolver().query(vuri, proj, MediaStore.Video.Media.DATA + " LIKE ?",
+                    new String[]{"%/Видео/%"}, order.replace(MediaStore.Audio.Media.DATE_ADDED, MediaStore.Video.Media.DATE_ADDED)
+                            .replace(MediaStore.Audio.Media._ID, MediaStore.Video.Media._ID));
+            while (c != null && c.moveToNext()) {
+                String path = c.getString(3);
+                if (path == null || have.contains(path) || !isVideoName(path)) continue;
+                Track t = new Track();
+                t.id = VIDEO_ID_BASE + c.getLong(0);          // чтобы номера не совпали с номерами музыки
+                t.title = c.getString(1);
+                if (t.title == null || t.title.length() == 0) t.title = "Без названия";
+                t.artist = "Видео";
+                t.dur = c.getLong(2);
+                t.path = path;
+                t.video = true;
+                t.uri = ContentUris.withAppendedId(vuri, c.getLong(0));
+                tracks.add(t);
+            }
+        } catch (Throwable th) {
+            // нет доступа к видео — останутся только песни
+        } finally {
+            if (c != null) try { c.close(); } catch (Throwable th) { }
+        }
+    }
+
+    private static final long VIDEO_ID_BASE = 1000000000000L;
 
     private long sigOf() {
         long s = tracks.size();
@@ -872,26 +925,71 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         return u;
     }
 
-    /** Ссылка на видео песни (с кэшем, в главном потоке); "" — это не видео. */
-    String linkOf(String path) {
-        if (path == null) return "";
-        String c = linkCache.get(path);
-        if (c == null) {
-            c = readLinkFile(path);
-            linkCache.put(path, c);
+    /**
+     * Играет готовое видео из файла, без интернета: полноэкранное окно с видеоплеером. Аудио плеера ставится на паузу.
+     * Если окна показать нельзя (контекст не окно), видео открывает системный видеоплеер.
+     */
+    void playVideo(final Context c, Track tr) {
+        if (tr == null || tr.uri == null || c == null) return;
+        pause();
+        if (c instanceof Activity) {
+            try {
+                final android.app.Dialog d = new android.app.Dialog(c, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
+                FrameLayout root = new FrameLayout(c);
+                root.setBackgroundColor(0xFF000000);
+                final android.widget.VideoView vv = new android.widget.VideoView(c);
+                root.addView(vv, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER));
+                android.widget.MediaController mc = new android.widget.MediaController(c);
+                mc.setAnchorView(vv);
+                vv.setMediaController(mc);
+                vv.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
+                    @Override public void onPrepared(MediaPlayer p) { vv.start(); }
+                });
+                vv.setOnErrorListener(new MediaPlayer.OnErrorListener() {
+                    @Override public boolean onError(MediaPlayer p, int what, int extra) {
+                        toast("Видео не играется");
+                        d.dismiss();
+                        return true;
+                    }
+                });
+                TextView close = new TextView(c);
+                close.setText("✕");
+                close.setTextSize(24);
+                close.setTextColor(0xFFFFFFFF);
+                close.setBackgroundColor(0x99000000);
+                close.setGravity(Gravity.CENTER);
+                close.setPadding(dp(c, 16), dp(c, 8), dp(c, 16), dp(c, 8));
+                close.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) { d.dismiss(); }
+                });
+                root.addView(close, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END));
+                d.setContentView(root);
+                d.setOnDismissListener(new DialogInterface.OnDismissListener() {
+                    @Override public void onDismiss(DialogInterface di) {
+                        try { vv.stopPlayback(); } catch (Throwable t) { }
+                    }
+                });
+                vv.setVideoURI(tr.uri);
+                d.show();
+                return;
+            } catch (Throwable t) { }
         }
-        return c;
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW).setDataAndType(tr.uri, "video/*");
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            c.startActivity(i);
+        } catch (Throwable t) {
+            toast("Нет видеоплеера");
+        }
     }
 
-    /** Видео из «YouTube аудио»: играет как аудио, на плитке значок 🎬; в списке «🎬 Видео» тап открывает видео. */
-    void playVideo(Context c, Track tr) {
-        String u = tr == null ? "" : linkOf(tr.path);
-        if (u.length() == 0) { toast("У этой песни нет видео"); return; }
-        pause();                                    // звук видео не должен накладываться на аудио
-        openInBrowser(c, u);
+    private static int dp(Context c, int v) {
+        return Math.round(v * c.getResources().getDisplayMetrics().density);
     }
 
-    /** Показывает значок 🎬 у песни, для которой сохранена ссылка на видео; файл читается в фоне. */
+    /** Показывает значок 🔗 у песни, для которой сохранена ссылка; файл читается в фоне. */
     void loadLink(final String path, final View badge) {
         if (path == null || h == null) return;
         String c = linkCache.get(path);
@@ -2808,7 +2906,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
             LinearLayout bar = new LinearLayout(ctx);
             bar.setOrientation(LinearLayout.HORIZONTAL);
-            final TextView link = badge(ctx, "\uD83C\uDFAC");   // \uD83C\uDFAC: \u044D\u0442\u043E \u0432\u0438\u0434\u0435\u043E, \u0442\u0430\u043F \u043E\u0442\u043A\u0440\u044B\u0432\u0430\u0435\u0442 \u0435\u0433\u043E
+            final TextView link = badge(ctx, "\uD83D\uDD17");
             link.setVisibility(View.GONE);
             link.setOnClickListener(new OnClickListener() {
                 @Override public void onClick(View v) {
@@ -2818,6 +2916,14 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             });
             bar.addView(link);
             if (tr != null) loadLink(tr.path, link);
+            if (tr != null && tr.video) {                         // готовое видео: значок 🎬 играет его из файла
+                final Track vt = tr;
+                TextView vb = badge(ctx, "\uD83C\uDFAC");
+                vb.setOnClickListener(new OnClickListener() {
+                    @Override public void onClick(View v) { playVideo(getContext(), vt); }
+                });
+                bar.addView(vb);
+            }
             for (int i = 0; i < badgeText.length; i++) {
                 final Runnable act = badgeAct[i];
                 TextView b = badge(ctx, badgeText[i]);
@@ -2909,16 +3015,14 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             fillTiles(ctx, tiles);
         }
 
-        /** Номера песен, у которых рядом лежит ссылка на видео (из любых списков, в порядке медиатеки). */
+        /** Номера готовых видео в tracks (в порядке списка); они же остаются и в общем списке. */
         private List<Integer> videoIdx() {
             List<Integer> r = new ArrayList<Integer>();
-            for (int i = 0; i < tracks.size(); i++) {
-                if (linkOf(tracks.get(i).path).length() > 0) r.add(Integer.valueOf(i));
-            }
+            for (int i = 0; i < tracks.size(); i++) if (tracks.get(i).video) r.add(Integer.valueOf(i));
             return r;
         }
 
-        /** Список «🎬 Видео»: тап по плитке открывает видео (аудио ставится на паузу), «🗑» удаляет песню. */
+        /** Список «🎬 Видео»: тап по плитке играет видео из файла (аудио ставится на паузу), «🗑» удаляет файл. */
         private void buildVideoRows(final Context ctx) {
             List<Integer> vi = videoIdx();
             trackHead.setText("🎬 " + vi.size());
