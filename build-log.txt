@@ -1,0 +1,78 @@
+Сборка упала. Коммит: 5a5b2df: Добавить модуль Steady и контейнер в CI
+
+=== Первые ошибки ===
+237:> Task :dep-uhm:packageDebug FAILED
+238-
+239-FAILURE: Build failed with an exception.
+240-
+241:* What went wrong:
+242:Execution failed for task ':dep-uhm:packageDebug'.
+243-> A failure occurred while executing com.android.build.gradle.tasks.PackageAndroidArtifact$IncrementalSplitterRunnable
+244-
+245-* Try:
+246-> Run with --stacktrace option to get the stack trace.
+--
+251:BUILD FAILED in 1m 59s
+252-156 actionable tasks: 156 executed
+
+=== Хвост вывода ===
+> Task :dep-uhm:javaPreCompileDebug
+> Task :dep-steady:processDebugResources
+> Task :dep-uhm:checkDebugAarMetadata
+> Task :dep-steady:compileDebugJavaWithJavac
+> Task :dep-steady:dexBuilderDebug
+> Task :dep-uhm:generateDebugResValues
+> Task :dep-steady:mergeProjectDexDebug
+> Task :dep-uhm:mapDebugSourceSetPaths
+> Task :dep-uhm:generateDebugResources
+> Task :dep-uhm:mergeDebugResources
+> Task :dep-uhm:packageDebugResources
+> Task :dep-steady:packageDebug
+> Task :dep-uhm:parseDebugLocalResources
+> Task :dep-steady:createDebugApkListingFileRedirect
+> Task :dep-steady:assembleDebug
+> Task :dep-uhm:createDebugCompatibleScreenManifests
+> Task :dep-uhm:extractDeepLinksDebug
+> Task :dep-uhm:processDebugMainManifest
+> Task :dep-uhm:processDebugManifest
+> Task :dep-uhm:mergeDebugShaders
+> Task :dep-uhm:compileDebugShaders NO-SOURCE
+> Task :dep-uhm:generateDebugAssets UP-TO-DATE
+> Task :dep-uhm:mergeDebugAssets
+> Task :dep-uhm:compressDebugAssets
+> Task :dep-uhm:processDebugJavaRes NO-SOURCE
+> Task :dep-uhm:checkDebugDuplicateClasses
+> Task :dep-uhm:desugarDebugFileDependencies
+> Task :dep-uhm:mergeDebugJavaResource
+> Task :dep-uhm:processDebugManifestForPackage
+> Task :dep-uhm:mergeLibDexDebug
+> Task :dep-uhm:mergeDebugJniLibFolders
+> Task :dep-uhm:validateSigningDebug
+> Task :dep-uhm:writeDebugAppMetadata
+> Task :dep-uhm:writeDebugSigningConfigVersions
+> Task :dep-uhm:processDebugResources
+> Task :dep-uhm:mergeDebugNativeLibs
+> Task :dep-uhm:mergeExtDexDebug
+> Task :dep-uhm:compileDebugJavaWithJavac
+> Task :dep-uhm:dexBuilderDebug
+> Task :dep-uhm:mergeProjectDexDebug
+
+> Task :dep-uhm:stripDebugDebugSymbols
+Unable to strip the following libraries, packaging them as they are: libLiteRt.so, libLiteRtClGlAccelerator.so, libUhmAndroid.so.
+
+> Task :dep-uhm:packageDebug FAILED
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':dep-uhm:packageDebug'.
+> A failure occurred while executing com.android.build.gradle.tasks.PackageAndroidArtifact$IncrementalSplitterRunnable
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights.
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 1m 59s
+156 actionable tasks: 156 executed
