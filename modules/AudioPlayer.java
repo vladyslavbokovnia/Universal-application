@@ -180,7 +180,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     };
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 12; }
+    @Override public int getVersion() { return 13; }
     @Override public String getDescription() {
         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
@@ -282,6 +282,12 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     }
 
     // ---------------------------------------------------------- список песен
+
+    /** Плитки треков по одной в ряд (крупные) вместо двух. */
+    private boolean tilesOne() {
+        SharedPreferences p = prefs();
+        return p != null && p.getBoolean("tiles_one", false);
+    }
 
     /** Порядок списка: по времени добавления на устройство (DATE_ADDED); «новые сверху» включается в настройках. */
     private boolean newestFirst() {
@@ -2335,6 +2341,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 "Свой плеер не играет: кнопки идут в другой играющий (нужен доступ к уведомлениям)", true));
         r.add(SettingItem.toggle("keep_screen", "💡 Не гасить экран (e-ink)",
                 "Пока открыто окно плеера: стики и кнопки приходят в него", true));
+        r.add(SettingItem.toggle("tiles_one", "🖼 Плитки в один ряд (крупные)",
+                "Выключено: по две плитки в ряд", false));
         r.add(SettingItem.toggle("pad_focus", "🎯 Держать фокус для геймпада",
                 "Прозрачное окно поверх экрана принимает стики и кнопки, пока геймпад подключён и окно плеера закрыто (Android 11). Минус: приложение под ним теряет фокус (клавиатура, «Назад»)", false));
         r.add(SettingItem.toggle("pad_focus_fullscreen", "📺 Скрывать строку состояния",
@@ -2371,6 +2379,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                     @Override public void run() { v.applyKeepScreen(); }
                 });
             }
+        } else if ("tiles_one".equals(key)) {
+            coverCache.evictAll();                   // превью перечитаются в другом размере
+            noCover.clear();
+            refreshUiAll();
         } else if ("pad_focus".equals(key)) {
             updateFocusCatcher();
         } else if ("pad_focus_fullscreen".equals(key)) {
@@ -2741,7 +2753,9 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             ph.setMaxLines(4);
             ph.setEllipsize(TextUtils.TruncateAt.END);
             tile.addView(ph, new FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
-            int targetW = Math.max(160, getResources().getDisplayMetrics().widthPixels / 2);
+            boolean one = tilesOne();
+            int targetW = Math.max(160, getResources().getDisplayMetrics().widthPixels / (one ? 1 : 2));
+            ph.setTextSize(one ? 20 : 14);   // подпись на плитке без превью
             if (tr != null) loadCover(tr.path, img, ph, targetW);
 
             final TextView over = badge(ctx, title);
@@ -2806,12 +2820,13 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             return tile;
         }
 
-        /** Плитки по две в ряд. */
+        /** Плитки по две в ряд; настройка «tiles_one»: по одной, крупно. */
         private void fillTiles(Context ctx, List<View> tiles) {
-            for (int i = 0; i < tiles.size(); i += 2) {
+            int cols = tilesOne() ? 1 : 2;
+            for (int i = 0; i < tiles.size(); i += cols) {
                 LinearLayout row = new LinearLayout(ctx);
                 row.setOrientation(LinearLayout.HORIZONTAL);
-                for (int k = 0; k < 2; k++) {
+                for (int k = 0; k < cols; k++) {
                     View v = i + k < tiles.size() ? tiles.get(i + k) : new View(ctx);
                     LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f);
                     lp.setMargins(dp(3), dp(3), dp(3), dp(3));
