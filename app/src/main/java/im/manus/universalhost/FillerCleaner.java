@@ -83,8 +83,13 @@ public final class FillerCleaner {
 
     /** Чистит файл на месте. Возвращает отчёт; file в нём — путь результата (при count = 0 это исходный файл). */
     public static Report clean(Context ctx, File audio) throws Exception {
+        return clean(ctx, audio, -1);
+    }
+
+    /** engine: номер движка для этого файла (0 Uhm, 1 Steady, 2 GigaAM); -1: тот, что выбран в настройках модуля. */
+    public static Report clean(Context ctx, File audio, int engine) throws Exception {
         Context app = ctx.getApplicationContext();
-        int eng = YtAudioQueue.get(app).cleanEngine();
+        int eng = engine >= 0 ? engine : YtAudioQueue.get(app).cleanEngine();
         if (eng < 0 || eng >= ENG_DEP.length) eng = 0;
         if (!Deps.installed(app, ENG_DEP[eng])) {
             // библиотека может быть большой: в режиме «только по Wi-Fi» по мобильной сети не качаем

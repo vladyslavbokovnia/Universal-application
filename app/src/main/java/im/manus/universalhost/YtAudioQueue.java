@@ -61,6 +61,8 @@ public final class YtAudioQueue {
         public boolean forceClean = false;
         /** Кнопка 🗣: не аудио, а mp4 (видео с YouTube + русский перевод Яндекса вместо оригинального звука). */
         public boolean video = false;
+        /** Движок очистки «эээ» для этой ссылки (кнопки 🧹U/🧹S/🧹G в скрипте): 0 Uhm, 1 Steady, 2 GigaAM; -1 по настройке модуля. */
+        public int engine = -1;
     }
 
     private static YtAudioQueue inst;
@@ -176,6 +178,7 @@ public final class YtAudioQueue {
                 it.file = o.optString("f", "");
                 it.forceClean = o.optBoolean("fc", false);
                 it.video = o.optBoolean("vd", false);
+                it.engine = o.optInt("en", -1);
                 if (VOT.equals(it.status)) votRestart.add(it.url);
                 items.add(it);
             }
@@ -187,7 +190,7 @@ public final class YtAudioQueue {
             JSONArray a = new JSONArray();
             for (Item it : items) {
                 a.put(new JSONObject().put("u", it.url).put("t", it.title).put("s", it.status).put("e", it.err)
-                        .put("p", it.step).put("f", it.file).put("fc", it.forceClean).put("vd", it.video));
+                        .put("p", it.step).put("f", it.file).put("fc", it.forceClean).put("vd", it.video).put("en", it.engine));
             }
             prefs().edit().putString("items", a.toString()).apply();
         } catch (Throwable t) { }
@@ -265,6 +268,11 @@ public final class YtAudioQueue {
 
     /** video: mp4 с переводом Яндекса вместо аудио (кнопка 🗣 в скрипте YouTube TTS). */
     public synchronized void submit(String url, String title, boolean forceClean, boolean video) {
+        submit(url, title, forceClean, video, -1);
+    }
+
+    /** engine: движок очистки «эээ» только для этой ссылки (0 Uhm, 1 Steady, 2 GigaAM), -1: как в настройках. */
+    public synchronized void submit(String url, String title, boolean forceClean, boolean video, int engine) {
         Item it = find(url);
         if (it == null) {
             it = new Item();
@@ -273,6 +281,7 @@ public final class YtAudioQueue {
         }
         if (title != null && title.length() > 0) it.title = title;
         if (forceClean) it.forceClean = true;
+        if (engine >= 0) it.engine = engine;
         boolean busy = active.contains(url) || cleaning.equals(url) || muxing.contains(url)
                 || VOT.equals(it.status) || CLEAN.equals(it.status) || MUX.equals(it.status);
         if (!busy) {
@@ -772,7 +781,7 @@ public final class YtAudioQueue {
             try {
                 File f = new File(it.file);
                 if (!f.isFile()) throw new IOException("файл не найден");
-                rep = FillerCleaner.clean(app, f);
+                rep = FillerCleaner.clean(app, f, it.engine);
             } catch (Throwable t) {
                 err = t.getMessage() == null ? t.toString() : t.getMessage();
             }

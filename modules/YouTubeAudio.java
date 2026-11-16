@@ -88,7 +88,9 @@ public class YouTubeAudio implements IPlugin, ISettingsProvider, IMainViewProvid
             // кнопки скрипта YouTube TTS: 🧹 шлёт флаг clean («эээ» вырезаются независимо от настройки);
             // 🗣 шлёт тип text/x-votaudio (или флаг video): mp4 с видео YouTube и переводом Яндекса вместо звука
             boolean video = intent.getBooleanExtra("video", false) || MIME_VOT.equals(intent.getType());
-            q.submit(url, title, intent.getBooleanExtra("clean", false), video);
+            // extra engine (кнопки 🧹U, 🧹S, 🧹G в скрипте): движок очистки «эээ» для этого ролика, он же включает очистку
+            int engine = intent.getIntExtra("engine", -1);
+            q.submit(url, title, intent.getBooleanExtra("clean", false) || engine >= 0, video, engine);
             return true;
         } catch (Throwable t) {
             return false;
