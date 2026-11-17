@@ -1,0 +1,198 @@
+diff --git a/modules/Browser.java b/modules/Browser.java
+index e45f860..c81c113 100644
+--- a/modules/Browser.java
++++ b/modules/Browser.java
+@@ -1930,7 +1930,7 @@ public class Browser implements IPlugin, ISettingsProvider {
+             hub.setTypeface(hub.getTypeface(), android.graphics.Typeface.BOLD);
+             hub.setGravity(Gravity.CENTER);
+             hub.setText("I");
+-            hub.setBackground(round(0xCC000000, 39, 0x99FFFFFF, 2));
++            hub.setBackground(round(0xCC000000, 39, 0, 0));      // без рамки: на верхнем уровне кнопка гладкая, уровни показывают только кольца
+             hub.setAlpha(HUB_ALPHA);
+             hub.setClickable(true);
+             hub.setFocusable(true);
+@@ -2052,9 +2052,9 @@ public class Browser implements IPlugin, ISettingsProvider {
+                 float d = Math.min(getWidth(), getHeight());
+                 float cx = getWidth() / 2f, cy = getHeight() / 2f;
+                 // кольца: одно внутри другого, самое внешнее у края кнопки; цифры вписываются в самое внутреннее
+-                float step = rings == 0 ? 0f : Math.min(dp(4), d * 0.2f / rings);
+-                rp.setStrokeWidth(Math.max(1f, step * 0.4f));
+-                rp.setColor(0xCCFFFFFF);
++                float step = rings == 0 ? 0f : Math.min(dp(5), d * 0.24f / rings);
++                rp.setStrokeWidth(Math.max(dp(2), step * 0.55f));       // толстые чисто белые кольца: различимы на чёрно-белом экране
++                rp.setColor(0xFFFFFFFF);
+                 for (int i = 0; i < rings; i++) {
+                     c.drawCircle(cx, cy, d / 2f - dp(3) - i * step, rp);
+                 }
+@@ -7736,11 +7736,18 @@ public class Browser implements IPlugin, ISettingsProvider {
+         /** Метка текущей вкладки: полупрозрачная эмодзи по центру карточки. */
+         private final class CurrentMark extends View {
+             private final Paint ep = new Paint(Paint.ANTI_ALIAS_FLAG);
++            private final Paint disc = new Paint(Paint.ANTI_ALIAS_FLAG);
++            private final Paint rim = new Paint(Paint.ANTI_ALIAS_FLAG);
+             private final android.graphics.Rect eb = new android.graphics.Rect();
+ 
+             CurrentMark(Context c) {
+                 super(c);
+-                ep.setAlpha(140);
++                // непрозрачная эмодзи на светлом круге с чёрным кантом: заметна и на цветном, и на чёрно-белом экране
++                disc.setStyle(Paint.Style.FILL);
++                disc.setColor(0xF2FFFFFF);
++                rim.setStyle(Paint.Style.STROKE);
++                rim.setColor(0xFF000000);
++                rim.setStrokeWidth(dp(3));
+                 setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                 setClickable(false);
+             }
+@@ -7748,7 +7755,10 @@ public class Browser implements IPlugin, ISettingsProvider {
+             @Override protected void onDraw(Canvas c) {
+                 float w = getWidth(), h = getHeight();
+                 if (w <= 0 || h <= 0) return;
+-                ep.setTextSize(Math.min(w, h) * 0.62f);
++                float r = Math.min(w, h) / 2f - dp(3);
++                c.drawCircle(w / 2f, h / 2f, r, disc);
++                c.drawCircle(w / 2f, h / 2f, r, rim);
++                ep.setTextSize(Math.min(w, h) * 0.58f);
+                 ep.getTextBounds(CURRENT_EMOJI, 0, CURRENT_EMOJI.length(), eb);
+                 c.drawText(CURRENT_EMOJI, w / 2f - eb.exactCenterX(), h / 2f - eb.exactCenterY(), ep);
+             }
+@@ -7921,7 +7931,7 @@ public class Browser implements IPlugin, ISettingsProvider {
+ 
+             if (t == cur) {
+                 // страница, с которой открыли панель: полупрозрачная эмодзи по центру
+-                FrameLayout.LayoutParams klp = new FrameLayout.LayoutParams(dp(120), dp(120), Gravity.CENTER);
++                FrameLayout.LayoutParams klp = new FrameLayout.LayoutParams(dp(132), dp(132), Gravity.CENTER);
+                 box.addView(new CurrentMark(act), klp);
+             }
+             if (isGroup) {
+@@ -8239,6 +8249,16 @@ public class Browser implements IPlugin, ISettingsProvider {
+             }
+         };
+ 
++        private Object downTarget;
++        private final Runnable downHover = new Runnable() {
++            @Override public void run() {
++                Object t = downTarget;
++                downTarget = null;
++                if (closed || !(t instanceof Group)) return;
++                dragLevelDown((Group) t);
++            }
++        };
++
+         /** Положение вида внутри предка (без учёта прокрутки предка: сетка сама лежит в прокрутке). */
+         private float[] relPos(View v, View ancestor) {
+             float x = 0, y = 0;
+@@ -8295,18 +8315,33 @@ public class Browser implements IPlugin, ISettingsProvider {
+                         case DragEvent.ACTION_DRAG_LOCATION: {
+                             clearHints();
+                             DropCard c = cardAt(e.getX(), e.getY());
++                            Object want = null;
+                             if (c != null && c.item != d) {
+                                 int z = zoneOf(c, e.getX());
+                                 c.box.setForeground(z == 0 ? dropHint() : edgeHint(z < 0));
++                                if (z == 0 && c.item instanceof Group) {
++                                    Group tg = (Group) c.item;
++                                    boolean bad = d instanceof Group && (tg == d || groupInside(tg, (Group) d));
++                                    if (!bad) want = tg;
++                                }
++                            }
++                            if (want != downTarget) {       // держат над серединой группы: через паузу откроем её, не прерывая перетаскивания
++                                h.removeCallbacks(downHover);
++                                downTarget = want;
++                                if (want != null) h.postDelayed(downHover, 650);
+                             }
+                             if (e.getAction() == DragEvent.ACTION_DRAG_LOCATION) dragAutoScroll(grid, e);
+                             return true;
+                         }
+                         case DragEvent.ACTION_DRAG_EXITED:
+                             clearHints();
++                            h.removeCallbacks(downHover);
++                            downTarget = null;
+                             return true;
+                         case DragEvent.ACTION_DROP: {
+                             clearHints();
++                            h.removeCallbacks(downHover);
++                            downTarget = null;
+                             final Object dropped = d;
+                             final DropCard c = cardAt(e.getX(), e.getY());
+                             final int zone = c == null ? 0 : zoneOf(c, e.getX());
+@@ -8321,6 +8356,8 @@ public class Browser implements IPlugin, ISettingsProvider {
+                         }
+                         case DragEvent.ACTION_DRAG_ENDED: {
+                             h.removeCallbacks(upHover);
++                            h.removeCallbacks(downHover);
++                            downTarget = null;
+                             clearHints();
+                             for (DropCard c : dropCards) c.box.setAlpha(1f);
+                             stopDragScroll();
+@@ -8400,6 +8437,20 @@ public class Browser implements IPlugin, ISettingsProvider {
+             dragGrid.announceForAccessibility(openGroup == null ? "Верхний уровень" : "Группа " + openGroup.name);
+         }
+ 
++        /** Во время перетаскивания войти в группу: сетка перерисовывается на месте, перетаскивание не прерывается, карточку можно положить внутри. */
++        private void dragLevelDown(Group g) {
++            if (g == null || dragGrid == null || !dragGrid.isAttachedToWindow() || !groups.contains(g)) return;
++            openGroup = g;
++            panelGroup = g;
++            clearHints();
++            fillGrid(dragGrid, g);
++            for (DropCard c : dropCards) if (c.item == dragItem) c.box.setAlpha(0.35f);
++            if (tabScroll != null) tabScroll.scrollTo(0, 0);
++            updateHubRings();
++            try { dragGrid.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK); } catch (Throwable ignored) { }
++            dragGrid.announceForAccessibility("Группа " + g.name);
++        }
++
+         /** Отпустили на главной кнопке: вкладка или группа выходит из показанной группы на уровень выше и встаёт сразу за ней. */
+         private void dropUp(Object d) {
+             Group og = openGroup;
+@@ -8570,6 +8621,16 @@ public class Browser implements IPlugin, ISettingsProvider {
+             if (d == target) { menu.run(); return; }
+             final int level = openGroup == null ? 0 : openGroup.id;
+             if (zone != 0) {            // край карточки: поменять местами / переставить вкладку или группу целиком
++                // уровень цели: перетаскивание могло начаться на другом уровне (карточку внесли в открытую на лету группу)
++                int tl = target instanceof Tab ? ((Tab) target).group : ((Group) target).parent;
++                if (d instanceof Tab) {
++                    ((Tab) d).group = tl;
++                } else if (d instanceof Group) {
++                    Group dgE = (Group) d;
++                    Group lgE = groupById(tl);
++                    if (dgE.id == tl || (lgE != null && groupInside(lgE, dgE))) { finishDrop(); return; }
++                    dgE.parent = tl;
++                }
+                 compactGroups();
+                 moveUnit(d, target, zone > 0);
+                 finishDrop();
+@@ -8584,11 +8645,13 @@ public class Browser implements IPlugin, ISettingsProvider {
+                     Tab anchor = lastOfGroup(g.id, dt);
+                     dt.group = g.id;
+                     if (anchor != null) moveAfter(dt, anchor);
++                    openGroup = g;          // группа открывается, вкладка лежит в её конце: оттуда её можно перетащить на нужное место
+                 } else if (target instanceof Group) {
+                     Group g = (Group) target;
+                     Tab anchor = lastOfGroup(g.id, dt);
+                     dt.group = g.id;
+                     if (anchor != null) moveAfter(dt, anchor);
++                    openGroup = g;
+                 }
+             } else if (d instanceof Group) {
+                 Group dg = (Group) d;
+@@ -8597,6 +8660,7 @@ public class Browser implements IPlugin, ISettingsProvider {
+                     Tab anchor = lastOfGroup(dg.id, tt);
+                     tt.group = dg.id;
+                     if (anchor != null) moveAfter(tt, anchor);
++                    openGroup = dg;
+                 } else if (target instanceof Group) {
+                     Group tg = (Group) target;
+                     if (tg == dg || groupInside(tg, dg)) return;
+@@ -8604,8 +8668,10 @@ public class Browser implements IPlugin, ISettingsProvider {
+                     Tab anchor = lastOfGroup(tg.id, moving);
+                     dg.parent = tg.id;
+                     if (anchor != null) moveBlockAfter(moving, anchor);
++                    openGroup = tg;
+                 }
+             }
++            panelGroup = openGroup;
+             finishDrop();
+         }
+ 
