@@ -105,7 +105,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewProvider, IMainViewProvider, IKeyHandler,
         IMotionHandler, IShareHandler {
 
-    private static final String PREFS = "module_Аудиоплеер";
+    /** Имя файла настроек, как его называет хост (ModuleStorage.prefsName): всё, кроме латиницы и цифр, он заменяет на «_». */
+    private static final String PREFS = "module_" + "Аудиоплеер".replaceAll("[^A-Za-z0-9_.-]", "_");
+    /** Прежнее имя файла: модуль писал в него, а настройки с экрана хоста попадали в другой файл. */
+    private static final String OLD_PREFS = "module_Аудиоплеер";
     private static final String CHANNEL = "audioplayer";
     private static final int NOTIF_ID = 4101;
 
@@ -152,6 +155,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         String path;
         /** Готовое видео (mp4 из папки «Видео»): в списках играет звуком, значок 🎬 и список «Видео» играют картинку. */
         boolean video;
+        /** Когда файл попал в медиатеку (DATE_ADDED, секунды): по нему строится порядок списка. */
+        long added;
     }
 
     private Context appCtx;
@@ -180,7 +185,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     };
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 17; }
+    @Override public int getVersion() { return 18; }
     @Override public String getDescription() {
         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
@@ -242,7 +247,34 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
     private SharedPreferences prefs() {
         Context c = appCtx;
-        return c == null ? null : c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        if (c == null) return null;
+        SharedPreferences p = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        movePrefs(c, p);
+        return p;
+    }
+
+    private static boolean prefsMoved;
+
+    /** Один раз переносит значения из прежнего файла настроек (плейлисты, места в треках, кнопки геймпада и др.); то, что уже записал хост, не затирается. */
+    private static synchronized void movePrefs(Context c, SharedPreferences p) {
+        if (prefsMoved) return;
+        prefsMoved = true;
+        try {
+            if (p.getBoolean("_moved_prefs", false)) return;
+            SharedPreferences.Editor e = p.edit();
+            for (Map.Entry<String, ?> en : c.getSharedPreferences(OLD_PREFS, Context.MODE_PRIVATE).getAll().entrySet()) {
+                String k = en.getKey();
+                Object v = en.getValue();
+                if (v == null || p.contains(k)) continue;
+                if (v instanceof String) e.putString(k, (String) v);
+                else if (v instanceof Boolean) e.putBoolean(k, (Boolean) v);
+                else if (v instanceof Integer) e.putInt(k, (Integer) v);
+                else if (v instanceof Long) e.putLong(k, (Long) v);
+                else if (v instanceof Float) e.putFloat(k, (Float) v);
+            }
+            e.putBoolean("_moved_prefs", true);
+            e.apply();
+        } catch (Throwable t) { }
     }
 
     private void toast(final String s) {
@@ -323,7 +355,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                     MediaStore.Audio.Media.TITLE,
                     MediaStore.Audio.Media.ARTIST,
                     MediaStore.Audio.Media.DURATION,
-                    MediaStore.Audio.Media.DATA
+                    MediaStore.Audio.Media.DATA,
+                    MediaStore.Audio.Media.DATE_ADDED
             };
             String dir = newestFirst() ? " DESC" : " ASC";
             String order = MediaStore.Audio.Media.DATE_ADDED + dir + ", " + MediaStore.Audio.Media._ID + dir;
@@ -340,6 +373,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                     if (t.artist == null || t.artist.length() == 0) t.artist = "Неизвестный исполнитель";
                     t.dur = c.getLong(3);
                     t.path = c.getString(4);
+                    t.added = c.getLong(5);
                     t.video = isVideoName(t.path);
                     t.uri = ContentUris.withAppendedId(uri, t.id);
                     tracks.add(t);
@@ -350,6 +384,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 if (c != null) try { c.close(); } catch (Throwable t) { }
             }
             loadVideos(order);
+            sortByAdded();
         }
         if (curId != Long.MIN_VALUE) {
             cur = -1;
@@ -393,7 +428,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 MediaStore.Video.Media._ID,
                 MediaStore.Video.Media.TITLE,
                 MediaStore.Video.Media.DURATION,
-                MediaStore.Video.Media.DATA
+                MediaStore.Video.Media.DATA,
+                MediaStore.Video.Media.DATE_ADDED
         };
         Cursor c = null;
         try {
@@ -410,6 +446,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 t.artist = "Видео";
                 t.dur = c.getLong(2);
                 t.path = path;
+                t.added = c.getLong(4);
                 t.video = true;
                 t.uri = ContentUris.withAppendedId(vuri, c.getLong(0));
                 tracks.add(t);
@@ -422,6 +459,23 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     }
 
     private static final long VIDEO_ID_BASE = 1000000000000L;
+
+    /** Порядок списка по времени добавления: песни и готовые видео вместе (иначе видео всегда шли бы после всех песен). Песни из «Поделиться» остаются в начале. */
+    private void sortByAdded() {
+        int first = 0;
+        while (first < tracks.size() && tracks.get(first).id < 0) first++;
+        if (tracks.size() - first < 2) return;
+        final boolean desc = newestFirst();
+        List<Track> rest = new ArrayList<Track>(tracks.subList(first, tracks.size()));
+        java.util.Collections.sort(rest, new java.util.Comparator<Track>() {
+            @Override public int compare(Track a, Track b) {
+                int r = a.added < b.added ? -1 : (a.added > b.added ? 1 : 0);
+                if (r == 0) r = a.id < b.id ? -1 : (a.id > b.id ? 1 : 0);
+                return desc ? -r : r;
+            }
+        });
+        for (int i = 0; i < rest.size(); i++) tracks.set(first + i, rest.get(i));
+    }
 
     private long sigOf() {
         long s = tracks.size();
@@ -932,7 +986,28 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         pause();
         if (c instanceof Activity) {
             try {
-                final android.app.Dialog d = new android.app.Dialog(c, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
+                final android.app.Dialog d = new android.app.Dialog(c, android.R.style.Theme_Black_NoTitleBar_Fullscreen) {
+                    // кнопки и стики геймпада: окно видео в фокусе, окно плеера их не получает
+                    @Override public boolean dispatchKeyEvent(KeyEvent e) {
+                        try {
+                            PadMapper m = mapper;
+                            if (m != null && PadMapper.isPadEvent(e) && m.onKeyEvent(e)) return true;
+                        } catch (Throwable t) { }
+                        return super.dispatchKeyEvent(e);
+                    }
+
+                    @Override public boolean dispatchGenericMotionEvent(MotionEvent e) {
+                        if ((e.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) {
+                            PadMapper m = mapper;
+                            if (m != null) {
+                                try { m.onMotionEvent(e); } catch (Throwable t) { }
+                            }
+                            try { dialMotion(e); } catch (Throwable t) { }
+                            return true;
+                        }
+                        return super.dispatchGenericMotionEvent(e);
+                    }
+                };
                 FrameLayout root = new FrameLayout(c);
                 root.setBackgroundColor(0xFF000000);
                 final android.widget.VideoView vv = new android.widget.VideoView(c);
@@ -967,8 +1042,13 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 d.setOnDismissListener(new DialogInterface.OnDismissListener() {
                     @Override public void onDismiss(DialogInterface di) {
                         try { vv.stopPlayback(); } catch (Throwable t) { }
+                        if (videoDlg == d) { videoDlg = null; videoVv = null; videoTr = null; videoCtx = null; }
                     }
                 });
+                videoDlg = d;
+                videoVv = vv;
+                videoTr = tr;
+                videoCtx = c;
                 vv.setVideoURI(tr.uri);
                 d.show();
                 return;
@@ -985,6 +1065,58 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
     private static int dp(Context c, int v) {
         return Math.round(v * c.getResources().getDisplayMetrics().density);
+    }
+
+    // Видео из файла: его окно принимает геймпад само, а действия плеера идут в видео, а не в аудио.
+    private android.app.Dialog videoDlg;
+    private android.widget.VideoView videoVv;
+    private Track videoTr;
+    private Context videoCtx;
+
+    /** Действие геймпада для играющего видео; false: видео это действие не касается (громкость, озвучка и т. д.). */
+    private boolean videoControl(String a) {
+        final android.widget.VideoView v = videoVv;
+        if (v == null) return false;
+        try {
+            if (a.equals("play_pause")) {
+                if (v.isPlaying()) v.pause(); else v.start();
+                return true;
+            }
+            if (a.equals("seek_back") || a.equals("seek_fwd")) {
+                int pos = v.getCurrentPosition() + (a.equals("seek_fwd") ? seekStepMs() : -seekStepMs());
+                int dur = v.getDuration();
+                if (pos < 0) pos = 0;
+                if (dur > 0 && pos > dur) pos = dur;
+                v.seekTo(pos);
+                return true;
+            }
+            if (a.equals("next") || a.equals("prev")) {
+                stepVideo(a.equals("next") == !reverseOn() ? 1 : -1);
+                return true;
+            }
+        } catch (Throwable t) { }
+        return false;
+    }
+
+    /** Предыдущее или следующее видео списка «🎬»; на краю остаёмся на месте. */
+    private void stepVideo(int dir) {
+        Track now = videoTr;
+        Context c = videoCtx;
+        if (now == null || c == null) return;
+        List<Track> vids = new ArrayList<Track>();
+        for (Track t : tracks) if (t.video) vids.add(t);
+        int i = -1;
+        for (int k = 0; k < vids.size(); k++) {
+            if (vids.get(k).id == now.id) { i = k; break; }
+        }
+        int j = i + dir;
+        if (i < 0 || j < 0 || j >= vids.size()) {
+            speak(dir > 0 ? "Это последнее видео" : "Это первое видео");
+            return;
+        }
+        android.app.Dialog d = videoDlg;
+        if (d != null) { try { d.dismiss(); } catch (Throwable t) { } }
+        playVideo(c, vids.get(j));
     }
 
     /** Показывает значок 🔗 у песни, для которой сохранена ссылка; файл читается в фоне. */
@@ -1686,6 +1818,12 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     /** Доля прослушанного текущего трека 0..1: своего, а если свой не играет, то чужого плеера; -1, если узнать нельзя. */
     private float currentFraction() {
         try {
+            android.widget.VideoView vv = videoVv;
+            if (vv != null) {
+                int dur = vv.getDuration();
+                if (dur > 0) return Math.max(0f, Math.min(1f, vv.getCurrentPosition() / (float) dur));
+                return -1f;
+            }
             if (!isPlaying() && remoteAny()) {
                 MediaController ext = externalTarget();
                 if (ext != null) {
@@ -2349,6 +2487,14 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     /** Перемотка на долю трека: своего, а если свой не играет — чужого играющего плеера. */
     private void seekFractionAny(float f) {
         f = Math.max(0f, Math.min(1f, f));
+        android.widget.VideoView vv = videoVv;
+        if (vv != null) {
+            try {
+                int dur = vv.getDuration();
+                if (dur > 0) vv.seekTo((int) (dur * f));
+            } catch (Throwable t) { }
+            return;
+        }
         if (!isPlaying() && remoteAny()) {
             MediaController ext = externalTarget();
             if (ext != null) {
@@ -2387,7 +2533,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             appCtx = c.getApplicationContext();
             h = new Handler(Looper.getMainLooper());
         }
-        SharedPreferences p = appCtx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        SharedPreferences p = prefs();   // тот же файл, что у экрана настроек хоста (с переносом прежних значений)
         m = new PadMapper(p, ACTIONS, new PadMapper.Performer() {
             @Override public void perform(String action) { doPerform(action); }
         });
@@ -2448,6 +2594,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
     private void doPerform(String a) {
         if (a == null) return;
+        if (!a.startsWith("vol_") && videoControl(a)) return;
         if (!a.startsWith("vol_") && routeExternal(a)) return;
         if (a.equals("focus")) { toggleFocusPref(); return; }
         if (a.equals("later")) { addCurrentTo(PL_LATER); return; }
