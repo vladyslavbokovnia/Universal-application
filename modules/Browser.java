@@ -2118,7 +2118,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                     if (t.loading) t.wv.stopLoading(); else reloadTab(t);
                 }
             }));
-            items.add(new RingItem("⌕", "Поиск, адрес, закладки и новая вкладка", true, new Runnable() { @Override public void run() { showStart(false, true); } }));
+            items.add(new RingItem("+", "Новая вкладка: поиск, адрес, закладки", true, new Runnable() { @Override public void run() { newTabWithStart(); } }));      // всё открывается в новой вкладке, текущая не меняется
             items.add(new RingItem("✎", "Нарисовать эскиз на снимке вкладки", true, new Runnable() { @Override public void run() {
                 final Runnable back0 = fromTabs ? new Runnable() { @Override public void run() {
                     savedScrollAt = SystemClock.uptimeMillis();
