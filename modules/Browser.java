@@ -985,6 +985,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             "function GM_unregisterMenuCommand(id){delete menu[id];B.unregisterMenu(NO,id);}\n" +
             "function GM_openInTab(u,o){var bg=false,pr=-1;if(typeof o==='boolean')bg=o;else if(o){if(o.active===false||o.background)bg=true;if(typeof o.profile==='number'&&o.profile>=0)pr=o.profile|0;}if(pr>=0)B.openTabP(NO,String(u),bg,pr);else B.openTab(NO,String(u),bg);return{close:function(){},closed:false};}\n" +
             "GM_openInTab.profiles=function(){return jp(B.profiles(NO),[]);};\n" +
+            "GM_openInTab.apps=function(){return jp(B.apps(NO),[]);};\n" +
             "GM_openInTab.darkTheme=function(on){return on===undefined?B.darkGet(NO):B.darkSet(NO,!!on);};\n" +
             "function GM_setClipboard(t){B.setClipboard(NO,String(t));}\n" +
             "function GM_log(){try{console.log.apply(console,arguments);}catch(e){}}\n" +
@@ -4846,6 +4847,37 @@ public class Browser implements IPlugin, ISettingsProvider {
                         newTab(url, p, t, !background);
                     }
                 });
+            }
+
+            /**
+             * GM_openInTab.apps(): [{p, n}] — пакет и название установленных приложений, которым можно отправить текст
+             * (ACTION_SEND, text/plain), по алфавиту. Нужен скриптам для выбора приложения (кнопки меню YouTube TTS):
+             * сама страница список приложений телефона увидеть не может. Доступно скриптам с @grant GM_openInTab.
+             */
+            @JavascriptInterface public String apps(String nonce) {
+                Injected i = inj(nonce);
+                JSONArray a = new JSONArray();
+                if (i == null || !granted(i, "GM_openInTab", "GM.openInTab")) return a.toString();
+                try {
+                    android.content.pm.PackageManager pm = act.getPackageManager();
+                    List<android.content.pm.ResolveInfo> l = pm.queryIntentActivities(new Intent(Intent.ACTION_SEND).setType("text/plain"), 0);
+                    final Map<String, String> names = new java.util.HashMap<String, String>();
+                    for (android.content.pm.ResolveInfo ri : l) {
+                        if (ri.activityInfo == null) continue;
+                        String pkg = ri.activityInfo.packageName;
+                        if (pkg == null || pkg.equals(act.getPackageName()) || names.containsKey(pkg)) continue;
+                        CharSequence lab = ri.loadLabel(pm);
+                        names.put(pkg, lab == null ? pkg : lab.toString());
+                    }
+                    List<String> pk = new ArrayList<String>(names.keySet());
+                    Collections.sort(pk, new Comparator<String>() {
+                        @Override public int compare(String x, String y) {
+                            return names.get(x).compareToIgnoreCase(names.get(y));
+                        }
+                    });
+                    for (String pkg : pk) a.put(new JSONObject().put("p", pkg).put("n", names.get(pkg)));
+                } catch (Throwable ignored) { }
+                return a.toString();
             }
 
             /** GM_openInTab.profiles(): [{i, n, c, g, img, cur, ok}] — номер, имя, цвет, эмодзи, своя картинка (data:), «профиль текущей вкладки», доступен ли профиль. */
