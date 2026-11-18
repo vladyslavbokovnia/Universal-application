@@ -185,7 +185,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     };
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 18; }
+    @Override public int getVersion() { return 19; }
     @Override public String getDescription() {
         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
@@ -214,6 +214,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         } catch (Throwable t) { }
         mediaObs = null;
         if (h != null) h.removeCallbacks(reloadR);
+        clearPendingDelete();
         rememberPos();
         releaseHeadset();
         unlockTouch();
@@ -254,6 +255,72 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     }
 
     private static boolean prefsMoved;
+
+    // ---------------------------------------------------------- автоудаление прослушанного
+
+    /** Настройка «Удалять прослушанное»: трек доигран сам, началось следующее, через несколько секунд доигранный удаляется. */
+    private boolean autoDeleteOn() {
+        SharedPreferences p = prefs();
+        return p != null && p.getBoolean("auto_delete", false);
+    }
+
+    private int keepWindowSec() {
+        SharedPreferences p = prefs();
+        int v = p == null ? 20 : p.getInt("auto_delete_sec", 20);
+        return Math.max(5, Math.min(120, v));
+    }
+
+    /** id доигранного трека, который будет удалён, если не нажать play/пауза на наушнике; MIN_VALUE: ничего не ждёт. */
+    private long pendDelId = Long.MIN_VALUE;
+    private final Runnable pendDelR = new Runnable() {
+        @Override public void run() { runAutoDelete(); }
+    };
+
+    /** Взвести удаление доигранного трека. Песни из «Поделиться» и избранное не трогаем. */
+    private void armAutoDelete(Track t) {
+        if (pendDelId != Long.MIN_VALUE) {               // предыдущий ещё ждал (трек короче окна): его срок вышел
+            if (h != null) h.removeCallbacks(pendDelR);
+            runAutoDelete();
+        }
+        if (!autoDeleteOn() || t == null || t.id < 0 || t.uri == null || h == null) return;
+        String[] me = new String[]{t.uri.toString(), t.title, t.artist};
+        for (String[] e : plLoad(PL_FAV)) if (sameEntry(e, me)) return;
+        pendDelId = t.id;
+        h.postDelayed(pendDelR, keepWindowSec() * 1000L);
+    }
+
+    private void runAutoDelete() {
+        long id = pendDelId;
+        pendDelId = Long.MIN_VALUE;
+        if (id == Long.MIN_VALUE) return;
+        int idx = -1;
+        for (int i = 0; i < tracks.size(); i++) if (tracks.get(i).id == id) { idx = i; break; }
+        if (idx < 0 || idx == cur) return;               // уже нет или он же играет снова (в списке один трек)
+        deleteTrack(idx);
+    }
+
+    /** Нажатие play/пауза в окне «оставить»: удаление отменяется. */
+    private void keepPending() {
+        if (pendDelId == Long.MIN_VALUE) return;
+        clearPendingDelete();
+        speak("Оставлено");
+    }
+
+    private boolean skipDeleteOn() {
+        SharedPreferences p = prefs();
+        return p == null || p.getBoolean("auto_delete_skip", true);
+    }
+
+    /** Пропуск с гарнитуры (следующий или предыдущий): пропущенный трек ставится на удаление по той же схеме, что и доигранный. */
+    private void headsetSkip(int dir) {
+        if (skipDeleteOn() && mp != null && prepared && cur >= 0 && cur < tracks.size()) armAutoDelete(tracks.get(cur));
+        if (dir > 0) next(); else prev();
+    }
+
+    private void clearPendingDelete() {
+        pendDelId = Long.MIN_VALUE;
+        if (h != null) h.removeCallbacks(pendDelR);
+    }
 
     /** Один раз переносит значения из прежнего файла настроек (плейлисты, места в треках, кнопки геймпада и др.); то, что уже записал хост, не затирается. */
     private static synchronized void movePrefs(Context c, SharedPreferences p) {
@@ -660,6 +727,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                     afterChange();                               // остановка без перехода к следующему
                     return;
                 }
+                armAutoDelete((cur >= 0 && cur < tracks.size()) ? tracks.get(cur) : null);
                 next();
             }
         });
@@ -821,8 +889,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             session.setCallback(new MediaSession.Callback() {
                 @Override public void onPlay() { toggle(); }
                 @Override public void onPause() { pause(); }
-                @Override public void onSkipToNext() { next(); }
-                @Override public void onSkipToPrevious() { prev(); }
+                @Override public void onSkipToNext() { headsetSkip(1); }
+                @Override public void onSkipToPrevious() { headsetSkip(-1); }
                 @Override public void onSeekTo(long pos) {
                     try {
                         if (mp != null && prepared) {
@@ -836,6 +904,11 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                     KeyEvent e = intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
                     if (e != null && e.getAction() == KeyEvent.ACTION_DOWN) {
                         int kc = e.getKeyCode();
+                        if (pendDelId != Long.MIN_VALUE && (kc == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || kc == KeyEvent.KEYCODE_HEADSETHOOK
+                                || kc == KeyEvent.KEYCODE_MEDIA_PLAY || kc == KeyEvent.KEYCODE_MEDIA_PAUSE)) {
+                            keepPending();               // нажатие play/пауза в окне «оставить»: трек не удаляется, воспроизведение не трогаем
+                            return true;
+                        }
                         if (kc == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD) { seekBy(seekStepMs()); return true; }
                         if (kc == KeyEvent.KEYCODE_MEDIA_REWIND) { seekBy(-seekStepMs()); return true; }
                     }
@@ -2651,6 +2724,12 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 "Ушёл на другой трек или поставил на паузу: вернёшься туда же", true));
         r.add(SettingItem.toggle("no_auto_next", "⏹ Не переходить к следующему",
                 "Трек доиграл: тишина, без перехода дальше", false));
+        r.add(SettingItem.toggle("auto_delete", "🗑 Удалять прослушанное",
+                "Трек доигран сам, началось следующее: через несколько секунд доигранный удаляется. Нажми play/пауза на наушнике в эти секунды, и трек останется (воспроизведение не прервётся). Избранное не удаляется", false));
+        r.add(SettingItem.toggle("auto_delete_skip", "⏭🗑 Удалять и пропущенное наушниками",
+                "Пропустил трек кнопкой «следующий» или «предыдущий» на гарнитуре: он удаляется по той же схеме. Работает при включённом «Удалять прослушанное»", true));
+        r.add(SettingItem.slider("auto_delete_sec", "⏳ Окно «оставить», с",
+                "Сколько секунд после начала следующего трека можно нажать play/пауза, чтобы оставить предыдущий", 5, 60, 5, 20));
         r.add(SettingItem.toggle("unplug_pause", "🎧✕ Пауза, если наушники отключили", "", true));
         r.add(SettingItem.toggle("plug_play", "🎧▶ Играть, когда наушники подключили", "", false));
         r.add(SettingItem.toggle("remote_any", "🔀 Управлять и чужим плеером",
@@ -2683,6 +2762,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             if (m != null) m.reset();
         } else if ("remote_any".equals(key)) {
             if (!remoteAny()) ensureSession();
+        } else if ("auto_delete".equals(key)) {
+            if (!autoDeleteOn()) clearPendingDelete();
         } else if ("newest_first".equals(key)) {
             loadTracks();                            // новый порядок списка; текущий трек находится по id
             refreshUiAll();
