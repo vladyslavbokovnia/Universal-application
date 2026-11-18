@@ -7732,7 +7732,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         private static final int GROUP_BAND = 9;
 
         /** Эмодзи, которым помечена текущая вкладка на панели. */
-        private static final String CURRENT_EMOJI = "📍";
+        private static final String CURRENT_EMOJI = "👁️";
 
         /** Метка текущей вкладки: полупрозрачная эмодзи по центру карточки. */
         private final class CurrentMark extends View {
