@@ -1,0 +1,13 @@
+diff --git a/modules/Browser.java b/modules/Browser.java
+index e97c86c..3a49da3 100644
+--- a/modules/Browser.java
++++ b/modules/Browser.java
+@@ -7732,7 +7732,7 @@ public class Browser implements IPlugin, ISettingsProvider {
+         private static final int GROUP_BAND = 9;
+ 
+         /** Эмодзи, которым помечена текущая вкладка на панели. */
+-        private static final String CURRENT_EMOJI = "📍";
++        private static final String CURRENT_EMOJI = "👁️";
+ 
+         /** Метка текущей вкладки: полупрозрачная эмодзи по центру карточки. */
+         private final class CurrentMark extends View {
