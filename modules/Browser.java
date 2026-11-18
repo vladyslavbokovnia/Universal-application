@@ -2052,8 +2052,8 @@ public class Browser implements IPlugin, ISettingsProvider {
                 float d = Math.min(getWidth(), getHeight());
                 float cx = getWidth() / 2f, cy = getHeight() / 2f;
                 // кольца: одно внутри другого, самое внешнее у края кнопки; цифры вписываются в самое внутреннее
-                float step = rings == 0 ? 0f : Math.min(dp(5), d * 0.24f / rings);
-                rp.setStrokeWidth(Math.max(dp(2), step * 0.55f));       // толстые чисто белые кольца: различимы на чёрно-белом экране
+                float step = rings == 0 ? 0f : Math.min(dp(4), d * 0.22f / rings);
+                rp.setStrokeWidth(Math.max(1f, step * 0.45f));       // тонкие, но чисто белые кольца
                 rp.setColor(0xFFFFFFFF);
                 for (int i = 0; i < rings; i++) {
                     c.drawCircle(cx, cy, d / 2f - dp(3) - i * step, rp);
@@ -7736,18 +7736,11 @@ public class Browser implements IPlugin, ISettingsProvider {
         /** Метка текущей вкладки: полупрозрачная эмодзи по центру карточки. */
         private final class CurrentMark extends View {
             private final Paint ep = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final Paint disc = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final Paint rim = new Paint(Paint.ANTI_ALIAS_FLAG);
             private final android.graphics.Rect eb = new android.graphics.Rect();
 
             CurrentMark(Context c) {
                 super(c);
-                // непрозрачная эмодзи на светлом круге с чёрным кантом: заметна и на цветном, и на чёрно-белом экране
-                disc.setStyle(Paint.Style.FILL);
-                disc.setColor(0xF2FFFFFF);
-                rim.setStyle(Paint.Style.STROKE);
-                rim.setColor(0xFF000000);
-                rim.setStrokeWidth(dp(3));
+                ep.setAlpha(235);       // почти непрозрачная эмодзи, без подложки
                 setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
                 setClickable(false);
             }
@@ -7755,9 +7748,6 @@ public class Browser implements IPlugin, ISettingsProvider {
             @Override protected void onDraw(Canvas c) {
                 float w = getWidth(), h = getHeight();
                 if (w <= 0 || h <= 0) return;
-                float r = Math.min(w, h) / 2f - dp(3);
-                c.drawCircle(w / 2f, h / 2f, r, disc);
-                c.drawCircle(w / 2f, h / 2f, r, rim);
                 ep.setTextSize(Math.min(w, h) * 0.58f);
                 ep.getTextBounds(CURRENT_EMOJI, 0, CURRENT_EMOJI.length(), eb);
                 c.drawText(CURRENT_EMOJI, w / 2f - eb.exactCenterX(), h / 2f - eb.exactCenterY(), ep);
