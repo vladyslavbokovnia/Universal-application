@@ -1,0 +1,163 @@
+diff --git a/modules/Browser.java b/modules/Browser.java
+index 7aaa3a1..4eeda49 100644
+--- a/modules/Browser.java
++++ b/modules/Browser.java
+@@ -1167,6 +1167,7 @@ public class Browser implements IPlugin, ISettingsProvider {
+         String name;
+         int lastTabId;          // вкладка группы, из которой вышли в последний раз: её снимок на обложке группы
+         int parent;             // группа, в которую вложена эта группа; 0: верхний уровень
++        String icon = "";       // значок темы группы (эмодзи) на её карточке; пусто: без значка
+         Group(int id, String name) { this.id = id; this.name = name; }
+     }
+ 
+@@ -1932,7 +1933,8 @@ public class Browser implements IPlugin, ISettingsProvider {
+             hub.setTypeface(hub.getTypeface(), android.graphics.Typeface.BOLD);
+             hub.setGravity(Gravity.CENTER);
+             hub.setText("I");
+-            hub.setBackground(round(0xCC000000, 39, 0, 0));      // без рамки: на верхнем уровне кнопка гладкая, уровни показывают только кольца
++            hub.setBackground(null);      // фон и кольца задаёт HubView по уровню: верхний без фона, основной гладкий, глубже кольца
++            ((HubView) hub).setRings(0);
+             hub.setAlpha(HUB_ALPHA);
+             hub.setClickable(true);
+             hub.setFocusable(true);
+@@ -2034,18 +2036,30 @@ public class Browser implements IPlugin, ISettingsProvider {
+             private final Paint rp = new Paint(Paint.ANTI_ALIAS_FLAG);
+             private final android.graphics.Rect rb = new android.graphics.Rect();
+             private int rings;
++            private int level = -1;        // глубина показанного уровня: 0 верхний (только римские цифры), 1 основной (без колец), дальше кольца
++            private boolean bare;          // верхний уровень: без фона, цифры с тёмной обводкой
++            private final Paint op = new Paint(Paint.ANTI_ALIAS_FLAG);
+ 
+             HubView(Context c) {
+                 super(c);
+                 tp.setTypeface(android.graphics.Typeface.create(android.graphics.Typeface.SERIF, android.graphics.Typeface.BOLD));
+                 rp.setStyle(Paint.Style.STROKE);
++                op.setStyle(Paint.Style.STROKE);
++                op.setStrokeJoin(Paint.Join.ROUND);
++                op.setTypeface(tp.getTypeface());
+             }
+ 
+-            /** Число колец по краю кнопки: сколько уровней у группы, которую показывает панель (0: верхний уровень, колец нет). */
+-            void setRings(int n) {
+-                n = Math.max(0, Math.min(6, n));
+-                if (n == rings) return;
+-                rings = n;
++            /**
++             * Уровень, который показывает панель (глубина группы): 0, верхний, только распределяет группы по темам: кнопка без фона, одни римские цифры;
++             * 1, основной рабочий: кнопка без колец; дальше по одному кольцу на каждый уровень глубже.
++             */
++            void setRings(int depth) {
++                depth = Math.max(0, depth);
++                if (depth == level) return;
++                level = depth;
++                rings = Math.max(0, Math.min(6, depth - 1));
++                bare = depth == 0;
++                setBackground(bare ? null : round(0xCC000000, 39, 0, 0));
+                 invalidate();
+             }
+ 
+@@ -2071,6 +2085,12 @@ public class Browser implements IPlugin, ISettingsProvider {
+                 float k = 0.98f * inner / (float) Math.hypot(w, hh);
+                 tp.setTextSize(100f * k);
+                 tp.getTextBounds(s, 0, s.length(), rb);
++                if (bare) {         // без фона цифры читаются на любой странице благодаря тёмной обводке
++                    op.setTextSize(tp.getTextSize());
++                    op.setStrokeWidth(Math.max(2f, tp.getTextSize() * 0.12f));
++                    op.setColor(0xFF000000);
++                    c.drawText(s, cx - rb.exactCenterX(), cy - rb.exactCenterY(), op);
++                }
+                 c.drawText(s, cx - rb.exactCenterX(), cy - rb.exactCenterY(), tp);
+             }
+         }
+@@ -2726,6 +2746,7 @@ public class Browser implements IPlugin, ISettingsProvider {
+                     Group lg = new Group(id, o.optString("n", "Группа"));
+                     lg.lastTabId = o.optInt("l", 0);
+                     lg.parent = o.optInt("p", 0);
++                    lg.icon = o.optString("c", "");
+                     groups.add(lg);
+                     if (id >= nextGroup) nextGroup = id + 1;
+                 }
+@@ -2741,6 +2762,7 @@ public class Browser implements IPlugin, ISettingsProvider {
+                     o.put("n", g.name);
+                     o.put("l", g.lastTabId);
+                     o.put("p", g.parent);
++                    o.put("c", g.icon == null ? "" : g.icon);
+                     a.put(o);
+                 }
+                 sp.edit().putString("groups_json", a.toString()).putInt("groups_next", nextGroup).apply();
+@@ -7712,6 +7734,7 @@ public class Browser implements IPlugin, ISettingsProvider {
+                 Object it = childAt(t, level);      // вкладка или группа этого уровня; группа стоит на месте своей первой вкладки
+                 if (it != null && seenItems.add(it)) items.add(it);
+             }
++            java.util.Collections.reverse(items);       // новые сверху: порядок вкладок на панели обратный
+             LinearLayout rowL = null;
+             for (int i = 0; i < items.size(); i++) {
+                 if (i % 2 == 0) {
+@@ -7931,6 +7954,18 @@ public class Browser implements IPlugin, ISettingsProvider {
+                 FrameLayout.LayoutParams rlp = new FrameLayout.LayoutParams(-1, -1);
+                 rlp.setMargins(-band, -band, -band, -band);      // кольцо занимает всю карточку, включая полосу
+                 box.addView(new TickRing(act, count, pos - 1), rlp);
++                if (grp.icon != null && grp.icon.length() > 0) {
++                    // значок темы группы: эмодзи в углу снимка, чтобы группу узнавать с первого взгляда
++                    TextView gi = new TextView(act);
++                    gi.setText(grp.icon);
++                    gi.setTextSize(30);
++                    gi.setGravity(Gravity.CENTER);
++                    gi.setBackground(round(0x88FFFFFF, 20, 0, 0));
++                    gi.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
++                    FrameLayout.LayoutParams glp = new FrameLayout.LayoutParams(dp(46), dp(46), Gravity.TOP | Gravity.END);
++                    glp.setMargins(0, dp(10), dp(10), 0);
++                    box.addView(gi, glp);
++                }
+             }
+         }
+ 
+@@ -8625,7 +8660,7 @@ public class Browser implements IPlugin, ISettingsProvider {
+                     dgE.parent = tl;
+                 }
+                 compactGroups();
+-                moveUnit(d, target, zone > 0);
++                moveUnit(d, target, zone < 0);       // порядок на панели обратный: левый край карточки в списке значит «после»
+                 finishDrop();
+                 return;
+             }
+@@ -8746,8 +8781,39 @@ public class Browser implements IPlugin, ISettingsProvider {
+                 for (Tab x : tabsOf(g)) closeTabKeep(x);
+                 showTabs();
+             } });
++            add(icons, labels, actions, g.icon != null && g.icon.length() > 0 ? g.icon : "🏷", "Значок группы", new Runnable() { @Override public void run() {
++                showGroupIconPicker(g);
++            } });
+             showList(g.name, icons, labels, actions);
+         }
++
++        private final String[] GROUP_ICONS = {
++            "📰", "🎬", "🎵", "📚", "💼", "🛒", "💻", "🎮", "🏠", "✈️", "💰", "❤️",
++            "🍳", "🗺️", "💬", "🔧", "🤖", "📷", "⭐", "🔬", "🎓", "⚽", "🚗", "🌍"
++        };
++        private final String[] GROUP_ICON_NAMES = {
++            "Новости", "Видео", "Музыка", "Чтение и книги", "Работа", "Покупки", "Программирование", "Игры", "Дом", "Путешествия", "Финансы", "Здоровье",
++            "Еда", "Карты", "Общение", "Инструменты", "ИИ", "Фото", "Избранное", "Наука", "Учёба", "Спорт", "Транспорт", "Мир"
++        };
++
++        /** Выбор значка темы для группы: сетка эмодзи, последний значок «убрать». */
++        private void showGroupIconPicker(final Group g) {
++            List<GridItem> items = new ArrayList<GridItem>();
++            for (int i = 0; i < GROUP_ICONS.length; i++) {
++                final String em = GROUP_ICONS[i];
++                addG(items, "gi" + i, em, "Значок: " + GROUP_ICON_NAMES[i], new Runnable() { @Override public void run() {
++                    g.icon = em;
++                    saveGroups();
++                    showTabs();
++                } });
++            }
++            addG(items, "gi_none", "∅", "Убрать значок", new Runnable() { @Override public void run() {
++                g.icon = "";
++                saveGroups();
++                showTabs();
++            } });
++            showIconGrid("groupicon", "Значок группы " + g.name, items, true);
++        }
+     }
+ 
+     /** Бросается из потока запроса GM_xmlhttpRequest, когда скрипт вызвал abort(). */
