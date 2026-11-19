@@ -26,6 +26,7 @@ import android.graphics.BitmapFactory;
 import android.media.AudioAttributes;
 import android.media.AudioDeviceCallback;
 import android.media.AudioDeviceInfo;
+import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.media.MediaMetadata;
 import android.media.MediaPlayer;
@@ -60,6 +61,7 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityWindowInfo;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -185,7 +187,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     };
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 21; }
+    @Override public int getVersion() { return 22; }
     @Override public String getDescription() {
         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
@@ -217,6 +219,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         clearPendingDelete();
         rememberPos();
         releaseHeadset();
+        abandonFocus();
         unlockTouch();
         try { if (tts != null) { tts.shutdown(); } } catch (Throwable t) { }
         tts = null;
@@ -243,7 +246,32 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     }
 
     @Override public Object execute(Map<String, ?> data) { return null; }
-    @Override public void onAccessibilityEvent(AccessibilityEvent event, AccessibilityService service) { }
+    @Override public void onAccessibilityEvent(AccessibilityEvent event, AccessibilityService service) {
+        if (event == null || !padFocusOn()) return;
+        int t = event.getEventType();
+        if (t == AccessibilityEvent.TYPE_WINDOWS_CHANGED || t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                || t == AccessibilityEvent.TYPE_VIEW_FOCUSED) {
+            boolean now = imeShown(service);
+            if (now != imeUp) {
+                imeUp = now;
+                updateFocusCatcher();               // клавиатура появилась или ушла: окно фокуса уступает или возвращается
+            }
+        }
+    }
+
+    /** Экранная клавиатура сейчас на экране (по списку окон службы). */
+    private boolean imeUp;
+
+    private static boolean imeShown(AccessibilityService service) {
+        try {
+            List<AccessibilityWindowInfo> ws = service == null ? null : service.getWindows();
+            if (ws == null) return false;
+            for (AccessibilityWindowInfo w : ws) {
+                if (w.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) return true;
+            }
+        } catch (Throwable t) { }
+        return false;
+    }
     @Override public Bitmap createIcon(int sizePx) { return null; }
 
     private SharedPreferences prefs() {
@@ -730,6 +758,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 .setUsage(AudioAttributes.USAGE_MEDIA)
                 .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                 .build());
+        try { mp.setWakeMode(appCtx, PowerManager.PARTIAL_WAKE_LOCK); } catch (Throwable t) { }   // с выключенным экраном процессор не засыпает
         mp.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
             @Override public void onPrepared(MediaPlayer p) {
                 prepared = true;
@@ -737,7 +766,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                     try { p.seekTo(resumeTo); } catch (Throwable t) { }
                     resumeTo = 0;
                 }
-                try { p.start(); } catch (Throwable t) { }
+                requestFocus();
+                try { p.start(); } catch (Throwable t) { hsNote("start: " + t); }
                 applySpeed();
                 afterChange();
             }
@@ -758,10 +788,91 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         mp.setOnErrorListener(new MediaPlayer.OnErrorListener() {
             @Override public boolean onError(MediaPlayer p, int what, int extra) {
                 prepared = false;
+                hsNote("ошибка плеера " + what + "/" + extra);
                 afterChange();
                 return true;
             }
         });
+    }
+
+    /** Плеер в плохом состоянии (после ошибки, долгого простоя): выбросить и создать заново. */
+    private void recreatePlayer() {
+        try { if (mp != null) mp.release(); } catch (Throwable t) { }
+        mp = null;
+        prepared = false;
+        ensurePlayer();
+    }
+
+    // ---------------------------------------------------------- аудиофокус
+    // Без фокуса система не считает плеер главным: параллельно играет чужое, а гарнитура и экран-выкл ведут себя
+    // непредсказуемо. Фокус берётся при пуске и держится, пока трек на паузе; отпускается, когда модуль остановлен.
+
+    private AudioFocusRequest focusReq;
+    private boolean focusHeld;
+    private boolean resumeOnGain;
+    private final AudioManager.OnAudioFocusChangeListener ownFocusListener = new AudioManager.OnAudioFocusChangeListener() {
+        @Override public void onAudioFocusChange(int change) {
+            try {
+                if (change == AudioManager.AUDIOFOCUS_LOSS) {
+                    focusHeld = false;
+                    resumeOnGain = false;
+                    hsNote("фокус потерян: другое приложение");
+                    pause();
+                } else if (change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
+                    resumeOnGain = isPlaying();
+                    hsNote("фокус временно потерян");
+                    pause();
+                } else if (change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK) {
+                    if (mp != null && !ttsSpeaking()) mp.setVolume(0.3f, 0.3f);
+                } else if (change == AudioManager.AUDIOFOCUS_GAIN) {
+                    if (mp != null) mp.setVolume(1f, 1f);
+                    if (resumeOnGain) {
+                        resumeOnGain = false;
+                        playNow();
+                    }
+                }
+            } catch (Throwable t) { }
+        }
+    };
+
+    /** Идёт озвучка модуля: её приглушение музыки (duckStart) делает сам модуль. */
+    private boolean ttsSpeaking() {
+        try { return tts != null && tts.isSpeaking(); } catch (Throwable t) { return false; }
+    }
+
+    private boolean requestFocus() {
+        Context c = appCtx;
+        if (c == null) return true;
+        if (focusHeld) return true;
+        try {
+            AudioManager am = (AudioManager) c.getSystemService(Context.AUDIO_SERVICE);
+            if (am == null) return true;
+            if (focusReq == null) {
+                focusReq = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                        .setAudioAttributes(new AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_MEDIA)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
+                        .setOnAudioFocusChangeListener(ownFocusListener, h)
+                        .build();
+            }
+            int r = am.requestAudioFocus(focusReq);
+            focusHeld = r == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+            if (!focusHeld) hsNote("фокус не выдан (" + r + ")");
+            return focusHeld;
+        } catch (Throwable t) {
+            hsNote("фокус: " + t);
+            return true;                              // не мешаем играть, если запрос не получился
+        }
+    }
+
+    private void abandonFocus() {
+        Context c = appCtx;
+        try {
+            AudioManager am = c == null ? null : (AudioManager) c.getSystemService(Context.AUDIO_SERVICE);
+            if (am != null && focusReq != null) am.abandonAudioFocusRequest(focusReq);
+        } catch (Throwable t) { }
+        focusHeld = false;
+        resumeOnGain = false;
     }
 
     public void playAt(int i) {
@@ -783,7 +894,19 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             mp.prepareAsync();
             afterChange();
         } catch (Throwable t) {
-            toast("Не играется: " + t.getMessage());
+            hsNote("playAt: " + t);
+            try {                                              // один повтор на свежем плеере
+                recreatePlayer();
+                prepared = false;
+                cur = i;
+                resumeTo = savedPos(tracks.get(i));
+                mp.setDataSource(appCtx, tracks.get(i).uri);
+                mp.prepareAsync();
+                afterChange();
+            } catch (Throwable t2) {
+                hsNote("повтор не удался: " + t2);
+                toast("Не играется: " + t2);
+            }
         }
     }
 
@@ -792,9 +915,14 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         extPkg = null;
         if (mp != null && prepared) {
             try {
+                requestFocus();
                 if (!mp.isPlaying()) mp.start();
                 afterChange();
-            } catch (Throwable t) { hsNote("пуск не удался: " + t); }
+            } catch (Throwable t) {
+                hsNote("пуск не удался: " + t);
+                prepared = false;                              // плеер испорчен: ниже трек запускается заново
+                if (cur >= 0 && cur < tracks.size()) playAt(cur);
+            }
             return;
         }
         toggle();
@@ -826,9 +954,13 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             return;
         }
         try {
-            if (mp.isPlaying()) { mp.pause(); rememberPos(); } else mp.start();
+            if (mp.isPlaying()) { mp.pause(); rememberPos(); } else { requestFocus(); mp.start(); }
             afterChange();
-        } catch (Throwable t) { }
+        } catch (Throwable t) {
+            hsNote("toggle: " + t);
+            prepared = false;
+            if (cur >= 0 && cur < tracks.size()) playAt(cur);
+        }
     }
 
     /** С чего начинать, если ничего не выбрано: первая песня общего списка. */
@@ -2316,6 +2448,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         else if (!padFocusOn()) why = "настройка выключена";
         else if (playerOnScreen()) why = "открыто окно плеера, оно принимает геймпад само";
         else if (!padPresent()) why = "геймпад не найден";
+        else if (imeUp) why = "открыта клавиатура: окно уступило ей фокус";
         else if (!screenReady()) why = "экран выключен или заблокирован";
         boolean want = why == null;
         if (!(why == null ? "" : why).equals(focusWhy)) {
@@ -2784,8 +2917,18 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         if (m != null) m.stop(null);
     }
 
-    /** Через службу кнопки не берём: работают только при открытом окне плеера. */
+    /**
+     * Через службу кнопки берём только при выключенном экране: окно фокуса и окно плеера тогда не существуют,
+     * и без этого геймпад молчит. При включённом экране кнопки приходят в окно, и здесь они не дублируются.
+     */
     @Override public boolean onKeyEvent(KeyEvent e) {
+        try {
+            if (!padFocusOn() || appCtx == null) return false;
+            PowerManager pm = (PowerManager) appCtx.getSystemService(Context.POWER_SERVICE);
+            if (pm == null || pm.isInteractive()) return false;
+            PadMapper m = mapper;
+            if (m != null && PadMapper.isPadEvent(e)) return m.onKeyEvent(e);
+        } catch (Throwable t) { }
         return false;
     }
 
