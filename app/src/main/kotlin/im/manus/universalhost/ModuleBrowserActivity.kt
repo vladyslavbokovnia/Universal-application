@@ -54,6 +54,19 @@ class ModuleBrowserActivity : Activity() {
         applyTaskDescription()
     }
 
+    /**
+     * Окно держит объект модуля, взятый при создании. Если .dex с тех пор заменили, в реестре уже другой объект:
+     * пересоздаём окно, и оно строит вид из новой версии (старый вид закрывается через destroyView у старого объекта).
+     */
+    private fun reloadIfModuleUpdated(): Boolean {
+        val n = name ?: return false
+        val held = plugin ?: return false
+        val current = try { PluginRegistry.find(this, n) } catch (t: Throwable) { null }
+        if (current == null || current === held) return false
+        recreate()
+        return true
+    }
+
     private fun applyFullscreen() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             window.attributes = window.attributes.apply {
@@ -93,6 +106,8 @@ class ModuleBrowserActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        CoreAccessibilityService.instance?.refreshIfStale()
+        if (reloadIfModuleUpdated()) return
         HostRecents.hideHostCard(this)
         val n = name ?: return
         // как открыть это окно снова из модуля «Недавние»

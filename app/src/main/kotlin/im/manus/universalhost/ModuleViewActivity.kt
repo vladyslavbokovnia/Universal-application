@@ -34,6 +34,7 @@ class ModuleViewActivity : Activity() {
     }
 
     private var target: String = ""
+    private var plugin: IPlugin? = null
 
     @Suppress("DEPRECATION")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -49,7 +50,7 @@ class ModuleViewActivity : Activity() {
             setTaskDescription(android.app.ActivityManager.TaskDescription(t, ModuleWindows.icon(this, t, 192), Color.BLACK))
         } catch (e: Throwable) { }
 
-        val plugin = try { PluginRegistry.find(this, t) } catch (e: Throwable) { null }
+        plugin = try { PluginRegistry.find(this, t) } catch (e: Throwable) { null }
         val view = try { (plugin as? IMainViewProvider)?.createMainView(this) } catch (e: Throwable) { null }
         if (view == null) {
             openSettings()
@@ -84,10 +85,21 @@ class ModuleViewActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        CoreAccessibilityService.instance?.refreshIfStale()
+        if (reloadIfModuleUpdated()) return
         if (target.isNotEmpty()) {
             ModuleWindows.record(this, target, Intent(intent).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         }
         HostRecents.hideHostCard(this)
-        CoreAccessibilityService.instance?.refreshIfStale()
+    }
+
+    /** .dex модуля заменили, пока окно было открыто: пересоздаём окно, чтобы вид строился из новой версии. */
+    private fun reloadIfModuleUpdated(): Boolean {
+        val held = plugin ?: return false
+        if (target.isEmpty()) return false
+        val current = try { PluginRegistry.find(this, target) } catch (e: Throwable) { null }
+        if (current == null || current === held) return false
+        recreate()
+        return true
     }
 }
