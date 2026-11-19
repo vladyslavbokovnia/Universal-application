@@ -187,7 +187,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     };
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 22; }
+    @Override public int getVersion() { return 23; }
     @Override public String getDescription() {
         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
@@ -249,10 +249,21 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     @Override public void onAccessibilityEvent(AccessibilityEvent event, AccessibilityService service) {
         if (event == null || !padFocusOn()) return;
         int t = event.getEventType();
+        if (t == AccessibilityEvent.TYPE_VIEW_CLICKED || t == AccessibilityEvent.TYPE_VIEW_FOCUSED
+                || t == AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED) {
+            try {
+                android.view.accessibility.AccessibilityNodeInfo n = event.getSource();
+                if (n != null && (n.isEditable() || "android.widget.EditText".contentEquals(n.getClassName() == null ? "" : n.getClassName()))
+                        && focusView != null) {
+                    suspendFocusCatcher(20000);                   // клавиатура появится, когда окно фокуса не держит фокус
+                }
+            } catch (Throwable x) { }
+        }
         if (t == AccessibilityEvent.TYPE_WINDOWS_CHANGED || t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
                 || t == AccessibilityEvent.TYPE_VIEW_FOCUSED) {
             boolean now = imeShown(service);
             if (now != imeUp) {
+                if (!now) focusSuspendUntil = 0;              // клавиатуру закрыли: окно фокуса возвращается сразу
                 imeUp = now;
                 updateFocusCatcher();               // клавиатура появилась или ушла: окно фокуса уступает или возвращается
             }
@@ -890,7 +901,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             rememberLast(listSrc, tracks.get(i));   // последний трек этого списка: к нему вернёмся при «Сменить список»
             stopAfter = false;
             resumeTo = savedPos(tracks.get(i));
-            mp.setDataSource(appCtx, tracks.get(i).uri);
+            setSource(tracks.get(i));
             mp.prepareAsync();
             afterChange();
         } catch (Throwable t) {
@@ -900,14 +911,44 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 prepared = false;
                 cur = i;
                 resumeTo = savedPos(tracks.get(i));
-                mp.setDataSource(appCtx, tracks.get(i).uri);
+                setSource(tracks.get(i));
                 mp.prepareAsync();
                 afterChange();
             } catch (Throwable t2) {
                 hsNote("повтор не удался: " + t2);
-                toast("Не играется: " + t2);
+                toast("Не играется: " + tracks.get(i).title + "\n" + t2.getMessage());
             }
         }
+    }
+
+    /**
+     * Открывает файл трека: сначала по адресу из медиатеки, потом через дескриптор файла, потом по пути.
+     * «setDataSource failed 0x80000000» чаще всего значит, что запись в медиатеке устарела (файл перенесён
+     * или удалён) или систему не устроил именно адрес; путь по файлу в этих случаях помогает.
+     */
+    private void setSource(Track t) throws Exception {
+        Exception first = null;
+        try { mp.setDataSource(appCtx, t.uri); return; } catch (Exception e) { first = e; }
+        try {
+            mp.reset();
+            android.content.res.AssetFileDescriptor afd = appCtx.getContentResolver().openAssetFileDescriptor(t.uri, "r");
+            if (afd != null) {
+                try { mp.setDataSource(afd.getFileDescriptor(), afd.getStartOffset(), afd.getLength()); return; }
+                finally { try { afd.close(); } catch (Throwable x) { } }
+            }
+        } catch (Exception e) { hsNote("дескриптор: " + e); }
+        if (t.path != null) {
+            File f = new File(t.path);
+            hsNote("файл " + (f.isFile() ? "есть, " + f.length() + " байт" : "НЕ НАЙДЕН") + ": " + t.path);
+            if (!f.isFile()) {
+                if (h != null) h.post(reloadR);                  // запись в медиатеке устарела: список перечитается
+                throw new java.io.FileNotFoundException("файл не найден");
+            }
+            mp.reset();
+            mp.setDataSource(t.path);
+            return;
+        }
+        throw first;
     }
 
     /** Пуск без переключения: кнопка «играть» с гарнитуры не должна ставить на паузу. */
@@ -2449,6 +2490,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         else if (playerOnScreen()) why = "открыто окно плеера, оно принимает геймпад само";
         else if (!padPresent()) why = "геймпад не найден";
         else if (imeUp) why = "открыта клавиатура: окно уступило ей фокус";
+        else if (SystemClock.uptimeMillis() < focusSuspendUntil) why = "пауза: «назад» или ввод текста идёт приложению";
         else if (!screenReady()) why = "экран выключен или заблокирован";
         boolean want = why == null;
         if (!(why == null ? "" : why).equals(focusWhy)) {
@@ -2518,6 +2560,32 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         } catch (Throwable t) { }
         focusWm = null;
         if (v != null) padReleaseAll();
+    }
+
+    /** До этого момента (uptime) окно фокуса не показывается: «Назад» и ввод текста должны дойти до приложения под ним. */
+    private long focusSuspendUntil;
+
+    /**
+     * «Назад» пришёл окну фокуса, а не приложению. Системное «назад» из службы уходит в окно в фокусе, то есть
+     * снова в это же окно, поэтому окно убирается на время, «назад» нажимается уже приложению, потом окно возвращается.
+     */
+    private void passBack() {
+        final AccessibilityService s = svc;
+        if (s == null || h == null) return;
+        suspendFocusCatcher(900);
+        h.postDelayed(new Runnable() {
+            @Override public void run() {
+                try { s.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK); } catch (Throwable t) { }
+            }
+        }, 150);
+    }
+
+    /** Убрать окно фокуса на ms миллисекунд; потом оно само вернётся, если условия те же. */
+    private void suspendFocusCatcher(long ms) {
+        focusSuspendUntil = SystemClock.uptimeMillis() + ms;
+        removeFocusCatcher();
+        focusLog("окно убрано на " + ms + " мс");
+        if (h != null) h.postDelayed(focusUpdate, ms + 50);
     }
 
     private void toggleFocusPref() {
@@ -2607,9 +2675,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             } catch (Throwable t) { }
             if (e.getKeyCode() == KeyEvent.KEYCODE_BACK) {
                 // «Назад» пришёл нам, а не приложению под окном: передаём его через службу
-                if (e.getAction() == KeyEvent.ACTION_UP && svc != null) {
-                    try { svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK); } catch (Throwable t) { }
-                }
+                if (e.getAction() == KeyEvent.ACTION_UP) passBack();
                 return true;
             }
             return super.dispatchKeyEvent(e);
