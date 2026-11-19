@@ -8721,6 +8721,12 @@ public class Browser implements IPlugin, ISettingsProvider {
                     showTabs();
                 } });
             }
+            if (t.group != 0 && groupById(t.group) != null) {
+                final Group ig = groupById(t.group);
+                addG(items, "groupicon", ig.icon != null && ig.icon.length() > 0 ? ig.icon : "🏷", "Значок группы", new Runnable() { @Override public void run() {
+                    showGroupIconPicker(ig);
+                } });
+            }
             addG(items, "sketch", "✎", "Нарисовать эскиз на снимке", new Runnable() { @Override public void run() {
                 startSketch(t, new Runnable() { @Override public void run() {
                     savedScrollAt = SystemClock.uptimeMillis();      // рисование долгое: прокрутка панели должна вернуться на место
