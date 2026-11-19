@@ -7958,12 +7958,13 @@ public class Browser implements IPlugin, ISettingsProvider {
                     // значок темы группы: эмодзи в углу снимка, чтобы группу узнавать с первого взгляда
                     TextView gi = new TextView(act);
                     gi.setText(grp.icon);
-                    gi.setTextSize(30);
+                    gi.setTextSize(60);
+                    gi.setIncludeFontPadding(false);
                     gi.setGravity(Gravity.CENTER);
-                    gi.setBackground(round(0x88FFFFFF, 20, 0, 0));
+                    gi.setAlpha(0.6f);        // без фона, крупный и полупрозрачный: снимок под ним остаётся виден
                     gi.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-                    FrameLayout.LayoutParams glp = new FrameLayout.LayoutParams(dp(46), dp(46), Gravity.TOP | Gravity.END);
-                    glp.setMargins(0, dp(10), dp(10), 0);
+                    FrameLayout.LayoutParams glp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
+                    glp.setMargins(0, dp(6), dp(8), 0);
                     box.addView(gi, glp);
                 }
             }
@@ -8802,23 +8803,110 @@ public class Browser implements IPlugin, ISettingsProvider {
             "Еда", "Карты", "Общение", "Инструменты", "ИИ", "Фото", "Избранное", "Наука", "Учёба", "Спорт", "Транспорт", "Мир"
         };
 
-        /** Выбор значка темы для группы: сетка эмодзи, последний значок «убрать». */
-        private void showGroupIconPicker(final Group g) {
-            List<GridItem> items = new ArrayList<GridItem>();
-            for (int i = 0; i < GROUP_ICONS.length; i++) {
-                final String em = GROUP_ICONS[i];
-                addG(items, "gi" + i, em, "Значок: " + GROUP_ICON_NAMES[i], new Runnable() { @Override public void run() {
-                    g.icon = em;
-                    saveGroups();
-                    showTabs();
-                } });
+        /** Каталог для поиска новых значков: эмодзи|название (название только для экранного диктора). */
+        private final String[] ICON_CATALOG = {
+            "🎧|Аудио", "🎙️|Подкасты", "📺|Телевидение", "🎞️|Кино", "🎭|Театр", "🎨|Искусство", "📝|Заметки", "📋|Списки",
+            "📅|Планы", "⏰|Время", "📧|Почта", "📞|Звонки", "🌐|Сайты", "🔒|Безопасность", "🔑|Доступ", "⚙️|Настройки",
+            "🧩|Расширения", "📱|Телефон", "🖥️|Компьютер", "⌨️|Клавиатура", "🕹️|Приставки", "🧠|Разум", "💡|Идеи", "📈|Рынки",
+            "🏦|Банки", "💳|Платежи", "🧾|Счета", "🏥|Врачи", "💊|Лекарства", "🏃|Бег", "🧘|Йога", "🥗|Питание",
+            "☕|Кофе", "🍕|Рестораны", "🛍️|Магазины", "🎁|Подарки", "👗|Одежда", "🏡|Недвижимость", "🛠️|Ремонт", "🌱|Сад",
+            "🐾|Животные", "👶|Дети", "👪|Семья", "🎂|Праздники", "⛪|Религия", "⚖️|Право", "🏛️|Власть", "🪖|Война",
+            "🌦️|Погода", "🚆|Поезда", "🚌|Автобусы", "🛫|Авиа", "🏨|Отели", "🏖️|Отдых", "⛰️|Горы", "🚲|Велосипед",
+            "🏋️|Тренировки", "🎣|Рыбалка", "🔭|Космос", "🧪|Химия", "🧬|Биология", "📐|Математика", "🗣️|Языки", "🔤|Слова",
+            "📓|Дневник", "🎼|Ноты", "🎸|Гитара", "🎤|Вокал", "📻|Радио", "🧰|Мастерская", "📦|Посылки", "🔖|Закладки",
+            "📌|Закреплено", "🔥|Горячее", "🌙|Ночь", "☀️|День", "💎|Ценное"
+        };
+
+        private List<String> iconList() {
+            List<String> l = new ArrayList<String>();
+            String raw = sp.getString("group_icon_list", null);
+            if (raw == null) {
+                for (String e : GROUP_ICONS) l.add(e);
+            } else {
+                for (String e : raw.split(",")) if (e.length() > 0 && !l.contains(e)) l.add(e);
             }
+            return l;
+        }
+
+        private void saveIconList(List<String> l) {
+            sp.edit().putString("group_icon_list", joinKeys(l)).apply();
+        }
+
+        private JSONObject iconUses() {
+            try { return new JSONObject(sp.getString("group_icon_uses", "{}")); }
+            catch (JSONException e) { return new JSONObject(); }
+        }
+
+        private String iconName(String e) {
+            for (int i = 0; i < GROUP_ICONS.length; i++) if (GROUP_ICONS[i].equals(e)) return GROUP_ICON_NAMES[i];
+            for (String c : ICON_CATALOG) if (c.startsWith(e + "|")) return c.substring(e.length() + 1);
+            return "Значок";
+        }
+
+        /** Поставить значок группе и запомнить выбор: чаще выбираемые значки в списке идут первыми. */
+        private void pickGroupIcon(Group g, String em) {
+            try {
+                JSONObject u = iconUses();
+                u.put(em, u.optInt(em, 0) + 1);
+                sp.edit().putString("group_icon_uses", u.toString()).apply();
+            } catch (JSONException ignored) { }
+            g.icon = em;
+            saveGroups();
+            showTabs();
+        }
+
+        /** Выбор значка темы для группы: только значки, сортировка по частоте выбора; ⚙ скрывает лишние, 🔍 ищет новые. */
+        private void showGroupIconPicker(final Group g) {
+            sp.edit().remove("grid_order_groupicon").apply();       // порядок всегда автоматический
+            final JSONObject uses = iconUses();
+            List<String> sorted = iconList();
+            java.util.Collections.sort(sorted, new java.util.Comparator<String>() {       // сортировка устойчивая: при равенстве прежний порядок
+                @Override public int compare(String x, String y) { return uses.optInt(y, 0) - uses.optInt(x, 0); }
+            });
+            List<GridItem> items = new ArrayList<GridItem>();
+            for (final String em : sorted) {
+                addG(items, "gi_" + em, em, iconName(em), new Runnable() { @Override public void run() { pickGroupIcon(g, em); } });
+            }
+            addG(items, "gi_find", "🔍", "Найти новые значки", new Runnable() { @Override public void run() { showGroupIconFinder(g); } });
             addG(items, "gi_none", "∅", "Убрать значок", new Runnable() { @Override public void run() {
                 g.icon = "";
                 saveGroups();
                 showTabs();
             } });
-            showIconGrid("groupicon", "Значок группы " + g.name, items, true);
+            showIconGrid("groupicon", "🏷", items, true);
+        }
+
+        /** Поиск новых значков: каталог без уже имеющихся; выбранный добавляется в список. ⌨: вставить свой эмодзи. */
+        private void showGroupIconFinder(final Group g) {
+            final List<String> have = iconList();
+            List<GridItem> items = new ArrayList<GridItem>();
+            for (String c : ICON_CATALOG) {
+                int bar = c.indexOf('|');
+                final String em = c.substring(0, bar);
+                if (have.contains(em)) continue;
+                addG(items, "gf_" + em, em, c.substring(bar + 1), new Runnable() { @Override public void run() {
+                    List<String> l = iconList();
+                    if (!l.contains(em)) l.add(em);
+                    saveIconList(l);
+                    pickGroupIcon(g, em);
+                } });
+            }
+            addG(items, "gf_own", "⌨", "Свой значок: вставьте эмодзи", new Runnable() { @Override public void run() {
+                showPrompt("🏷", null, "", new PromptDone() {
+                    @Override public void done(String value) {
+                        String v = value == null ? "" : value.trim();
+                        if (v.length() > 0 && v.length() <= 16 && v.indexOf(',') < 0) {
+                            List<String> l = iconList();
+                            if (!l.contains(v)) l.add(v);
+                            saveIconList(l);
+                            pickGroupIcon(g, v);
+                        } else {
+                            showTabs();
+                        }
+                    }
+                });
+            } });
+            showIconGrid("groupicon_find", "🔍", items, true);
         }
     }
 
