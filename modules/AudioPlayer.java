@@ -166,6 +166,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     private AccessibilityService svc;
     private MediaPlayer mp;
     private boolean prepared = false;
+    private int failStreak;
     private final List<Track> tracks = new ArrayList<Track>();
     private int cur = -1;
     /** Очередь из плейлиста (индексы в tracks); null: играем общий список (без треков из плейлистов) по порядку. */
@@ -187,7 +188,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     };
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 23; }
+    @Override public int getVersion() { return 24; }
     @Override public String getDescription() {
         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
@@ -376,6 +377,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
     /** Пропуск с гарнитуры (следующий или предыдущий): пропущенный трек ставится на удаление по той же схеме, что и доигранный. */
     private void headsetSkip(int dir) {
+        int target = stepIdx(reverseOn() ? -dir : dir);
+        if (target >= 0 && target < tracks.size() && tracks.get(target).id == pendDelId) {
+            clearPendingDelete();                            // вернулись к треку, который ждал удаления: он остаётся, а не удаляется под ногами
+        }
         if (skipDeleteOn() && mp != null && prepared && cur >= 0 && cur < tracks.size()) armAutoDelete(tracks.get(cur));
         if (dir > 0) next(); else prev();
     }
@@ -777,6 +782,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                     try { p.seekTo(resumeTo); } catch (Throwable t) { }
                     resumeTo = 0;
                 }
+                failStreak = 0;
                 requestFocus();
                 try { p.start(); } catch (Throwable t) { hsNote("start: " + t); }
                 applySpeed();
@@ -917,6 +923,11 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             } catch (Throwable t2) {
                 hsNote("повтор не удался: " + t2);
                 toast("Не играется: " + tracks.get(i).title + "\n" + t2.getMessage());
+                if (t2 instanceof java.io.FileNotFoundException && failStreak++ < 3 && tracks.size() > 1 && h != null) {
+                    h.postDelayed(new Runnable() {          // файла нет (удалён): к следующему треку, а не тишина
+                        @Override public void run() { next(); }
+                    }, 700);
+                }
             }
         }
     }
@@ -982,7 +993,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     String hsReport() {
         synchronized (hsLog) {
             if (hsLog.isEmpty()) return "";
-            StringBuilder b = new StringBuilder("\n\n🎧 Кнопки гарнитуры:");
+            StringBuilder b = new StringBuilder("\n\n🎧 Кнопки гарнитуры (модуль v" + getVersion() + "):");
             for (String l : hsLog) b.append('\n').append(l);
             return b.toString();
         }
@@ -1143,8 +1154,9 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                                 + ", играет=" + isPlaying());
                         if (pendDelId != Long.MIN_VALUE && (kc == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || kc == KeyEvent.KEYCODE_HEADSETHOOK
                                 || kc == KeyEvent.KEYCODE_MEDIA_PLAY || kc == KeyEvent.KEYCODE_MEDIA_PAUSE)) {
-                            keepPending();               // нажатие play/пауза в окне «оставить»: трек не удаляется, воспроизведение не трогаем
-                            return true;
+                            keepPending();               // нажатие play/пауза в окне «оставить»: трек не удаляется
+                            if (isPlaying()) return true;    // играет: кнопка только оставляет трек, воспроизведение не трогаем
+                            // на паузе то же нажатие ещё и запускает воспроизведение (идёт дальше, как обычный play)
                         }
                         if (kc == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD) { seekBy(seekStepMs()); return true; }
                         if (kc == KeyEvent.KEYCODE_MEDIA_REWIND) { seekBy(-seekStepMs()); return true; }
