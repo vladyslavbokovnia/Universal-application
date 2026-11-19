@@ -6433,10 +6433,17 @@ public class Browser implements IPlugin, ISettingsProvider {
                 cell.setClipChildren(false);
                 cell.setBackground(glassBmp != null && SystemClock.uptimeMillis() - glassAt < 30000
                         ? (Drawable) new GlassDrawable(cell, glassBmp) : round(0x12202124, 38, 0x80FFFFFF, 1));
-                TextView g = glyph(glyph);
-                g.setTextSize(36);
-                g.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-                cell.addView(g, new FrameLayout.LayoutParams(-1, -1));
+                if (glyph.startsWith("p:")) {
+                    View pv = new PathIconView(act, glyph.substring(2), C_TEXT, false);       // нарисованный значок вместо эмодзи
+                    pv.setPadding(dp(18), dp(18), dp(18), dp(18));
+                    pv.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                    cell.addView(pv, new FrameLayout.LayoutParams(-1, -1));
+                } else {
+                    TextView g = glyph(glyph);
+                    g.setTextSize(36);
+                    g.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                    cell.addView(g, new FrameLayout.LayoutParams(-1, -1));
+                }
                 cell.setClickable(true);
                 cell.setFocusable(true);
                 cell.setContentDescription(desc);
@@ -7956,14 +7963,22 @@ public class Browser implements IPlugin, ISettingsProvider {
                 box.addView(new TickRing(act, count, pos - 1), rlp);
                 if (grp.icon != null && grp.icon.length() > 0) {
                     // значок темы группы: эмодзи в углу снимка, чтобы группу узнавать с первого взгляда
-                    TextView gi = new TextView(act);
-                    gi.setText(grp.icon);
-                    gi.setTextSize(60);
-                    gi.setIncludeFontPadding(false);
-                    gi.setGravity(Gravity.CENTER);
+                    View gi;
+                    FrameLayout.LayoutParams glp;
+                    if (grp.icon.startsWith("p:")) {
+                        gi = new PathIconView(act, grp.icon.substring(2), 0xFF000000, true);        // свой нарисованный значок: чёрный контур с тонкой белой каймой
+                        glp = new FrameLayout.LayoutParams(dp(78), dp(78), Gravity.TOP | Gravity.END);
+                    } else {
+                        TextView gt = new TextView(act);
+                        gt.setText(grp.icon);
+                        gt.setTextSize(60);
+                        gt.setIncludeFontPadding(false);
+                        gt.setGravity(Gravity.CENTER);
+                        gi = gt;
+                        glp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
+                    }
                     gi.setAlpha(0.6f);        // без фона, крупный и полупрозрачный: снимок под ним остаётся виден
                     gi.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-                    FrameLayout.LayoutParams glp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
                     glp.setMargins(0, dp(6), dp(8), 0);
                     box.addView(gi, glp);
                 }
@@ -8817,6 +8832,174 @@ public class Browser implements IPlugin, ISettingsProvider {
             "📌|Закреплено", "🔥|Горячее", "🌙|Ночь", "☀️|День", "💎|Ценное"
         };
 
+        /** Данные контура (path d из SVG): M L H V C S Q T Z, большие и малые буквы; дуги не поддерживаются (null). */
+        private Path parsePathData(String d) {
+            if (d == null || !d.matches("[MmLlHhVvCcSsQqTtZz0-9eE+\\-., \\t\\r\\n]+")) return null;
+            try {
+                List<String> tk = new ArrayList<String>();
+                Matcher m = Pattern.compile("[MmLlHhVvCcSsQqTtZz]|[-+]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][-+]?\\d+)?").matcher(d);
+                while (m.find()) tk.add(m.group());
+                Path p = new Path();
+                float cx = 0f, cy = 0f, sx = 0f, sy = 0f, lcx = 0f, lcy = 0f;
+                char cmd = 0, prev = 0;
+                int i = 0, n = tk.size();
+                while (i < n) {
+                    String t = tk.get(i);
+                    if (Character.isLetter(t.charAt(0))) {
+                        cmd = t.charAt(0);
+                        i++;
+                        if (cmd == 'Z' || cmd == 'z') {
+                            p.close();
+                            cx = sx;
+                            cy = sy;
+                            prev = 'Z';
+                        }
+                        continue;
+                    }
+                    if (cmd == 0 || cmd == 'Z' || cmd == 'z') return null;
+                    boolean rel = Character.isLowerCase(cmd);
+                    char up = Character.toUpperCase(cmd);
+                    int need = up == 'H' || up == 'V' ? 1 : (up == 'L' || up == 'M' || up == 'T' ? 2 : (up == 'Q' || up == 'S' ? 4 : 6));
+                    if (i + need > n) return null;
+                    float[] a = new float[need];
+                    for (int k = 0; k < need; k++) {
+                        String x = tk.get(i + k);
+                        if (Character.isLetter(x.charAt(0))) return null;
+                        a[k] = Float.parseFloat(x);
+                    }
+                    i += need;
+                    float ox = rel ? cx : 0f, oy = rel ? cy : 0f;
+                    switch (up) {
+                        case 'M':
+                            cx = a[0] + ox; cy = a[1] + oy;
+                            p.moveTo(cx, cy);
+                            sx = cx; sy = cy;
+                            cmd = rel ? 'l' : 'L';         // дальнейшие пары после M: линии
+                            prev = 'M';
+                            break;
+                        case 'L':
+                            cx = a[0] + ox; cy = a[1] + oy;
+                            p.lineTo(cx, cy);
+                            prev = 'L';
+                            break;
+                        case 'H':
+                            cx = a[0] + ox;
+                            p.lineTo(cx, cy);
+                            prev = 'H';
+                            break;
+                        case 'V':
+                            cy = a[0] + oy;
+                            p.lineTo(cx, cy);
+                            prev = 'V';
+                            break;
+                        case 'C':
+                            p.cubicTo(a[0] + ox, a[1] + oy, a[2] + ox, a[3] + oy, a[4] + ox, a[5] + oy);
+                            lcx = a[2] + ox; lcy = a[3] + oy;
+                            cx = a[4] + ox; cy = a[5] + oy;
+                            prev = 'C';
+                            break;
+                        case 'S': {
+                            float x1 = prev == 'C' || prev == 'S' ? 2f * cx - lcx : cx;
+                            float y1 = prev == 'C' || prev == 'S' ? 2f * cy - lcy : cy;
+                            p.cubicTo(x1, y1, a[0] + ox, a[1] + oy, a[2] + ox, a[3] + oy);
+                            lcx = a[0] + ox; lcy = a[1] + oy;
+                            cx = a[2] + ox; cy = a[3] + oy;
+                            prev = 'S';
+                            break;
+                        }
+                        case 'Q':
+                            p.quadTo(a[0] + ox, a[1] + oy, a[2] + ox, a[3] + oy);
+                            lcx = a[0] + ox; lcy = a[1] + oy;
+                            cx = a[2] + ox; cy = a[3] + oy;
+                            prev = 'Q';
+                            break;
+                        default: {          // T
+                            float x1 = prev == 'Q' || prev == 'T' ? 2f * cx - lcx : cx;
+                            float y1 = prev == 'Q' || prev == 'T' ? 2f * cy - lcy : cy;
+                            p.quadTo(x1, y1, a[0] + ox, a[1] + oy);
+                            lcx = x1; lcy = y1;
+                            cx = a[0] + ox; cy = a[1] + oy;
+                            prev = 'T';
+                            break;
+                        }
+                    }
+                }
+                return p;
+            } catch (RuntimeException e) {
+                return null;
+            }
+        }
+
+        /** Свой значок из текста: SVG или одна строка path d. Возвращает «p:» и очищенные данные контура, null: не похоже на значок. */
+        private String normalizeIconPath(String raw) {
+            if (raw == null) return null;
+            String t = raw.replace("`", " ");
+            StringBuilder ds = new StringBuilder();
+            Matcher dm = Pattern.compile("\\sd\\s*=\\s*\"([^\"]+)\"").matcher(" " + t);
+            while (dm.find()) ds.append(' ').append(dm.group(1));
+            String d = ds.length() > 0 ? ds.toString() : t;
+            d = d.replace(',', ' ').replaceAll("\\s+", " ").trim();
+            if (d.length() < 5 || d.length() > 3000) return null;
+            Path p = parsePathData(d);
+            if (p == null) return null;
+            RectF b = new RectF();
+            p.computeBounds(b, true);
+            if (b.width() <= 0f || b.height() <= 0f) return null;
+            return "p:" + d;
+        }
+
+        private String clipboardIcon() {
+            try {
+                ClipboardManager cm = (ClipboardManager) act.getSystemService(Context.CLIPBOARD_SERVICE);
+                ClipData cd = cm == null ? null : cm.getPrimaryClip();
+                if (cd == null || cd.getItemCount() == 0) return null;
+                CharSequence cs = cd.getItemAt(0).coerceToText(act);
+                return cs == null ? null : normalizeIconPath(cs.toString());
+            } catch (Throwable e) {
+                return null;
+            }
+        }
+
+        /** Нарисованный значок: контур вписывается в область по центру; с каймой читается на любом снимке. */
+        private final class PathIconView extends View {
+            private final Path path;
+            private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final Paint halo = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final RectF bb = new RectF();
+            private final boolean withHalo;
+
+            PathIconView(Context c, String d, int color, boolean withHalo) {
+                super(c);
+                Path p = parsePathData(d);
+                path = p == null ? new Path() : p;
+                path.setFillType(Path.FillType.EVEN_ODD);
+                path.computeBounds(bb, true);
+                this.withHalo = withHalo;
+                fill.setStyle(Paint.Style.FILL);
+                fill.setColor(color);
+                halo.setStyle(Paint.Style.FILL_AND_STROKE);
+                halo.setStrokeJoin(Paint.Join.ROUND);
+                halo.setColor(0xFFFFFFFF);
+                setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            }
+
+            @Override protected void onDraw(Canvas c) {
+                float w = getWidth() - getPaddingLeft() - getPaddingRight();
+                float h = getHeight() - getPaddingTop() - getPaddingBottom();
+                if (w <= 0f || h <= 0f || bb.width() <= 0f || bb.height() <= 0f) return;
+                float s = Math.min(w / bb.width(), h / bb.height()) * 0.92f;
+                c.save();
+                c.translate(getPaddingLeft() + (w - bb.width() * s) / 2f - bb.left * s, getPaddingTop() + (h - bb.height() * s) / 2f - bb.top * s);
+                c.scale(s, s);
+                if (withHalo) {
+                    halo.setStrokeWidth(Math.max(bb.width(), bb.height()) * 0.07f);
+                    c.drawPath(path, halo);
+                }
+                c.drawPath(path, fill);
+                c.restore();
+            }
+        }
+
         private List<String> iconList() {
             List<String> l = new ArrayList<String>();
             String raw = sp.getString("group_icon_list", null);
@@ -8868,6 +9051,23 @@ public class Browser implements IPlugin, ISettingsProvider {
                 addG(items, "gi_" + em, em, iconName(em), new Runnable() { @Override public void run() { pickGroupIcon(g, em); } });
             }
             addG(items, "gi_find", "🔍", "Найти новые значки", new Runnable() { @Override public void run() { showGroupIconFinder(g); } });
+            addG(items, "gi_ask", "💬", "Попросить Claude нарисовать значки для этой группы", new Runnable() { @Override public void run() {
+                String q = "Нарисуй 4 чёрно-белых значка для группы вкладок «" + g.name + "». Сначала покажи их картинкой, затем под каждым отдельный блок кода "
+                        + "с одной строкой path d (холст 24x24, одна простая заливка, только команды M L H V C Q Z заглавными, без дуг). Больше ничего не пиши.";
+                newTab("https://claude.ai/new?q=" + Uri.encode(q), cur != null ? cur.profile : 0, null, true, 0);
+            } });
+            addG(items, "gi_paste", "📋", "Вставить значок из буфера обмена", new Runnable() { @Override public void run() {
+                String v = clipboardIcon();
+                if (v == null) {
+                    toast("⚠");
+                    showGroupIconPicker(g);
+                    return;
+                }
+                List<String> l = iconList();
+                if (!l.contains(v)) l.add(v);
+                saveIconList(l);
+                pickGroupIcon(g, v);
+            } });
             addG(items, "gi_none", "∅", "Убрать значок", new Runnable() { @Override public void run() {
                 g.icon = "";
                 saveGroups();
@@ -8895,7 +9095,9 @@ public class Browser implements IPlugin, ISettingsProvider {
                 showPrompt("🏷", null, "", new PromptDone() {
                     @Override public void done(String value) {
                         String v = value == null ? "" : value.trim();
-                        if (v.length() > 0 && v.length() <= 16 && v.indexOf(',') < 0) {
+                        String pv = normalizeIconPath(v);
+                        if (pv != null) v = pv;
+                        if (v.length() > 0 && (pv != null || (v.length() <= 16 && v.indexOf(',') < 0))) {
                             List<String> l = iconList();
                             if (!l.contains(v)) l.add(v);
                             saveIconList(l);
