@@ -1489,7 +1489,9 @@ public class Browser implements IPlugin, ISettingsProvider {
                 if (norm != null) {
                     wantPanel = false;
                     closeLayer(false);                  // открытая панель вкладок или меню не должны закрывать новую страницу
-                    newTab(norm, in.getIntExtra("profile", 0), null, true);
+                    int pr = in.getIntExtra("profile", 0);
+                    if (pr < 0) pr = cur != null ? cur.profile : 0;      // -1: в профиле активной вкладки (так открывает ссылки Аудиоплеер)
+                    newTab(norm, pr, null, true);
                 }
             } else if (sp.getBoolean("open_tabs_first", true)) {
                 wantPanel = true;
