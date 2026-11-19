@@ -1,0 +1,114 @@
+name: Extract browser snippets (one-time)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/extract-browser.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Extract tab drag and swipe methods
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          src = open('modules/Browser.java', encoding='utf-8').read()
+          WANT = {'dropHint', 'edgeHint', 'zoneOf', 'swipeScroll', 'attachDrop', 'cardAt'}
+          KW = {'if', 'for', 'while', 'switch', 'catch', 'synchronized', 'else', 'new', 'return'}
+          sig = re.compile(r'^[ \t]+(?:@Override\s+)?((?:(?:private|public|protected|static|final|synchronized)\s+)*[\w<>\[\]., ?]+?)\s+(\w+)\s*\(([^;{}]*?)\)\s*(?:throws[\w., ]+)?\{', re.M)
+
+          def match(i):
+              d = 0
+              n = len(src)
+              j = i
+              while j < n:
+                  c = src[j]
+                  if c == '/' and src[j + 1:j + 2] == '/':
+                      j = src.find('\n', j)
+                      if j < 0:
+                          return -1
+                      continue
+                  if c == '/' and src[j + 1:j + 2] == '*':
+                      k = src.find('*/', j + 2)
+                      if k < 0:
+                          return -1
+                      j = k + 2
+                      continue
+                  if c == '"' or c == "'":
+                      q = c
+                      j += 1
+                      while j < n and src[j] != q:
+                          if src[j] == '\\':
+                              j += 1
+                          j += 1
+                      j += 1
+                      continue
+                  if c == '{':
+                      d += 1
+                  elif c == '}':
+                      d -= 1
+                      if d == 0:
+                          return j + 1
+                  j += 1
+              return -1
+
+          found = []
+          seen = set()
+          for m in sig.finditer(src):
+              name = m.group(2)
+              if name in KW or m.group(1).split()[-1] in ('new', 'return', 'else', 'throw'):
+                  continue
+              s = m.start()
+              if s in seen:
+                  continue
+              e = match(m.end() - 1)
+              if e < 0:
+                  continue
+              body = src[s:e]
+              low = body.lower()
+              want = name in WANT
+              hit = want or 'swipe' in low or 'свайп' in low or 'startdraganddrop' in low or 'dragshadowbuilder' in low
+              if not hit:
+                  continue
+              if len(body) > 9000 and not want:
+                  continue
+              seen.add(s)
+              line = src.count('\n', 0, s) + 1
+              found.append((0 if want else 1, len(body), line, name, body))
+          found.sort(key=lambda x: (x[0], x[1]))
+          out = []
+          total = 0
+          for _, size, line, name, body in found:
+              if total + size > 90000:
+                  continue
+              out.append('// ===== %s (line %d, %d chars) =====\n%s\n' % (name, line, size, body))
+              total += size
+          idx = ['// index of all found methods:']
+          for _, size, line, name, _b in sorted(found, key=lambda x: x[2]):
+              idx.append('//   %d: %s (%d chars)' % (line, name, size))
+          open('/tmp/extract.txt', 'w', encoding='utf-8').write('\n'.join(idx) + '\n\n' + '\n'.join(out))
+          print('methods found:', len(found), 'written chars:', total)
+          PY
+      - name: Push result to branch extract-log
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B extract-log
+          mkdir -p ci
+          cp /tmp/extract.txt ci/extract.txt
+          git add -f ci/extract.txt
+          git commit -m "Extract: tab drag and swipe snippets"
+          git push -f origin extract-log
