@@ -1,0 +1,77 @@
+diff --git a/app/src/main/kotlin/im/manus/universalhost/ModuleBrowserActivity.kt b/app/src/main/kotlin/im/manus/universalhost/ModuleBrowserActivity.kt
+index 131a916..94e486b 100644
+--- a/app/src/main/kotlin/im/manus/universalhost/ModuleBrowserActivity.kt
++++ b/app/src/main/kotlin/im/manus/universalhost/ModuleBrowserActivity.kt
+@@ -54,6 +54,19 @@ class ModuleBrowserActivity : Activity() {
+         applyTaskDescription()
+     }
+ 
++    /**
++     * Окно держит объект модуля, взятый при создании. Если .dex с тех пор заменили, в реестре уже другой объект:
++     * пересоздаём окно, и оно строит вид из новой версии (старый вид закрывается через destroyView у старого объекта).
++     */
++    private fun reloadIfModuleUpdated(): Boolean {
++        val n = name ?: return false
++        val held = plugin ?: return false
++        val current = try { PluginRegistry.find(this, n) } catch (t: Throwable) { null }
++        if (current == null || current === held) return false
++        recreate()
++        return true
++    }
++
+     private fun applyFullscreen() {
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+             window.attributes = window.attributes.apply {
+@@ -93,6 +106,8 @@ class ModuleBrowserActivity : Activity() {
+ 
+     override fun onResume() {
+         super.onResume()
++        CoreAccessibilityService.instance?.refreshIfStale()
++        if (reloadIfModuleUpdated()) return
+         HostRecents.hideHostCard(this)
+         val n = name ?: return
+         // как открыть это окно снова из модуля «Недавние»
+diff --git a/app/src/main/kotlin/im/manus/universalhost/ModuleViewActivity.kt b/app/src/main/kotlin/im/manus/universalhost/ModuleViewActivity.kt
+index cef2bf6..02778df 100644
+--- a/app/src/main/kotlin/im/manus/universalhost/ModuleViewActivity.kt
++++ b/app/src/main/kotlin/im/manus/universalhost/ModuleViewActivity.kt
+@@ -34,6 +34,7 @@ class ModuleViewActivity : Activity() {
+     }
+ 
+     private var target: String = ""
++    private var plugin: IPlugin? = null
+ 
+     @Suppress("DEPRECATION")
+     override fun onCreate(savedInstanceState: Bundle?) {
+@@ -49,7 +50,7 @@ class ModuleViewActivity : Activity() {
+             setTaskDescription(android.app.ActivityManager.TaskDescription(t, ModuleWindows.icon(this, t, 192), Color.BLACK))
+         } catch (e: Throwable) { }
+ 
+-        val plugin = try { PluginRegistry.find(this, t) } catch (e: Throwable) { null }
++        plugin = try { PluginRegistry.find(this, t) } catch (e: Throwable) { null }
+         val view = try { (plugin as? IMainViewProvider)?.createMainView(this) } catch (e: Throwable) { null }
+         if (view == null) {
+             openSettings()
+@@ -84,10 +85,21 @@ class ModuleViewActivity : Activity() {
+ 
+     override fun onResume() {
+         super.onResume()
++        CoreAccessibilityService.instance?.refreshIfStale()
++        if (reloadIfModuleUpdated()) return
+         if (target.isNotEmpty()) {
+             ModuleWindows.record(this, target, Intent(intent).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+         }
+         HostRecents.hideHostCard(this)
+-        CoreAccessibilityService.instance?.refreshIfStale()
++    }
++
++    /** .dex модуля заменили, пока окно было открыто: пересоздаём окно, чтобы вид строился из новой версии. */
++    private fun reloadIfModuleUpdated(): Boolean {
++        val held = plugin ?: return false
++        if (target.isEmpty()) return false
++        val current = try { PluginRegistry.find(this, target) } catch (e: Throwable) { null }
++        if (current == null || current === held) return false
++        recreate()
++        return true
+     }
+ }
