@@ -159,6 +159,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         cfg = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         loadConfig();
         store = new Store(ctx, cfg);
+        if (store.hostOpened() == 0L) store.setHostOpened(System.currentTimeMillis());   // у хоста должно быть время, иначе он уйдёт в конец ленты
         repo = new Repo(ctx, store);
         iconCache = new LruCache<String, Drawable.ConstantState>(300);
         customCache = new LruCache<String, Bitmap>(64);
