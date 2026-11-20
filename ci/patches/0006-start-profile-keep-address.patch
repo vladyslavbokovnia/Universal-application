@@ -1,0 +1,37 @@
+diff --git a/modules/Browser.java b/modules/Browser.java
+index c9b753f..7c22456 100644
+--- a/modules/Browser.java
++++ b/modules/Browser.java
+@@ -1319,6 +1319,7 @@ public class Browser implements IPlugin, ISettingsProvider {
+         private int newTabGroupHint = -1;     // группа для новой вкладки, если её создают с панели вкладок (-1: группа текущей вкладки)
+         private final java.util.Map<String, Long> pixelAt = new java.util.HashMap<String, Long>();
+         private boolean startOpen, startForNew;
++        private String startDraft;              // текст строки адреса, пока на стартовом экране выбирают профиль: экран пересоздаётся и текст не должен пропасть
+         private long pendingBm = -1;
+         private final List<View> ringViews = new ArrayList<View>();
+         private final List<Runnable> ringActions = new ArrayList<Runnable>();
+@@ -2576,7 +2577,8 @@ public class Browser implements IPlugin, ISettingsProvider {
+             box.setImeOptions(EditorInfo.IME_ACTION_GO | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+             box.setBackground(round(C_SURFACE2, 24, 0, 0));
+             box.setPadding(dp(18), 0, dp(18), 0);
+-            if (!forNew && t.url != null) box.setText(t.url);
++            if (startDraft != null) { box.setText(startDraft); startDraft = null; }
++            else if (!forNew && t.url != null) box.setText(t.url);
+             else if (forNew && pendingFrom != null && pendingFrom.url != null && !pendingFrom.url.startsWith("about:")) box.setText(pendingFrom.url);      // адрес прежней вкладки: можно дублировать или стереть (при фокусе выделяется весь)
+             box.setOnEditorActionListener(new TextView.OnEditorActionListener() {
+                 @Override public boolean onEditorAction(TextView v, int actionId, KeyEvent e) {
+@@ -2629,9 +2631,14 @@ public class Browser implements IPlugin, ISettingsProvider {
+                     + (forNew ? "" : ". Адрес страницы останется, сменится профиль"));
+             pb.setOnClickListener(new View.OnClickListener() {
+                 @Override public void onClick(View v) {
++                    final String draft = box.getText().toString();
++                    final Tab keepNew = pendingNew, keepFrom = pendingFrom;     // closeLayer(false) при выборе профиля их обнуляет
+                     chooseProfile(forNew ? "Профиль новой вкладки" : "Профиль этой страницы и закладок", new Pick() {
+                         @Override public void on(int idx) {
+                             bmProfile = idx;
++                            pendingNew = keepNew;
++                            pendingFrom = keepFrom;
++                            startDraft = draft;
+                             showStart(forNew, false);
+                         }
+                     });
