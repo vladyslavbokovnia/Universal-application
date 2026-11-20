@@ -1,0 +1,561 @@
+// index of all found methods:
+//   1970: onSwipe (356 chars)
+//   5706: installSwipeOnUrlField (1435 chars)
+//   5779: swipeScroll (64 chars)
+//   5874: showClosed (3756 chars)
+//   7716: showTabs (2251 chars)
+//   7793: fillGrid (1510 chars)
+//   7905: cardBody (480 chars)
+//   8122: tabCard (1341 chars)
+//   8148: groupCard (3384 chars)
+//   8214: cardGestures (4930 chars)
+//   8322: dropHint (82 chars)
+//   8333: DropCard (322 chars)
+//   8368: relPos (468 chars)
+//   8399: clearHints (105 chars)
+//   8486: hubHot (384 chars)
+//   8560: dropUp (819 chars)
+//   8582: moveToLevelEnd (1172 chars)
+//   8724: handleDrop (2926 chars)
+
+// ===== swipeScroll (line 5779, 64 chars) =====
+private ScrollView swipeScroll() { return new ScrollView(act); }
+
+// ===== dropHint (line 8322, 82 chars) =====
+private GradientDrawable dropHint() { return round(0x334FC3F7, 12, C_ACCENT, 4); }
+
+// ===== clearHints (line 8399, 105 chars) =====
+private void clearHints() {
+            for (DropCard c : dropCards) c.box.setForeground(null);
+        }
+
+// ===== DropCard (line 8333, 322 chars) =====
+private final class DropCard {
+            final FrameLayout box;
+            final Object item;
+            final Runnable menu;
+
+            DropCard(FrameLayout box, Object item, Runnable menu) {
+                this.box = box;
+                this.item = item;
+                this.menu = menu;
+            }
+        }
+
+// ===== hubHot (line 8486, 384 chars) =====
+private void hubHot(boolean hot) {
+            if (hub == null) return;
+            hub.animate().cancel();
+            hub.animate().scaleX(hot ? 1.2f : 1f).scaleY(hot ? 1.2f : 1f).alpha(hot ? 1f : HUB_ALPHA).setDuration(120).start();
+            if (hot) { try { hub.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK); } catch (Throwable ignored) { } }
+        }
+
+// ===== relPos (line 8368, 468 chars) =====
+private float[] relPos(View v, View ancestor) {
+            float x = 0, y = 0;
+            View c = v;
+            for (int i = 0; c != null && c != ancestor && i < 20; i++) {
+                x += c.getLeft() + c.getTranslationX();
+                y += c.getTop() + c.getTranslationY();
+                android.view.ViewParent p = c.getParent();
+                c = p instanceof View ? (View) p : null;
+            }
+            return new float[] { x, y };
+        }
+
+// ===== cardBody (line 7905, 480 chars) =====
+private FrameLayout cardBody(Tab t, boolean current, Group grp, int count, Runnable closer) {
+            FrameLayout box = new FrameLayout(act);
+            box.setTag(closer);
+            box.setBackground(round(C_SURFACE, 12, 0, 0));      // без рамок: текущую вкладку показывает эмодзи
+            box.setClickable(true);
+            box.setFocusable(true);
+            box.setClipToOutline(true);
+            fillCard(box, t, grp, count, 0);
+            return box;
+        }
+
+// ===== dropUp (line 8560, 819 chars) =====
+private void dropUp(Object d) {
+            Group og = openGroup;
+            if (og != null) {
+                if (d instanceof Tab) {
+                    Tab dt = (Tab) d;
+                    Tab anchor = lastOfGroup(og.id, dt);
+                    dt.group = og.parent;
+                    if (anchor != null) moveAfter(dt, anchor);
+                } else if (d instanceof Group) {
+                    Group dg = (Group) d;
+                    if (dg != og && !groupInside(og, dg)) {
+                        List<Tab> moving = tabsOf(dg);
+                        Tab anchor = lastOfGroup(og.id, moving);
+                        dg.parent = og.parent;
+                        if (anchor != null) moveBlockAfter(moving, anchor);
+                    }
+                }
+            }
+            finishDrop();
+        }
+
+// ===== moveToLevelEnd (line 8582, 1172 chars) =====
+private void moveToLevelEnd(Object d, int level) {
+            if (d instanceof Tab) {
+                Tab dt = (Tab) d;
+                Tab anchor;
+                if (level == 0) {
+                    anchor = null;
+                    for (Tab t : tabs) if (t != dt) anchor = t;
+                } else {
+                    anchor = lastOfGroup(level, dt);
+                }
+                dt.group = level;
+                if (anchor != null) moveAfter(dt, anchor);
+            } else if (d instanceof Group) {
+                Group dg = (Group) d;
+                Group lg = groupById(level);
+                if (dg.id == level || (lg != null && groupInside(lg, dg))) { finishDrop(); return; }
+                List<Tab> moving = tabsOf(dg);
+                Tab anchor;
+                if (level == 0) {
+                    anchor = null;
+                    for (Tab t : tabs) if (!moving.contains(t)) anchor = t;
+                } else {
+                    anchor = lastOfGroup(level, moving);
+                }
+                dg.parent = level;
+                if (anchor != null) moveBlockAfter(moving, anchor);
+            }
+            finishDrop();
+        }
+
+// ===== tabCard (line 8122, 1341 chars) =====
+private View tabCard(final Tab t, int index, int total) {
+            boolean current = t == cur;
+            final Runnable closer = new Runnable() {
+                @Override public void run() {
+                    closeTabKeep(t);                 // закрыть вкладку (она остаётся в истории закрытых)
+                    showTabs();
+                }
+            };
+            final FrameLayout box = cardBody(t, current, null, 0, closer);
+            box.setContentDescription("Вкладка " + (index + 1) + " из " + total + ": " + tabTitle(t) + ", " + displayUrl(t)
+                    + ", профиль " + profileName(t.profile) + (current ? ", текущая" : "") + ". Двойное нажатие закрывает");
+
+            // крестика на карточке нет: вкладка закрывается смахиванием или пунктом «Закрыть вкладку» в меню долгого нажатия
+            final Runnable menu = new Runnable() { @Override public void run() { showTabMenu(t); } };
+            attachDrop(box, t, menu);
+            cardGestures(box, new Runnable() {
+                @Override public void run() {
+                    closeLayer(false);
+                    selectTab(t);
+                }
+            }, new Runnable() {
+                @Override public void run() { startItemDrag(box, t, menu); }
+            }, closeMode() <= 1 ? closer : null, null);
+            return box;
+        }
+
+// ===== fillGrid (line 7793, 1510 chars) =====
+private void fillGrid(LinearLayout grid, Group og) {
+            loadDots.clear();
+            dropCards.clear();
+            grid.removeAllViews();
+            List<Object> items = new ArrayList<Object>();
+            int level = og == null ? 0 : og.id;
+            Set<Object> seenItems = new HashSet<Object>();
+            for (Tab t : tabs) {
+                Object it = childAt(t, level);      // вкладка или группа этого уровня; группа стоит на месте своей первой вкладки
+                if (it != null && seenItems.add(it)) items.add(it);
+            }
+            java.util.Collections.reverse(items);       // новые сверху: порядок вкладок на панели обратный
+            LinearLayout rowL = null;
+            for (int i = 0; i < items.size(); i++) {
+                if (i % 2 == 0) {
+                    rowL = new LinearLayout(act);
+                    rowL.setOrientation(LinearLayout.HORIZONTAL);
+                    grid.addView(rowL, new LinearLayout.LayoutParams(-1, -2));
+                }
+                Object it = items.get(i);
+                View card = it instanceof Group ? groupCard((Group) it) : tabCard((Tab) it, i, items.size());
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1f);
+                lp.setMargins(0, 0, 0, 0);
+                rowL.addView(card, lp);
+            }
+            if (items.size() % 2 == 1 && rowL != null) {
+                rowL.addView(new View(act), new LinearLayout.LayoutParams(0, 1, 1f));
+            }
+        }
+
+// ===== handleDrop (line 8724, 2926 chars) =====
+private void handleDrop(Object d, Object target, int zone, Runnable menu) {
+            if (closed || d == null) return;
+            if (d == target) { menu.run(); return; }
+            final int level = openGroup == null ? 0 : openGroup.id;
+            if (zone != 0) {            // край карточки: поменять местами / переставить вкладку или группу целиком
+                // уровень цели: перетаскивание могло начаться на другом уровне (карточку внесли в открытую на лету группу)
+                int tl = target instanceof Tab ? ((Tab) target).group : ((Group) target).parent;
+                if (d instanceof Tab) {
+                    ((Tab) d).group = tl;
+                } else if (d instanceof Group) {
+                    Group dgE = (Group) d;
+                    Group lgE = groupById(tl);
+                    if (dgE.id == tl || (lgE != null && groupInside(lgE, dgE))) { finishDrop(); return; }
+                    dgE.parent = tl;
+                }
+                compactGroups();
+                moveUnit(d, target, zone < 0);       // порядок на панели обратный: левый край карточки в списке значит «после»
+                finishDrop();
+                return;
+            }
+            if (d instanceof Tab) {
+                Tab dt = (Tab) d;
+                if (target instanceof Tab) {
+                    Tab tt = (Tab) target;
+                    Group g = newGroup(level);
+                    tt.group = g.id;
+                    Tab anchor = lastOfGroup(g.id, dt);
+                    dt.group = g.id;
+                    if (anchor != null) moveAfter(dt, anchor);
+                    openGroup = g;          // группа открывается, вкладка лежит в её конце: оттуда её можно перетащить на нужное место
+                } else if (target instanceof Group) {
+                    Group g = (Group) target;
+                    Tab anchor = lastOfGroup(g.id, dt);
+                    dt.group = g.id;
+                    if (anchor != null) moveAfter(dt, anchor);
+                    openGroup = g;
+                }
+            } else if (d instanceof Group) {
+                Group dg = (Group) d;
+                if (target instanceof Tab) {
+                    Tab tt = (Tab) target;
+                    Tab anchor = lastOfGroup(dg.id, tt);
+                    tt.group = dg.id;
+                    if (anchor != null) moveAfter(tt, anchor);
+                    openGroup = dg;
+                } else if (target instanceof Group) {
+                    Group tg = (Group) target;
+                    if (tg == dg || groupInside(tg, dg)) return;
+                    List<Tab> moving = tabsOf(dg);
+                    Tab anchor = lastOfGroup(tg.id, moving);
+                    dg.parent = tg.id;
+                    if (anchor != null) moveBlockAfter(moving, anchor);
+                    openGroup = tg;
+                }
+            }
+            panelGroup = openGroup;
+            finishDrop();
+        }
+
+// ===== groupCard (line 8148, 3384 chars) =====
+private View groupCard(final Group g) {
+            final List<Tab> gt = tabsOf(g);
+            // обложка: вкладка, из которой вышли в последний раз; нет такой: текущая вкладка группы, иначе первая
+            int start = 0;
+            for (int k = 0; k < gt.size(); k++) if (gt.get(k).id == g.lastTabId) { start = k; break; }
+            if (g.lastTabId == 0 || gt.get(start).id != g.lastTabId) {
+                for (int k = 0; k < gt.size(); k++) if (gt.get(k) == cur) { start = k; break; }
+            }
+            final int[] shown = { start };
+            boolean current = cur != null && inGroup(cur, g.id);
+            FrameLayout outer = new FrameLayout(act);
+            final Runnable closer = new Runnable() {
+                @Override public void run() {
+                    for (Tab x : new ArrayList<Tab>(gt)) closeTabKeep(x);      // закрыть все вкладки группы
+                    showTabs();
+                }
+            };
+            final FrameLayout box = cardBody(gt.get(start), current, g, gt.size(), closer);
+            fillCard(box, gt.get(start), g, gt.size(), start + 1);
+            box.setContentDescription("Группа " + g.name + ", вкладок " + gt.size() + (current ? ", в ней текущая вкладка" : "") + ". Двойное нажатие закрывает группу"
+                    + ". Нажатие открывает показанную вкладку, долгое нажатие открывает группу"
+                    + (gt.size() > 1 ? ". Смахивание вправо или влево листает вкладки группы" : ""));
+            outer.addView(box, new FrameLayout.LayoutParams(-1, -2));
+            // долгое нажатие поднимает группу для перетаскивания; если отпустить на месте, откроется сама группа
+            final Runnable menu = new Runnable() {
+                @Override public void run() {
+                    openGroup = g;
+                    showTabs();
+                }
+            };
+            attachDrop(box, g, menu);
+            IntAction page = gt.size() < 2 ? null : new IntAction() {
+                @Override void run(int dir) {
+                    int n = gt.size();
+                    shown[0] = ((shown[0] + dir) % n + n) % n;       // по кругу
+                    Tab t = gt.get(shown[0]);
+                    fillCard(box, t, g, n, shown[0] + 1);
+                    box.announceForAccessibility("Вкладка " + (shown[0] + 1) + " из " + n + ": " + tabTitle(t));
+                    // новый снимок въезжает с той стороны, куда смахнули
+                    View inner = box.getChildCount() > 0 ? box.getChildAt(0) : null;
+                    if (inner != null) {
+                        inner.setTranslationX(dir > 0 ? box.getWidth() * 0.35f : -box.getWidth() * 0.35f);
+                        inner.setAlpha(0.2f);
+                        inner.animate().translationX(0).alpha(1f).setDuration(160).start();
+                    }
+                }
+            };
+            cardGestures(box, new Runnable() {
+                @Override public void run() {
+                    Tab pick = gt.get(Math.max(0, Math.min(gt.size() - 1, shown[0])));
+                    closeLayer(false);
+                    selectTab(pick);                 // нажатие открывает вкладку, показанную на обложке
+                }
+            }, new Runnable() {
+                @Override public void run() { startItemDrag(box, g, menu); }
+            }, closeMode() <= 1 ? closer : null, page);
+            return outer;
+        }
+
+// ===== cardGestures (line 8214, 4930 chars) =====
+private void cardGestures(final View box, final Runnable onClick, final Runnable onLong, final Runnable onDouble, final IntAction onPage) {
+            final float slop = ViewConfiguration.get(act).getScaledTouchSlop();
+            final float flingV = ViewConfiguration.get(act).getScaledMinimumFlingVelocity() * 6f;
+            final long dtTimeout = Math.min(ViewConfiguration.getDoubleTapTimeout(), 280);
+            box.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { onClick.run(); }
+            });
+            box.setOnTouchListener(new View.OnTouchListener() {
+                private float downX, downY;
+                private boolean side, longFired, tapPending;
+                private long lastUp;
+                private android.view.VelocityTracker vt;
+                private final Runnable longRun = new Runnable() {
+                    @Override public void run() {
+                        longFired = true;
+                        box.setPressed(false);
+                        if (onLong != null) onLong.run();
+                    }
+                };
+                private final Runnable clickRun = new Runnable() {
+                    @Override public void run() {
+                        tapPending = false;
+                        box.performClick();
+                    }
+                };
+                private void recycle() {
+                    if (vt != null) { vt.recycle(); vt = null; }
+                }
+                @Override public boolean onTouch(View v, MotionEvent e) {
+                    if (vt == null) vt = android.view.VelocityTracker.obtain();
+                    vt.addMovement(e);
+                    switch (e.getActionMasked()) {
+                        case MotionEvent.ACTION_DOWN:
+                            downX = e.getRawX();
+                            downY = e.getRawY();
+                            side = false;
+                            longFired = false;
+                            if (onLong != null) v.postDelayed(longRun, ViewConfiguration.getLongPressTimeout());
+                            return true;
+                        case MotionEvent.ACTION_MOVE: {
+                            float dx = e.getRawX() - downX;
+                            float dy = e.getRawY() - downY;
+                            if (Math.abs(dx) > slop || Math.abs(dy) > slop) v.removeCallbacks(longRun);
+                            if (longFired) return true;
+                            if (onPage != null && !side && Math.abs(dx) > slop && Math.abs(dx) > Math.abs(dy)) {
+                                side = true;
+                                v.getParent().requestDisallowInterceptTouchEvent(true);
+                            }
+                            return true;
+                        }
+                        case MotionEvent.ACTION_UP: {
+                            v.removeCallbacks(longRun);
+                            if (longFired) { recycle(); return true; }
+                            float dx = e.getRawX() - downX;
+                            float dy = e.getRawY() - downY;
+                            if (side) {
+                                vt.computeCurrentVelocity(1000);
+                                boolean far = Math.abs(dx) > v.getWidth() * 0.18f;
+                                boolean fast = Math.abs(vt.getXVelocity()) > flingV;
+                                recycle();
+                                if (far || fast) onPage.run(dx < 0 ? 1 : -1);      // влево: следующая вкладка, вправо: предыдущая
+                                return true;
+                            }
+                            recycle();
+                            if (Math.abs(dx) > slop * 3 || Math.abs(dy) > slop * 3) return true;     // это не нажатие
+                            if (onDouble == null) {
+                                v.performClick();
+                            } else {
+                                long now = e.getEventTime();
+                                if (tapPending && now - lastUp <= dtTimeout) {
+                                    v.removeCallbacks(clickRun);
+                                    tapPending = false;
+                                    onDouble.run();
+                                } else {
+                                    tapPending = true;
+                                    lastUp = now;
+                                    v.postDelayed(clickRun, dtTimeout);
+                                }
+                            }
+                            return true;
+                        }
+                        case MotionEvent.ACTION_CANCEL:
+                            v.removeCallbacks(longRun);
+                            recycle();
+                            return true;
+                        default:
+                            return true;
+                    }
+                }
+            });
+        }
+
+// ===== onSwipe (line 1970, 356 chars) =====
+private void onSwipe(Tab t, float dy) {
+            if (t != cur) return;
+            if ((dy > 0) != (scrollAccum > 0)) scrollAccum = 0;
+            scrollAccum += Math.round(dy);
+            if (scrollAccum > dp(24) && !dockHidden) setDockHidden(true, true);
+            else if (scrollAccum < -dp(24) && dockHidden) setDockHidden(false, true);
+        }
+
+// ===== installSwipeOnUrlField (line 5706, 1435 chars) =====
+private void installSwipeOnUrlField() {
+            final boolean[] flung = new boolean[1];
+            final GestureDetector gd = new GestureDetector(act, new GestureDetector.SimpleOnGestureListener() {
+                @Override public boolean onFling(MotionEvent e1, MotionEvent e2, float vx, float vy) {
+                    if (e1 == null || e2 == null) return false;
+                    float dx = e2.getX() - e1.getX();
+                    if (Math.abs(dx) > dp(60) && Math.abs(dx) > Math.abs(e2.getY() - e1.getY()) * 1.5f && Math.abs(vx) > 400) {
+                        flung[0] = true;
+                        switchTab(dx < 0 ? 1 : -1);          // смахивание по адресной строке переключает вкладки
+                        return true;
+                    }
+                    return false;
+                }
+            });
+            urlField.setOnTouchListener(new View.OnTouchListener() {
+                @Override public boolean onTouch(View v, MotionEvent e) {
+                    if (urlField.hasFocus()) return false;
+                    gd.onTouchEvent(e);
+                    int a = e.getActionMasked();
+                    if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
+                        boolean f = flung[0];
+                        flung[0] = false;
+                        return f;
+                    }
+                    return false;
+                }
+            });
+        }
+
+// ===== showTabs (line 7716, 2251 chars) =====
+private void showTabs() {
+            if (tabsPanel) rememberScroll();       // перерисовка после перетаскивания или закрытия не должна сбрасывать прокрутку
+            loadDots.clear();
+            cleanGroups();
+            final Group og = openGroup;
+            LinearLayout root = new LinearLayout(act);
+            root.setOrientation(LinearLayout.VERTICAL);
+
+            int shown = og != null ? tabsOf(og).size() : tabs.size();
+
+            ScrollView sv = swipeScroll();
+            tabScroll = sv;
+            LinearLayout grid = new LinearLayout(act);
+            grid.setOrientation(LinearLayout.VERTICAL);
+            grid.setPadding(0, 0, 0, dp(16));       // карточки вплотную
+            sv.addView(grid, new ViewGroup.LayoutParams(-1, -2));
+            dragGrid = grid;
+            fillGrid(grid, og);
+            FrameLayout listBox = new FrameLayout(act);
+            installGridDrag(listBox);           // слушатель на всём поле: пустое место под карточками тоже принимает перетаскиваемое
+            listBox.addView(sv, new FrameLayout.LayoutParams(-1, -1));
+            root.addView(listBox, new LinearLayout.LayoutParams(-1, 0, 1f));
+            showLayer(root, true, null, og != null ? "Группа " + og.name + ": вкладок " + shown : "Вкладки: " + shown);
+            tabsPanel = true;
+            if (savedScrollAt != 0 && SystemClock.uptimeMillis() - savedScrollAt < 3000 && savedScrollGroup == og) {
+                // перерисовка после перетаскивания или закрытия: прокрутка остаётся где была
+                final int keepY = savedScrollY;
+                final ScrollView svKeep = sv;
+                if (keepY > 0) sv.post(new Runnable() {
+                    @Override public void run() { svKeep.scrollTo(0, keepY); }
+                });
+            } else {
+                scrollToCurrent(sv, grid, og);       // панель открыта заново: прокрутить к вкладке, с которой вышли
+            }
+            savedScrollAt = 0;
+            panelGroup = og;
+            updateHubRings();
+            if (hub != null) {
+                hub.setVisibility(View.VISIBLE);
+                hub.bringToFront();             // кнопка управления остаётся над панелью вкладок
+                hub.setAlpha(HUB_ALPHA);
+            }
+        }
+
+// ===== showClosed (line 5874, 3756 chars) =====
+private void showClosed() {
+            closeLayer(false);                  // слой с отменой не пересоздаём поверх себя: иначе отмена вернёт панель вкладок под него
+            loadClosed();
+            if (closedList.isEmpty()) {
+                toast("История закрытых вкладок пуста");
+                showTabs();
+                return;
+            }
+            LinearLayout root = new LinearLayout(act);
+            root.setOrientation(LinearLayout.VERTICAL);
+
+            LinearLayout head = new LinearLayout(act);
+            head.setOrientation(LinearLayout.HORIZONTAL);
+            head.setGravity(Gravity.CENTER_VERTICAL);
+            head.setPadding(dp(14), dp(10), dp(10), dp(6));
+            TextView ht = label("Закрытые вкладки: " + closedList.size(), 17, C_TEXT, true);
+            head.addView(ht, new LinearLayout.LayoutParams(0, -2, 1f));
+            TextView clear = label("Очистить", 15, C_TEXT, true);
+            clear.setBackground(round(C_SURFACE2, 16, 0, 0));
+            clear.setPadding(dp(14), dp(8), dp(14), dp(8));
+            clear.setClickable(true);
+            clear.setFocusable(true);
+            clear.setContentDescription("Очистить историю закрытых вкладок");
+            clear.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    closeLayer(false);
+                    for (Closed c : closedList) deleteClosedFiles(c.uid);
+                    closedList.clear();
+                    saveClosed();
+                    showTabs();
+                }
+            });
+            head.addView(clear, new LinearLayout.LayoutParams(-2, -2));
+            root.addView(head, new LinearLayout.LayoutParams(-1, -2));
+
+            ScrollView sv = swipeScroll();
+            LinearLayout grid = new LinearLayout(act);
+            grid.setOrientation(LinearLayout.VERTICAL);
+            grid.setPadding(0, 0, 0, dp(24));
+            sv.addView(grid, new ViewGroup.LayoutParams(-1, -2));
+            root.addView(sv, new LinearLayout.LayoutParams(-1, 0, 1f));
+
+            loadDots.clear();
+            LinearLayout rowL = null;
+            for (int i = 0; i < closedList.size(); i++) {
+                final Closed c = closedList.get(i);
+                if (i % 2 == 0) {
+                    rowL = new LinearLayout(act);
+                    rowL.setOrientation(LinearLayout.HORIZONTAL);
+                    grid.addView(rowL, new LinearLayout.LayoutParams(-1, -2));
+                }
+                Tab g = new Tab(-1, c.url, c.profile);
+                g.uid = c.uid;
+                g.title = c.title;
+                final Runnable removeRun = new Runnable() {
+                    @Override public void run() {
+                        closedList.remove(c);
+                        deleteClosedFiles(c.uid);
+                        saveClosed();
+                        showClosed();
+                    }
+                };
+                FrameLayout box = cardBody(g, false, null, 0, removeRun);
+                box.setContentDescription("Закрытая вкладка: " + tabTitle(g) + ", " + displayUrl(g)
+                        + ". Нажмите, чтобы вернуть. Двойное нажатие убирает из истории");
+                cardGestures(box, new Runnable() {
+                    @Override public void run() { restoreClosed(c); }
+                }, null, removeRun, null);
+                rowL.addView(box, new LinearLayout.LayoutParams(0, -2, 1f));
+            }
+            if (closedList.size() % 2 == 1 && rowL != null) rowL.addView(new View(act), new LinearLayout.LayoutParams(0, 1, 1f));
+            showLayer(root, true, new Runnable() {
+                @Override public void run() { showTabs(); }
+            }, "Закрытые вкладки: " + closedList.size());
+        }
