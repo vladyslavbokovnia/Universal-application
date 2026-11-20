@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="browser_next_tab"
+        android:enabled="true"
+        android:icon="@drawable/ic_browser_app"
+        android:shortcutShortLabel="@string/cmd_next_tab"
+        android:shortcutLongLabel="@string/cmd_next_tab">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="im.manus.universalhost"
+            android:targetClass="im.manus.universalhost.BrowserCommandActivity"
+            android:data="universal://browser/next_tab" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="browser_prev_tab"
+        android:enabled="true"
+        android:icon="@drawable/ic_browser_app"
+        android:shortcutShortLabel="@string/cmd_prev_tab"
+        android:shortcutLongLabel="@string/cmd_prev_tab">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="im.manus.universalhost"
+            android:targetClass="im.manus.universalhost.BrowserCommandActivity"
+            android:data="universal://browser/prev_tab" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="browser_tabs"
+        android:enabled="true"
+        android:icon="@drawable/ic_browser_app"
+        android:shortcutShortLabel="@string/cmd_tabs"
+        android:shortcutLongLabel="@string/cmd_tabs">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="im.manus.universalhost"
+            android:targetClass="im.manus.universalhost.BrowserCommandActivity"
+            android:data="universal://browser/tabs" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="browser_new_tab"
+        android:enabled="true"
+        android:icon="@drawable/ic_browser_app"
+        android:shortcutShortLabel="@string/cmd_new_tab"
+        android:shortcutLongLabel="@string/cmd_new_tab">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="im.manus.universalhost"
+            android:targetClass="im.manus.universalhost.BrowserCommandActivity"
+            android:data="universal://browser/new_tab" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="browser_close_tab"
+        android:enabled="true"
+        android:icon="@drawable/ic_browser_app"
+        android:shortcutShortLabel="@string/cmd_close_tab"
+        android:shortcutLongLabel="@string/cmd_close_tab">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="im.manus.universalhost"
+            android:targetClass="im.manus.universalhost.BrowserCommandActivity"
+            android:data="universal://browser/close_tab" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="browser_back"
+        android:enabled="true"
+        android:icon="@drawable/ic_browser_app"
+        android:shortcutShortLabel="@string/cmd_back"
+        android:shortcutLongLabel="@string/cmd_back">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="im.manus.universalhost"
+            android:targetClass="im.manus.universalhost.BrowserCommandActivity"
+            android:data="universal://browser/back" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="browser_reload"
+        android:enabled="true"
+        android:icon="@drawable/ic_browser_app"
+        android:shortcutShortLabel="@string/cmd_reload"
+        android:shortcutLongLabel="@string/cmd_reload">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="im.manus.universalhost"
+            android:targetClass="im.manus.universalhost.BrowserCommandActivity"
+            android:data="universal://browser/reload" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="browser_scroll_down"
+        android:enabled="true"
+        android:icon="@drawable/ic_browser_app"
+        android:shortcutShortLabel="@string/cmd_scroll_down"
+        android:shortcutLongLabel="@string/cmd_scroll_down">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="im.manus.universalhost"
+            android:targetClass="im.manus.universalhost.BrowserCommandActivity"
+            android:data="universal://browser/scroll_down" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="browser_scroll_up"
+        android:enabled="true"
+        android:icon="@drawable/ic_browser_app"
+        android:shortcutShortLabel="@string/cmd_scroll_up"
+        android:shortcutLongLabel="@string/cmd_scroll_up">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="im.manus.universalhost"
+            android:targetClass="im.manus.universalhost.BrowserCommandActivity"
+            android:data="universal://browser/scroll_up" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="browser_scroll_top"
+        android:enabled="true"
+        android:icon="@drawable/ic_browser_app"
+        android:shortcutShortLabel="@string/cmd_scroll_top"
+        android:shortcutLongLabel="@string/cmd_scroll_top">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="im.manus.universalhost"
+            android:targetClass="im.manus.universalhost.BrowserCommandActivity"
+            android:data="universal://browser/scroll_top" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="browser_hub"
+        android:enabled="true"
+        android:icon="@drawable/ic_browser_app"
+        android:shortcutShortLabel="@string/cmd_hub"
+        android:shortcutLongLabel="@string/cmd_hub">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="im.manus.universalhost"
+            android:targetClass="im.manus.universalhost.BrowserCommandActivity"
+            android:data="universal://browser/hub" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="browser_open_browser"
+        android:enabled="true"
+        android:icon="@drawable/ic_browser_app"
+        android:shortcutShortLabel="@string/cmd_open_browser"
+        android:shortcutLongLabel="@string/cmd_open_browser">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="im.manus.universalhost"
+            android:targetClass="im.manus.universalhost.BrowserCommandActivity"
+            android:data="universal://browser/open_browser" />
+    </shortcut>
+</shortcuts>

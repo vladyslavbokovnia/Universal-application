@@ -3,4 +3,16 @@
     <string name="accessibility_service_label">Universal Host Service</string>
     <string name="accessibility_service_description">Позволяет динамическим модулям управлять интерфейсом и недавними приложениями.</string>
     <string name="keyboard_label">Universal Host Keyboard</string>
+    <string name="cmd_next_tab">Браузер: Следующая вкладка</string>
+    <string name="cmd_prev_tab">Браузер: Предыдущая вкладка</string>
+    <string name="cmd_tabs">Браузер: Панель вкладок</string>
+    <string name="cmd_new_tab">Браузер: Новая вкладка</string>
+    <string name="cmd_close_tab">Браузер: Закрыть вкладку</string>
+    <string name="cmd_back">Браузер: Назад</string>
+    <string name="cmd_reload">Браузер: Обновить страницу</string>
+    <string name="cmd_scroll_down">Браузер: Страница вниз</string>
+    <string name="cmd_scroll_up">Браузер: Страница вверх</string>
+    <string name="cmd_scroll_top">Браузер: В начало страницы</string>
+    <string name="cmd_hub">Браузер: Показать или скрыть кнопку</string>
+    <string name="cmd_open_browser">Браузер: Открыть браузер</string>
 </resources>
