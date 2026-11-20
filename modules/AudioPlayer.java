@@ -188,7 +188,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     };
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 24; }
+    @Override public int getVersion() { return 25; }
     @Override public String getDescription() {
         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
@@ -336,6 +336,21 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
     /** id доигранного трека, который будет удалён, если не нажать play/пауза на наушнике; MIN_VALUE: ничего не ждёт. */
     private long pendDelId = Long.MIN_VALUE;
+    /** Когда кончается окно «оставить» (elapsedRealtime: идёт и пока телефон спит, в отличие от таймера Handler). */
+    private long pendDelDeadline;
+
+    /**
+     * Окно «оставить» ещё открыто. Таймер Handler считает время бодрствования телефона, а с погашенным экраном и
+     * на паузе телефон спит: окно «20 с» растягивалось на часы, и всё это время нажатия play/пауза на наушнике
+     * съедались отменой удаления. Здесь срок проверяется по настоящему времени; истёкшее удаление выполняется сразу.
+     */
+    private boolean pendActive() {
+        if (pendDelId == Long.MIN_VALUE) return false;
+        if (SystemClock.elapsedRealtime() < pendDelDeadline) return true;
+        if (h != null) h.removeCallbacks(pendDelR);
+        runAutoDelete();
+        return false;
+    }
     private final Runnable pendDelR = new Runnable() {
         @Override public void run() { runAutoDelete(); }
     };
@@ -350,6 +365,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         String[] me = new String[]{t.uri.toString(), t.title, t.artist};
         for (String[] e : plLoad(PL_FAV)) if (sameEntry(e, me)) return;
         pendDelId = t.id;
+        pendDelDeadline = SystemClock.elapsedRealtime() + keepWindowSec() * 1000L;
         h.postDelayed(pendDelR, keepWindowSec() * 1000L);
     }
 
@@ -1150,9 +1166,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                     KeyEvent e = intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
                     if (e != null && e.getAction() == KeyEvent.ACTION_DOWN) {
                         int kc = e.getKeyCode();
-                        hsNote("кнопка " + KeyEvent.keyCodeToString(kc) + (pendDelId != Long.MIN_VALUE ? ", ждёт удаление" : "")
+                        boolean waiting = pendActive();
+                        hsNote("кнопка " + KeyEvent.keyCodeToString(kc) + (waiting ? ", ждёт удаление" : "")
                                 + ", играет=" + isPlaying());
-                        if (pendDelId != Long.MIN_VALUE && (kc == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || kc == KeyEvent.KEYCODE_HEADSETHOOK
+                        if (waiting && (kc == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || kc == KeyEvent.KEYCODE_HEADSETHOOK
                                 || kc == KeyEvent.KEYCODE_MEDIA_PLAY || kc == KeyEvent.KEYCODE_MEDIA_PAUSE)) {
                             keepPending();               // нажатие play/пауза в окне «оставить»: трек не удаляется
                             if (isPlaying()) return true;    // играет: кнопка только оставляет трек, воспроизведение не трогаем
