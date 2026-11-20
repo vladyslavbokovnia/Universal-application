@@ -1099,9 +1099,12 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         });
         edgeHandle = handle;
         WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                dp(18), WindowManager.LayoutParams.MATCH_PARENT, overlayType(),
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT);
-        lp.gravity = Gravity.END;
+                dp(18), stripH, overlayType(),
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT);
+        lp.gravity = Gravity.TOP | Gravity.END;
         wm.addView(handle, lp);
     }
 
