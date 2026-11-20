@@ -1,6 +1,7 @@
 package im.manus.plugins;
 
 import android.accessibilityservice.AccessibilityService;
+import android.animation.ValueAnimator;
 import android.app.usage.NetworkStats;
 import android.app.usage.NetworkStatsManager;
 import android.content.Context;
@@ -13,7 +14,9 @@ import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.Typeface;
 import android.net.ConnectivityManager;
+import android.net.TrafficStats;
 import android.os.Build;
+import android.os.SystemClock;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.TypedValue;
@@ -21,6 +24,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
+import android.view.animation.AccelerateDecelerateInterpolator;
 import im.manus.universalhost.IPlugin;
 import im.manus.universalhost.ISettingsProvider;
 import im.manus.universalhost.SettingItem;
@@ -53,6 +57,14 @@ public class TrafficModule implements IPlugin, ISettingsProvider {
     private int startDay = 1;
     private int weight;            // 0 тонкие, 1 лёгкие, 2 обычные
     private int outlinePercent = 8;
+    private boolean blinkOnDownload;   // цифры плавно мигают, пока идёт загрузка
+
+    // определение загрузки: скорость приёма между двумя опросами
+    private static final long DOWNLOAD_BYTES_PER_SEC = 30L * 1024L;   // ниже — считаем, что загрузки нет
+    private static final int QUIET_TICKS_TO_STOP = 2;                 // сколько тихих опросов подряд до остановки мигания
+    private long lastRxBytes = -1L;
+    private long lastRxTime;
+    private int quietTicks;
 
     private AccessibilityService svc;
     private Handler main;
@@ -75,6 +87,8 @@ public class TrafficModule implements IPlugin, ISettingsProvider {
         oldCfg = svc.getSharedPreferences(OLD_PREFS, Context.MODE_PRIVATE);
         loadConfig();
         active = true;
+        lastRxBytes = -1L;
+        quietTicks = 0;
         try {
             digits = new Digits();
             digits.show();
@@ -115,6 +129,7 @@ public class TrafficModule implements IPlugin, ISettingsProvider {
                 text = t;
                 digits.setText(t);
             }
+            if (blinkOnDownload) updateBlink();
             main.postDelayed(this, REFRESH_MS);
         }
     };
@@ -138,6 +153,26 @@ public class TrafficModule implements IPlugin, ISettingsProvider {
         startDay = clamp(intPref("traffic_start_day", 1), 1, 31);
         weight = clamp(cfg.getInt("digits_weight", 0), 0, 2);
         outlinePercent = clamp(cfg.getInt("digits_outline", 8), 2, 20);
+        blinkOnDownload = cfg.getBoolean("traffic_blink", false);
+    }
+
+    /** Скорость приёма за период между опросами: мобильная сеть, а если устройство её не считает — вся. */
+    private void updateBlink() {
+        long rx = TrafficStats.getMobileRxBytes();
+        if (rx == TrafficStats.UNSUPPORTED) rx = TrafficStats.getTotalRxBytes();
+        long now = SystemClock.elapsedRealtime();
+        if (rx == TrafficStats.UNSUPPORTED) { digits.setBlinking(false); return; }
+        if (lastRxBytes >= 0L && now > lastRxTime) {
+            long perSec = (rx - lastRxBytes) * 1000L / (now - lastRxTime);
+            if (perSec >= DOWNLOAD_BYTES_PER_SEC) {
+                quietTicks = 0;
+                digits.setBlinking(true);
+            } else if (++quietTicks >= QUIET_TICKS_TO_STOP) {
+                digits.setBlinking(false);
+            }
+        }
+        lastRxBytes = rx;
+        lastRxTime = now;
     }
 
     @Override
@@ -152,6 +187,8 @@ public class TrafficModule implements IPlugin, ISettingsProvider {
                 Arrays.asList("Тонкие", "Лёгкие", "Обычные"), 0));
         l.add(SettingItem.slider("digits_outline", "🖍 Толщина контура", "%", 2, 20, 1, 8));
         l.add(SettingItem.slider("traffic_start_day", "📅 День начала учётного периода", "", 1, 31, 1, 1));
+        l.add(SettingItem.toggle("traffic_blink", "💡 Мигать при загрузке",
+                "Пока идёт приём данных, цифры плавно мигают", false));
         return l;
     }
 
@@ -222,6 +259,29 @@ public class TrafficModule implements IPlugin, ISettingsProvider {
         private final OutlinedText view = new OutlinedText(svc, sizeSp, weight, outlinePercent);
         private WindowManager.LayoutParams lp;
         private boolean shown;
+        private ValueAnimator blink;
+
+        /** Плавное мигание прозрачностью цифр; вызывается только из главного потока. */
+        void setBlinking(boolean on) {
+            if (on) {
+                if (blink != null) return;
+                blink = ValueAnimator.ofFloat(1f, 0.25f);
+                blink.setDuration(1100L);
+                blink.setRepeatCount(ValueAnimator.INFINITE);
+                blink.setRepeatMode(ValueAnimator.REVERSE);
+                blink.setInterpolator(new AccelerateDecelerateInterpolator());
+                blink.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+                    @Override public void onAnimationUpdate(ValueAnimator a) {
+                        view.setAlpha((Float) a.getAnimatedValue());
+                    }
+                });
+                blink.start();
+            } else if (blink != null) {
+                blink.cancel();
+                blink = null;
+                view.setAlpha(1f);
+            }
+        }
 
         void show() {
             if (shown) return;
@@ -259,6 +319,7 @@ public class TrafficModule implements IPlugin, ISettingsProvider {
         }
 
         void hide() {
+            setBlinking(false);
             if (!shown) return;
             shown = false;
             try { wm.removeView(view); } catch (Throwable ignored) { }

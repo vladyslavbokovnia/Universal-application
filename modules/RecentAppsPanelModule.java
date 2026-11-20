@@ -105,6 +105,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
     private boolean pullEnabled = true;
     private boolean edgeEnabled = true;
     private boolean batteryEnabled = true;
+    private boolean chargeDots;          // при зарядке полоса не пульсирует, а показывается статичными точками
     private boolean stretchCustomImages = true;
     private int customCropTop = 5;
     private int customCropBottom = 5;
@@ -266,6 +267,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         pullEnabled = cfg.getBoolean("pull_enabled", true);
         edgeEnabled = cfg.getBoolean("edge_handle", true);
         batteryEnabled = cfg.getBoolean("battery_bar", true);
+        chargeDots = cfg.getBoolean("battery_charge_dots", false);
         stretchCustomImages = cfg.getBoolean("stretch_custom_images", true);
         customCropTop = clamp(cfg.getInt("custom_crop_top", 5), 0, 20);
         customCropBottom = clamp(cfg.getInt("custom_crop_bottom", 5), 0, 20 - customCropTop);
@@ -284,6 +286,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         l.add(SettingItem.toggle("pull_enabled", "👇 Раскрытие свайпом вниз", "Список приложений сеткой", true));
         l.add(SettingItem.toggle("edge_handle", "↔ Боковая ручка", "Тап показывает или скрывает панель, свайп прокручивает, долгое нажатие раскрывает", true));
         l.add(SettingItem.toggle("battery_bar", "🔋 Полоса заряда", "Тонкая полоса внизу экрана", true));
+        l.add(SettingItem.toggle("battery_charge_dots", "⚫ Точки при зарядке", "Во время зарядки полоса не мигает, а показывается статичными точками", false));
         l.add(SettingItem.slider("menu_timeout", "⏱ Автозакрытие меню, сек", "", 2, 15, 1, 6));
         l.add(SettingItem.choice("sort_mode", "🔃 Сортировка", "", Arrays.asList("По использованию", "По времени установки"), 0));
         l.add(SettingItem.section("🖼 Картинки"));
@@ -1126,7 +1129,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
     }
 
     private void buildBattery() {
-        battery = new BatteryBar(ctx);
+        battery = new BatteryBar(ctx, chargeDots);
         WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT, dp(4), overlayType(),
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
@@ -1146,7 +1149,7 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
             int status = intent.getIntExtra("status", BatteryManager.BATTERY_STATUS_UNKNOWN);
             boolean charging = status == BatteryManager.BATTERY_STATUS_CHARGING
                     || status == BatteryManager.BATTERY_STATUS_FULL;
-            battery.setPulsing(charging);
+            battery.setCharging(charging);
             if (level >= 0 && scale > 0) battery.setLevel(level / (float) scale);
         }
     };
@@ -1698,21 +1701,35 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
 
     private static final class BatteryBar extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final boolean dotsWhileCharging;   // настройка: при зарядке рисовать статичные точки вместо пульсации
+        private final float dotRadius;
+        private final float dotStep;
         private float level;
+        private boolean charging;
         private boolean pulsing;
         private final Runnable tick = new Runnable() {
             @Override public void run() { if (pulsing) { invalidate(); postDelayed(this, 250L); } }
         };
 
-        BatteryBar(Context c) { super(c); }
+        BatteryBar(Context c, boolean dotsWhileCharging) {
+            super(c);
+            this.dotsWhileCharging = dotsWhileCharging;
+            float d = c.getResources().getDisplayMetrics().density;
+            this.dotRadius = 1.5f * d;
+            this.dotStep = 6f * d;
+        }
 
         void setLevel(float v) { level = Math.max(0f, Math.min(1f, v)); invalidate(); }
 
-        void setPulsing(boolean v) {
-            if (v == pulsing) return;
-            pulsing = v;
-            removeCallbacks(tick);
-            if (v) postDelayed(tick, 250L);          // редкое обновление вместо перерисовки на каждом кадре
+        /** При зарядке: либо пульсация, либо (если включено в настройках) статичные точки, без каких-либо перерисовок по таймеру. */
+        void setCharging(boolean v) {
+            charging = v;
+            boolean pulse = v && !dotsWhileCharging;
+            if (pulse != pulsing) {
+                pulsing = pulse;
+                removeCallbacks(tick);
+                if (pulse) postDelayed(tick, 250L);      // редкое обновление вместо перерисовки на каждом кадре
+            }
             invalidate();
         }
 
@@ -1722,18 +1739,27 @@ public class RecentAppsPanelModule implements IPlugin, ISettingsProvider {
         }
 
         @Override protected void onDraw(Canvas canvas) {
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(Color.BLACK);
+            paint.setAlpha(255);
+            canvas.drawRect(0f, 0f, getWidth(), getHeight(), paint);
+            paint.setColor(Color.WHITE);
+            float filled = getWidth() * level;
+            if (charging && dotsWhileCharging) {
+                // статичные точки по длине заряда; цвет и положение не меняются между кадрами
+                float cy = getHeight() / 2f;
+                float r = Math.min(dotRadius, getHeight() / 2f);
+                for (float x = dotStep / 2f; x <= filled; x += dotStep) canvas.drawCircle(x, cy, r, paint);
+                return;
+            }
             float whiteAlpha = 1f;
             if (pulsing) {
                 float t = (SystemClock.uptimeMillis() % 2400L) / 2400f;
                 float p = t < 0.5f ? t * 2f : (1f - t) * 2f;
                 whiteAlpha = 1f - 0.88f * (p * p * (3f - 2f * p));
             }
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(Color.BLACK);
-            canvas.drawRect(0f, 0f, getWidth(), getHeight(), paint);
-            paint.setColor(Color.WHITE);
             paint.setAlpha((int) (whiteAlpha * 255f));
-            canvas.drawRect(0f, 0f, getWidth() * level, getHeight(), paint);
+            canvas.drawRect(0f, 0f, filled, getHeight(), paint);
             paint.setAlpha(255);
         }
     }
