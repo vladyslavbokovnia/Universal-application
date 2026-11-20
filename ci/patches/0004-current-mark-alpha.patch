@@ -1,10 +1,10 @@
 diff --git a/modules/Browser.java b/modules/Browser.java
 --- a/modules/Browser.java
 +++ b/modules/Browser.java
-@@ -7746,6 +7746,7 @@ public class Browser implements IPlugin, ISettingsProvider {
-                 rim.setStyle(Paint.Style.STROKE);
-                 rim.setColor(0xFF000000);
-                 rim.setStrokeWidth(dp(3));
+@@ -7774,6 +7774,7 @@ public class Browser implements IPlugin, ISettingsProvider {
+             CurrentMark(Context c) {
+                 super(c);
+                 ep.setAlpha(170);       // эмодзи без подложки, слегка прозрачная
 +                setAlpha(0.8f);       // глаз текущей вкладки чуть прозрачнее: сквозь него виден снимок вкладки
                  setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
                  setClickable(false);
