@@ -188,13 +188,31 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     };
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 25; }
+    @Override public int getVersion() { return 26; }
     @Override public String getDescription() {
         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
     @Override public String getIconName() { return "ic_launcher"; }
 
+    /** Общий для всех загрузчиков классов признак «этот экземпляр модуля живой»: после обновления .dex старый мог остаться и перехватывать кнопки гарнитуры. */
+    private static final String LIVE_KEY = "manus.audioplayer.live";
+    private boolean dead;
+
     @Override public void init(Context context) {
+        try {
+            Object prev = System.getProperties().get(LIVE_KEY);
+            if (prev != null && prev != this) {
+                int pv = 0;
+                try { pv = ((Integer) prev.getClass().getMethod("getVersion").invoke(prev)).intValue(); } catch (Throwable t) { }
+                if (pv > getVersion()) { dead = true; return; }          // уже работает более новый экземпляр: этот молчит
+                try {
+                    prev.getClass().getMethod("stop").invoke(prev);      // прежний экземпляр: его сессия, плеер и приёмники сняты
+                    hsNote("остановлен прежний экземпляр модуля v" + pv);
+                } catch (Throwable t) { }
+            }
+            System.getProperties().put(LIVE_KEY, this);
+        } catch (Throwable t) { }
+        dead = false;
         appCtx = context.getApplicationContext();
         h = new Handler(Looper.getMainLooper());
         svc = (context instanceof AccessibilityService) ? (AccessibilityService) context : null;
@@ -207,6 +225,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     }
 
     @Override public void stop() {
+        try { if (System.getProperties().get(LIVE_KEY) == this) System.getProperties().remove(LIVE_KEY); } catch (Throwable t) { }
         try { if (coverPool != null) coverPool.shutdownNow(); } catch (Throwable t) { }
         coverPool = null;
         coverCache.evictAll();
@@ -852,7 +871,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                     hsNote("фокус потерян: другое приложение");
                     pause();
                 } else if (change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
-                    resumeOnGain = isPlaying();
+                    resumeOnGain = resumeOnGain || isPlaying();   // вторая временная потеря подряд не отменяет возобновление
                     hsNote("фокус временно потерян");
                     pause();
                 } else if (change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK) {
@@ -2517,7 +2536,6 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         if (svc == null || appCtx == null) why = "нет службы специальных возможностей";
         else if (!padFocusOn()) why = "настройка выключена";
         else if (playerOnScreen()) why = "открыто окно плеера, оно принимает геймпад само";
-        else if (!padPresent()) why = "геймпад не найден";
         else if (imeUp) why = "открыта клавиатура: окно уступило ей фокус";
         else if (SystemClock.uptimeMillis() < focusSuspendUntil) why = "пауза: «назад» или ввод текста идёт приложению";
         else if (!screenReady()) why = "экран выключен или заблокирован";
@@ -3110,7 +3128,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         r.add(SettingItem.toggle("tiles_one", "🖼 Плитки в один ряд (крупные)",
                 "Выключено: по две плитки в ряд", false));
         r.add(SettingItem.toggle("pad_focus", "🎯 Держать фокус для геймпада",
-                "Прозрачное окно поверх экрана принимает стики и кнопки, пока геймпад подключён и окно плеера закрыто (Android 11). Минус: приложение под ним теряет фокус (клавиатура, «Назад»)", false));
+                "Прозрачное окно поверх экрана принимает стики и кнопки, пока окно плеера закрыто (Android 11); геймпад подключать необязательно. Минус: приложение под ним теряет фокус (клавиатура, «Назад»)", false));
         r.add(SettingItem.toggle("pad_focus_fullscreen", "📺 Скрывать строку состояния",
                 "Пока работает окно фокуса: строка состояния скрыта (потянуть с верхнего края, чтобы показать на время)", true));
         r.add(SettingItem.section("🎮 Геймпад (окно открыто)"));
