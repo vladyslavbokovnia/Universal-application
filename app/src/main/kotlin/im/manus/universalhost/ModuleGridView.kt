@@ -30,6 +30,10 @@ import kotlin.math.min
  */
 class ModuleGridView(context: Context) : ViewGroup(context) {
 
+    private companion object {
+        const val DIM_ALPHA = 128   // выключенный модуль: виден на чёрном экране, но тусклее включённого
+    }
+
     class Cell(
         val id: String,
         val isFolder: Boolean,
@@ -351,7 +355,7 @@ class ModuleGridView(context: Context) : ViewGroup(context) {
 
         override fun onDraw(canvas: Canvas) {
             val c = cell ?: return
-            val a = if (c.dimmed) 70 else 255
+            val a = if (c.dimmed) DIM_ALPHA else 255
             val w = width.toFloat()
             val h = height.toFloat()
             bmp.alpha = a

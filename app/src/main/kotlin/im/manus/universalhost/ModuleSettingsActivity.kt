@@ -42,6 +42,7 @@ class ModuleSettingsActivity : Activity() {
         private const val REQ_IMAGE = 1
         private const val ORDER_KEY = "_host_order"   // порядок настроек: id через перевод строки
         private const val TAG_LOGO = "logo"
+        private const val OFF_ALPHA = 0.5f      // выключенное: заметно на чёрном экране, но тусклее включённого
     }
 
     private lateinit var target: String
@@ -221,20 +222,25 @@ class ModuleSettingsActivity : Activity() {
         val icon = custom?.let { ModuleStorage.loadBitmap(it, 192) } ?: IconFactory.monogram(node.name.ifEmpty { "Папка" }, 192, false)
         header(icon, node.name.ifEmpty { "Папка" }, "Модулей в папке: " + node.items.size)
 
-        content.addView(valueRow("✏️ Название папки", "", node.name.ifEmpty { "не задано" }) {
+        val rename = actionTile("✏️ Название папки", "", node.name.ifEmpty { "не задано" }) {
             askText("Название папки", node.name) { value ->
                 val l = ModuleStorage.loadLayout(this)
                 l.rename(id, value)
                 ModuleStorage.saveLayout(this, l)
                 build()
             }
-        })
-        content.addView(valueRow("📤 Расформировать папку", "Модули вернутся на главный экран", "") {
+        }
+        val dissolve = actionTile("📤 Расформировать папку", "Модули вернутся на главный экран", "") {
             val l = ModuleStorage.loadLayout(this)
             l.dissolve(id)
             ModuleStorage.saveLayout(this, l)
             finish()
-        })
+        }
+        for (t in listOf(rename, dissolve)) {
+            addCompact(t, 4)
+            attach(t, null, { speak(says[t]?.invoke() ?: "") }, toggles[t])
+        }
+        flushGrid()
     }
 
     private fun header(icon: Bitmap, title: String, subtitle: String) {
@@ -568,20 +574,19 @@ class ModuleSettingsActivity : Activity() {
         return row
     }
 
-    /** Строка с кнопкой: [value] показывается на кнопке, пустое значение даёт «▶». */
-    private fun valueRow(title: String, summary: String, value: String, compact: Boolean = false, onClick: () -> Unit): View {
-        val c = iconCard(title) {
+    /**
+     * Плитка действия: один логотип того же размера, что у включателей, без кнопки рядом.
+     * Нажатие озвучивает название и текущее значение, долгое нажатие выполняет действие (выбор, ввод, запуск).
+     */
+    private fun actionTile(title: String, summary: String, value: String, onClick: () -> Unit): View {
+        val say: () -> String = {
             plain(title) + (if (summary.isNotEmpty()) ". $summary" else "") +
                 (if (value.isNotEmpty()) ". Сейчас: $value" else "")
         }
-        c.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-        val b = button(value.ifEmpty { "▶" }) { onClick() }
-        b.maxLines = 1
-        b.ellipsize = android.text.TextUtils.TruncateAt.END
-        b.maxWidth = dp(if (compact) 84 else 180)
-        c.addView(b)
-        c.setOnClickListener { onClick() }
-        return c
+        val tile = logoView(title, 72, say)
+        says[tile] = say
+        toggles[tile] = onClick
+        return tile
     }
 
     /**
@@ -595,11 +600,11 @@ class ModuleSettingsActivity : Activity() {
                 ". " + (if (state) "Включено" else "Выключено")
         }
         val tile = logoView(title, sizeDp, say)
-        tile.alpha = if (state) 1f else 0.25f
+        tile.alpha = if (state) 1f else OFF_ALPHA
         says[tile] = say
         toggles[tile] = {
             state = !state
-            tile.alpha = if (state) 1f else 0.25f
+            tile.alpha = if (state) 1f else OFF_ALPHA
             onChange(state)
             speak(plain(title) + ". " + (if (state) "Включено" else "Выключено"))
         }
@@ -649,7 +654,7 @@ class ModuleSettingsActivity : Activity() {
             SettingItem.SLIDER -> place(item, sliderRow(item, prefs), 0)
             SettingItem.CHOICE -> {
                 val current = prefs.getInt(item.key, item.defInt).coerceIn(0, maxOf(0, item.options.size - 1))
-                place(item, valueRow(item.title, item.summary, item.options.getOrElse(current) { "" }, true) {
+                place(item, actionTile(item.title, item.summary, item.options.getOrElse(current) { "" }) {
                     AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                         .setTitle(plain(item.title))
                         .setItems(item.options.toTypedArray()) { _, which ->
@@ -657,31 +662,31 @@ class ModuleSettingsActivity : Activity() {
                             notifyModule(item.key)
                             build()
                         }.show()
-                }, 2)
+                }, 4)
             }
             SettingItem.TEXT -> {
                 val cur = prefs.getString(item.key, item.defStr) ?: item.defStr
-                place(item, valueRow(item.title, item.summary, cur, true) {
+                place(item, actionTile(item.title, item.summary, cur) {
                     askText(plain(item.title), cur) { value ->
                         prefs.edit().putString(item.key, value).apply()
                         notifyModule(item.key)
                         build()
                     }
-                }, 2)
+                }, 4)
             }
             SettingItem.IMAGE -> place(item, imageRow(item), 0)
-            SettingItem.APP_IMAGES -> place(item, valueRow(item.title, item.summary, "", true) {
+            SettingItem.APP_IMAGES -> place(item, actionTile(item.title, item.summary, "") {
                 startActivity(
                     Intent(this, AppImagesActivity::class.java)
                         .putExtra(AppImagesActivity.EXTRA_MODULE, target)
                         .putExtra(AppImagesActivity.EXTRA_KEY, item.key)
                 )
-            }, 2)
+            }, 4)
             SettingItem.APP_PICKER -> {
                 val cur = prefs.getString(item.key, item.defStr) ?: item.defStr
-                place(item, valueRow(item.title, item.summary, pickerSummary(cur, ""), true) {
+                place(item, actionTile(item.title, item.summary, pickerSummary(cur, "")) {
                     pickApps(item, prefs)
-                }, 2)
+                }, 4)
             }
             SettingItem.MONITOR -> place(item, monitorRow(item), 0)
             SettingItem.CUSTOM -> {
@@ -698,10 +703,10 @@ class ModuleSettingsActivity : Activity() {
                     place(item, view, 0)
                 }
             }
-            SettingItem.ACTION -> place(item, valueRow(item.title, item.summary, "", true) {
+            SettingItem.ACTION -> place(item, actionTile(item.title, item.summary, "") {
                 notifyModule(item.key)
                 Toast.makeText(this, "Готово", Toast.LENGTH_SHORT).show()
-            }, 2)
+            }, 4)
         }
     }
 
