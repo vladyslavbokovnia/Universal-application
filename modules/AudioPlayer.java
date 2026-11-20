@@ -188,7 +188,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     };
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 26; }
+    @Override public int getVersion() { return 27; }
     @Override public String getDescription() {
         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
@@ -269,13 +269,30 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     @Override public void onAccessibilityEvent(AccessibilityEvent event, AccessibilityService service) {
         if (event == null || !padFocusOn()) return;
         int t = event.getEventType();
-        if (t == AccessibilityEvent.TYPE_VIEW_CLICKED || t == AccessibilityEvent.TYPE_VIEW_FOCUSED
-                || t == AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED) {
+        if ((t == AccessibilityEvent.TYPE_VIEW_CLICKED || t == AccessibilityEvent.TYPE_VIEW_FOCUSED
+                || t == AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED || t == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED
+                || t == AccessibilityEvent.TYPE_VIEW_LONG_CLICKED) && focusView != null) {
             try {
                 android.view.accessibility.AccessibilityNodeInfo n = event.getSource();
-                if (n != null && (n.isEditable() || "android.widget.EditText".contentEquals(n.getClassName() == null ? "" : n.getClassName()))
-                        && focusView != null) {
-                    suspendFocusCatcher(20000);                   // клавиатура появится, когда окно фокуса не держит фокус
+                boolean ed = isEditNode(n);
+                if (!ed && service != null) {                      // источник не поле, но поле ввода может уже быть в фокусе (браузеры)
+                    android.view.accessibility.AccessibilityNodeInfo f = service.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT);
+                    if (isEditNode(f)) { n = f; ed = true; }
+                }
+                focusLog(AccessibilityEvent.eventTypeToString(t).replace("TYPE_VIEW_", "") + ": "
+                        + (n == null || n.getClassName() == null ? "нет узла" : n.getClassName().toString().replaceAll(".*\\.", "")) + (ed ? " ✎" : ""));
+                if (ed) {
+                    final android.view.accessibility.AccessibilityNodeInfo target = n;
+                    suspendFocusCatcher(8000);                      // пока окно фокуса держит фокус, клавиатура под ним не откроется
+                    if (h != null) h.postDelayed(new Runnable() {
+                        @Override public void run() {              // окно убрано: нажать на поле ещё раз, теперь клавиатура покажется
+                            try {
+                                target.refresh();
+                                target.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_FOCUS);
+                                target.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK);
+                            } catch (Throwable x) { }
+                        }
+                    }, 350);
                 }
             } catch (Throwable x) { }
         }
@@ -288,6 +305,14 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 updateFocusCatcher();               // клавиатура появилась или ушла: окно фокуса уступает или возвращается
             }
         }
+    }
+
+    private static boolean isEditNode(android.view.accessibility.AccessibilityNodeInfo n) {
+        if (n == null) return false;
+        try {
+            CharSequence c = n.getClassName();
+            return n.isEditable() || (c != null && c.toString().contains("EditText"));
+        } catch (Throwable t) { return false; }
     }
 
     /** Экранная клавиатура сейчас на экране (по списку окон службы). */
