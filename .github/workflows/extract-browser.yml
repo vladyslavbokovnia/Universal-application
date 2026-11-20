@@ -13,20 +13,26 @@ permissions:
 jobs:
   extract:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
       - name: Extract tab drag and swipe methods
+        continue-on-error: true
         shell: bash
         run: |
-          set -euo pipefail
-          python3 - <<'PY'
+          python3 - <<'PY' 2>&1 | tee /tmp/run.log
           import re
           src = open('modules/Browser.java', encoding='utf-8').read()
+          lines = src.splitlines(True)
+          offs = []
+          p = 0
+          for l in lines:
+              offs.append(p)
+              p += len(l)
           WANT = {'dropHint', 'edgeHint', 'zoneOf', 'swipeScroll', 'attachDrop', 'cardAt'}
-          KW = {'if', 'for', 'while', 'switch', 'catch', 'synchronized', 'else', 'new', 'return'}
-          sig = re.compile(r'^[ \t]+(?:@Override\s+)?((?:(?:private|public|protected|static|final|synchronized)\s+)*[\w<>\[\]., ?]+?)\s+(\w+)\s*\(([^;{}]*?)\)\s*(?:throws[\w., ]+)?\{', re.M)
+          SKIP = ('if', 'for', 'while', 'switch', 'catch', 'else', 'try', 'do', 'synchronized', 'new', 'return', '}', '//', '*', '@')
 
           def match(i):
               d = 0
@@ -64,28 +70,31 @@ jobs:
               return -1
 
           found = []
-          seen = set()
-          for m in sig.finditer(src):
+          for idx, l in enumerate(lines):
+              s = l.strip()
+              if not s.endswith('{') or '(' not in s or ')' not in s or '=' in s.split('(')[0]:
+                  continue
+              if s.startswith(SKIP):
+                  continue
+              m = re.match(r'^(?:@\w+\s+)?([\w<>\[\]?, .]+?)\s+(\w+)\s*\(', s)
+              if not m or '.' in m.group(1).split()[-1] and False:
+                  continue
               name = m.group(2)
-              if name in KW or m.group(1).split()[-1] in ('new', 'return', 'else', 'throw'):
+              if name in ('if', 'for', 'while', 'switch', 'catch', 'synchronized'):
                   continue
-              s = m.start()
-              if s in seen:
-                  continue
-              e = match(m.end() - 1)
+              start = offs[idx] + (len(l) - len(l.lstrip()))
+              e = match(offs[idx] + l.rindex('{'))
               if e < 0:
                   continue
-              body = src[s:e]
+              body = src[start:e]
               low = body.lower()
               want = name in WANT
-              hit = want or 'swipe' in low or 'свайп' in low or 'startdraganddrop' in low or 'dragshadowbuilder' in low
+              hit = want or 'swipe' in low or 'свайп' in low or 'startdraganddrop' in low or 'dragshadowbuilder' in low or 'dragevent' in low
               if not hit:
                   continue
               if len(body) > 9000 and not want:
                   continue
-              seen.add(s)
-              line = src.count('\n', 0, s) + 1
-              found.append((0 if want else 1, len(body), line, name, body))
+              found.append((0 if want else 1, len(body), idx + 1, name, body))
           found.sort(key=lambda x: (x[0], x[1]))
           out = []
           total = 0
@@ -94,21 +103,24 @@ jobs:
                   continue
               out.append('// ===== %s (line %d, %d chars) =====\n%s\n' % (name, line, size, body))
               total += size
-          idx = ['// index of all found methods:']
+          head = ['// index of all found methods:']
           for _, size, line, name, _b in sorted(found, key=lambda x: x[2]):
-              idx.append('//   %d: %s (%d chars)' % (line, name, size))
-          open('/tmp/extract.txt', 'w', encoding='utf-8').write('\n'.join(idx) + '\n\n' + '\n'.join(out))
+              head.append('//   %d: %s (%d chars)' % (line, name, size))
+          open('/tmp/extract.txt', 'w', encoding='utf-8').write('\n'.join(head) + '\n\n' + '\n'.join(out))
           print('methods found:', len(found), 'written chars:', total)
           PY
       - name: Push result to branch extract-log
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
+          touch /tmp/extract.txt /tmp/run.log
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B extract-log
           mkdir -p ci
           cp /tmp/extract.txt ci/extract.txt
-          git add -f ci/extract.txt
+          cp /tmp/run.log ci/extract-run.log
+          git add -f ci/extract.txt ci/extract-run.log
           git commit -m "Extract: tab drag and swipe snippets"
           git push -f origin extract-log
