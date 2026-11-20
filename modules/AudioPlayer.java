@@ -2593,6 +2593,12 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     }
 
     private void applyFocusCatcher() {
+        // Событие TYPE_WINDOWS_CHANGED может потеряться у некоторых оболочек: не возвращаем окно,
+        // пока системная клавиатура действительно видна (в том числе при срабатывании watchdog).
+        if (!imeUp && imeShown(svc)) {
+            imeUp = true;
+            focusLog("клавиатура обнаружена при проверке окна");
+        }
         String why = null;
         if (svc == null || appCtx == null) why = "нет службы специальных возможностей";
         else if (!padFocusOn()) why = "настройка выключена";
