@@ -188,7 +188,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     };
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 27; }
+    @Override public int getVersion() { return 28; }
     @Override public String getDescription() {
         return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
     }
@@ -282,17 +282,12 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 focusLog(AccessibilityEvent.eventTypeToString(t).replace("TYPE_VIEW_", "") + ": "
                         + (n == null || n.getClassName() == null ? "нет узла" : n.getClassName().toString().replaceAll(".*\\.", "")) + (ed ? " ✎" : ""));
                 if (ed) {
-                    final android.view.accessibility.AccessibilityNodeInfo target = n;
-                    suspendFocusCatcher(8000);                      // пока окно фокуса держит фокус, клавиатура под ним не откроется
-                    if (h != null) h.postDelayed(new Runnable() {
-                        @Override public void run() {              // окно убрано: нажать на поле ещё раз, теперь клавиатура покажется
-                            try {
-                                target.refresh();
-                                target.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_FOCUS);
-                                target.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK);
-                            } catch (Throwable x) { }
-                        }
-                    }, 350);
+                    android.graphics.Rect r = new android.graphics.Rect();
+                    n.getBoundsInScreen(r);
+                    int selS = -1, selE = -1;
+                    try { selS = n.getTextSelectionStart(); selE = n.getTextSelectionEnd(); } catch (Throwable x) { }
+                    suspendFocusCatcher(10000);                     // пока окно фокуса держит фокус, клавиатура под ним не откроется
+                    tapField(r, selS, selE, 0);
                 }
             } catch (Throwable x) { }
         }
@@ -305,6 +300,47 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 updateFocusCatcher();               // клавиатура появилась или ушла: окно фокуса уступает или возвращается
             }
         }
+    }
+
+    /**
+     * Окно фокуса убрано, поле ввода под ним уже в фокусе, но тап по нему клавиатуру не показал (окно приложения тогда
+     * не имело фокуса). Настоящий тап жестом службы показывает её: ACTION_CLICK на обычном EditText этого не делает.
+     * Через секунду проверяем, что клавиатура появилась, и при неудаче повторяем (до трёх раз). Место курсора восстанавливается.
+     */
+    private void tapField(final android.graphics.Rect r, final int selS, final int selE, final int attempt) {
+        final AccessibilityService s = svc;
+        if (s == null || h == null || r == null || r.isEmpty() || Build.VERSION.SDK_INT < 24) return;
+        h.postDelayed(new Runnable() {
+            @Override public void run() {
+                try {
+                    if (imeShown(s)) { focusLog("клавиатура есть"); return; }
+                    if (attempt >= 3) { focusLog("клавиатура не появилась после 3 тапов"); return; }
+                    android.graphics.Path path = new android.graphics.Path();
+                    path.moveTo(r.exactCenterX(), r.exactCenterY());
+                    android.accessibilityservice.GestureDescription g = new android.accessibilityservice.GestureDescription.Builder()
+                            .addStroke(new android.accessibilityservice.GestureDescription.StrokeDescription(path, 0, 50)).build();
+                    boolean ok = s.dispatchGesture(g, null, null);
+                    focusLog("тап по полю " + Math.round(r.exactCenterX()) + "," + Math.round(r.exactCenterY())
+                            + (ok ? "" : " (не принят)") + ", попытка " + (attempt + 1));
+                    if (selS >= 0 && selE >= 0) {
+                        h.postDelayed(new Runnable() {
+                            @Override public void run() {
+                                try {
+                                    android.view.accessibility.AccessibilityNodeInfo f = s.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT);
+                                    if (isEditNode(f)) {
+                                        android.os.Bundle b = new android.os.Bundle();
+                                        b.putInt(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, selS);
+                                        b.putInt(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, selE);
+                                        f.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_SELECTION, b);
+                                    }
+                                } catch (Throwable x) { }
+                            }
+                        }, 250);
+                    }
+                    tapField(r, selS, selE, attempt + 1);
+                } catch (Throwable x) { focusLog("тап: " + x); }
+            }
+        }, attempt == 0 ? 500 : 1100);
     }
 
     private static boolean isEditNode(android.view.accessibility.AccessibilityNodeInfo n) {
