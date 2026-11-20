@@ -1,0 +1,3 @@
+Checking ci/patches/0004-current-mark-alpha.patch
+error: patch failed: modules/Browser.java:7746
+error: modules/Browser.java: patch does not apply
