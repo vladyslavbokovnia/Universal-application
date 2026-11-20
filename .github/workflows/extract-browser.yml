@@ -31,7 +31,7 @@ jobs:
           for l in lines:
               offs.append(p)
               p += len(l)
-          WANT = {'dropHint', 'edgeHint', 'zoneOf', 'swipeScroll', 'attachDrop', 'cardAt'}
+          WANT = {'dropHint', 'clearHints', 'cardGestures', 'cardBody', 'fillGrid', 'handleDrop', 'relPos', 'hubHot', 'swipeScroll', 'dropUp', 'moveToLevelEnd', 'groupCard', 'tabCard', 'DropCard'}
           SKIP = ('if', 'for', 'while', 'switch', 'catch', 'else', 'try', 'do', 'synchronized', 'new', 'return', '}', '//', '*', '@')
 
           def match(i):
@@ -70,29 +70,43 @@ jobs:
               return -1
 
           found = []
+          SIG = re.compile(r'^(?:@\w+\s+)?(?:(?:private|public|protected|static|final|abstract)\s+)*(?:class\s+(\w+)[^{;]*|[\w<>\[\]?, .]+?\s+(\w+)\s*\([^;{}]*?\)\s*(?:throws [\w., ]+)?)\{')
           for idx, l in enumerate(lines):
               s = l.strip()
-              if not s.endswith('{') or '(' not in s or ')' not in s or '=' in s.split('(')[0]:
+              if not s or s.startswith(SKIP):
                   continue
-              if s.startswith(SKIP):
+              text = ' '.join(x.strip() for x in lines[idx:idx + 4])
+              m = SIG.match(text)
+              if not m:
                   continue
-              m = re.match(r'^(?:@\w+\s+)?([\w<>\[\]?, .]+?)\s+(\w+)\s*\(', s)
-              if not m or '.' in m.group(1).split()[-1] and False:
-                  continue
-              name = m.group(2)
+              name = m.group(1) or m.group(2)
               if name in ('if', 'for', 'while', 'switch', 'catch', 'synchronized'):
                   continue
-              start = offs[idx] + (len(l) - len(l.lstrip()))
-              e = match(offs[idx] + l.rindex('{'))
+              brace_text = text[:m.end()]
+              # position of the opening brace in the real source
+              k = 0
+              pos = offs[idx]
+              want_n = len(brace_text.replace(' ', ''))
+              cnt = 0
+              j = pos + (len(l) - len(l.lstrip()))
+              while j < len(src) and cnt < want_n:
+                  if not src[j].isspace():
+                      cnt += 1
+                  j += 1
+              brace_at = j - 1
+              if src[brace_at] != '{':
+                  continue
+              e = match(brace_at)
               if e < 0:
                   continue
+              start = offs[idx] + (len(l) - len(l.lstrip()))
               body = src[start:e]
               low = body.lower()
               want = name in WANT
-              hit = want or 'swipe' in low or 'свайп' in low or 'startdraganddrop' in low or 'dragshadowbuilder' in low or 'dragevent' in low
+              hit = want or 'swipe' in low or 'свайп' in low
               if not hit:
                   continue
-              if len(body) > 9000 and not want:
+              if len(body) > 4000 and not want:
                   continue
               found.append((0 if want else 1, len(body), idx + 1, name, body))
           found.sort(key=lambda x: (x[0], x[1]))
