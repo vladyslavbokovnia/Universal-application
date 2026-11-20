@@ -110,7 +110,30 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />
             </intent-filter>
+            <!-- Команды браузера в списке ярлыков приложения (для Micro Gesture и подобных) -->
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
         </activity-alias>
+
+        <!-- Команды браузеру извне: ссылка universal://browser/<команда> (она же ярлыки); без интерфейса -->
+        <activity android:name=".BrowserCommandActivity" android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:taskAffinity=""
+            android:noHistory="true"
+            android:excludeFromRecents="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="universal" android:host="browser" />
+            </intent-filter>
+        </activity>
+
+        <!-- Команды браузеру извне: broadcast im.manus.universalhost.BROWSER_COMMAND с параметром cmd -->
+        <receiver android:name=".BrowserCommandReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="im.manus.universalhost.BROWSER_COMMAND" />
+            </intent-filter>
+        </receiver>
 
         <!-- Администратор устройства: только force-lock, для выключения экрана модулем -->
         <receiver android:name=".ModuleAdminReceiver"

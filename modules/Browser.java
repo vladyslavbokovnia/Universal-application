@@ -314,6 +314,16 @@ public class Browser implements IPlugin, ISettingsProvider {
                     view = null;
                 }
             }
+        } else if ("command".equals(c)) {
+            // Команда браузеру извне (Micro Gesture через ярлык, ссылку universal://browser/<команда> или broadcast)
+            final Object nm = data.get("name");
+            final BrowserView bv = view;
+            if (bv == null || !(nm instanceof String)) return Boolean.FALSE;
+            final String cname = (String) nm;
+            main.post(new Runnable() {
+                @Override public void run() { bv.runCommand(cname); }
+            });
+            return Boolean.TRUE;
         } else if ("open".equals(c)) {
             Object u = data.get("url");
             Object p = data.get("profile");
@@ -405,6 +415,8 @@ public class Browser implements IPlugin, ISettingsProvider {
         l.add(SettingItem.text("search_url", "🔎 Поиск", "Адрес поискового запроса, %s подставляется вместо запроса", DEF_SEARCH));
         l.add(SettingItem.text("user_agent", "🕵 User-Agent",
                 "Пусто: стандартный (без метки «wv»). Если сайт, например вход Google, не пускает во встроенный браузер, впишите строку мобильного Chrome", ""));
+        l.add(SettingItem.toggle("external_commands", "🤲 Команды извне (жесты)",
+                "Принимать команды от других приложений, например Micro Gesture: ярлыки «Браузер» в списке ярлыков приложения, ссылки universal://browser/next_tab и broadcast im.manus.universalhost.BROWSER_COMMAND с параметром cmd. Команды: next_tab, prev_tab, tabs, new_tab, close_tab, back, reload, scroll_down, scroll_up, scroll_top, scroll_bottom, hub, fullscreen, close_layer, page:xxx", true));
         l.add(SettingItem.toggle("restore_tabs", "♻ Восстанавливать вкладки", "При следующем открытии вернуть вкладки, которые были открыты", true));
         l.add(SettingItem.toggle("keep_alive", "🧠 Держать страницы в памяти",
                 "Закрытие окна браузера (назад, смахивание из недавних) не выгружает вкладки: при следующем открытии страницы те же, без перезагрузки. Рендерер вкладок не понижается в фоне, система реже его убивает", true));
@@ -1463,6 +1475,54 @@ public class Browser implements IPlugin, ISettingsProvider {
             wantPanel = false;
             openGroup = null;
             showTabs();
+        }
+
+        /**
+         * Команда извне: next_tab, prev_tab, tabs, new_tab, close_tab, back, reload, scroll_down, scroll_up,
+         * scroll_top, scroll_bottom, hub, fullscreen, close_layer. Имя вида page:xxx уходит странице событием
+         * universal-command (detail = xxx): его могут слушать пользовательские скрипты (озвучка и т.п.).
+         * Вызывать в потоке интерфейса.
+         */
+        boolean runCommand(String name) {
+            if (name == null || closed || detached) return false;
+            if (!sp.getBoolean("external_commands", true)) return false;
+            String n = name.trim().toLowerCase(Locale.ROOT);
+            Tab t = cur;
+            if (n.equals("next_tab")) { switchTab(1); return true; }
+            if (n.equals("prev_tab")) { switchTab(-1); return true; }
+            if (n.equals("tabs")) { openTabsRoot(); return true; }
+            if (n.equals("new_tab")) { newTabWithStart(); return true; }
+            if (n.equals("close_tab")) {
+                if (t == null) return false;
+                closeTabKeep(t);
+                return true;
+            }
+            if (n.equals("back")) {
+                if (canHandleBack()) doBack();
+                return true;
+            }
+            if (n.equals("close_layer")) { closeLayer(false); return true; }
+            if (n.equals("hub")) { setDockHidden(!dockHidden, true); return true; }
+            if (n.equals("fullscreen")) {
+                sp.edit().putBoolean("fullscreen", !sp.getBoolean("fullscreen", false)).apply();
+                applyFullscreen();
+                return true;
+            }
+            if (t == null || t.wv == null) return false;
+            if (n.equals("reload")) {
+                if (t.loading) t.wv.stopLoading(); else reloadTab(t);
+                return true;
+            }
+            if (n.equals("scroll_down")) { t.wv.pageDown(false); return true; }
+            if (n.equals("scroll_up")) { t.wv.pageUp(false); return true; }
+            if (n.equals("scroll_top")) { t.wv.pageUp(true); return true; }
+            if (n.equals("scroll_bottom")) { t.wv.pageDown(true); return true; }
+            if (n.startsWith("page:")) {
+                t.wv.evaluateJavascript("try{window.dispatchEvent(new CustomEvent('universal-command',{detail:"
+                        + q(n.substring(5)) + "}))}catch(e){}", null);
+                return true;
+            }
+            return false;
         }
 
         void handleIntent(Intent in) {
@@ -7774,6 +7834,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             CurrentMark(Context c) {
                 super(c);
                 ep.setAlpha(170);       // эмодзи без подложки, слегка прозрачная
+                setAlpha(0.8f);       // глаз текущей вкладки чуть прозрачнее: сквозь него виден снимок вкладки
                 setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
                 setClickable(false);
             }
@@ -7966,7 +8027,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                     View gi;
                     FrameLayout.LayoutParams glp;
                     if (grp.icon.startsWith("p:")) {
-                        gi = new PathIconView(act, grp.icon.substring(2), 0xFF000000, true);        // свой нарисованный значок: чёрный контур с тонкой белой каймой
+                        gi = new PathIconView(act, grp.icon.substring(2), 0xFFFFFFFF, true);        // свой нарисованный значок: белый, с тонкой чёрной каймой (фон везде чёрный)
                         glp = new FrameLayout.LayoutParams(dp(78), dp(78), Gravity.TOP | Gravity.END);
                     } else {
                         TextView gt = new TextView(act);
@@ -8960,7 +9021,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
         }
 
-        /** Нарисованный значок: контур вписывается в область по центру; с каймой читается на любом снимке. */
+        /** Нарисованный значок: контур вписывается в область по центру; белый, с тонкой чёрной каймой читается на любом снимке. */
         private final class PathIconView extends View {
             private final Path path;
             private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -8979,7 +9040,7 @@ public class Browser implements IPlugin, ISettingsProvider {
                 fill.setColor(color);
                 halo.setStyle(Paint.Style.FILL_AND_STROKE);
                 halo.setStrokeJoin(Paint.Join.ROUND);
-                halo.setColor(0xFFFFFFFF);
+                halo.setColor(0xFF000000);
                 setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             }
 
