@@ -136,7 +136,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             {"say", "🗣 Название и сколько осталось"},
             {"say_pct", "📊 Сколько процентов трека"},
             {"lock", "🔒 Блок касаний до выключения экрана"},
-            {"stop_after", "⏹ Стоп после этого трека"},
+            {"stop_after", "⏹ Стоп после каждой песни/ролика вкл/выкл"},
             {"speed_up", "🐇 Быстрее"},
             {"speed_down", "🐢 Медленнее"},
             {"speed_reset", "1× Обычная скорость"},
@@ -173,7 +173,6 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     private int[] queue;
     /** С какого списка начали играть: 0 все песни, 1 «Послушать позже», 2 «Избранное». */
     private int listSrc = 0;
-    private boolean stopAfter;
     private int resumeTo;
     private MediaSession session;
     private BroadcastReceiver cmdReceiver;
@@ -906,8 +905,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             @Override public void onCompletion(MediaPlayer p) {
                 rememberPos();                                   // дослушали: место забываем
                 SharedPreferences sp = prefs();
-                if (stopAfter || (sp != null && sp.getBoolean("no_auto_next", false))) {
-                    stopAfter = false;
+                if (stopAfterEach() || (sp != null && sp.getBoolean("no_auto_next", false))) {
                     afterChange();                               // остановка без перехода к следующему
                     return;
                 }
@@ -1018,7 +1016,6 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             prepared = false;
             cur = i;
             rememberLast(listSrc, tracks.get(i));   // последний трек этого списка: к нему вернёмся при «Сменить список»
-            stopAfter = false;
             resumeTo = savedPos(tracks.get(i));
             setSource(tracks.get(i));
             mp.prepareAsync();
@@ -1950,9 +1947,19 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         speak(String.format(Locale.getDefault(), "%.1f", v));
     }
 
+    /** Постоянный режим: после каждого завершённого трека остановиться, не переходя к следующему. */
+    private boolean stopAfterEach() {
+        SharedPreferences p = prefs();
+        return p != null && p.getBoolean("stop_after_each", false);
+    }
+
     private void toggleStopAfter() {
-        stopAfter = !stopAfter;
-        speak(stopAfter ? "Остановлюсь после этого трека" : "Продолжу играть дальше");
+        SharedPreferences p = prefs();
+        if (p == null) return;
+        boolean enabled = !p.getBoolean("stop_after_each", false);
+        p.edit().putBoolean("stop_after_each", enabled).apply();
+        speak(enabled ? "Остановка после каждой песни включена" : "Автопереход включён");
+        refreshUiHead();
     }
 
     /** Обратный порядок: «вперёд» идёт к предыдущей песне списка, а доиграв трек, плеер берёт предыдущую. */
