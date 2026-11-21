@@ -137,6 +137,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             {"say_pct", "📊 Сколько процентов трека"},
             {"lock", "🔒 Блок касаний до выключения экрана"},
             {"stop_after", "⏹ Стоп после каждой песни/ролика вкл/выкл"},
+            {"auto_delete", "🗑 Автоудаление прослушанного вкл/выкл"},
             {"speed_up", "🐇 Быстрее"},
             {"speed_down", "🐢 Медленнее"},
             {"speed_reset", "1× Обычная скорость"},
@@ -482,18 +483,13 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         speak("Оставлено");
     }
 
-    private boolean skipDeleteOn() {
-        SharedPreferences p = prefs();
-        return p == null || p.getBoolean("auto_delete_skip", true);
-    }
-
-    /** Пропуск с гарнитуры (следующий или предыдущий): пропущенный трек ставится на удаление по той же схеме, что и доигранный. */
+    /** Пропуск трека с гарнитуры: удаление работает вместе с основной настройкой автоудаления. */
     private void headsetSkip(int dir) {
         int target = stepIdx(reverseOn() ? -dir : dir);
         if (target >= 0 && target < tracks.size() && tracks.get(target).id == pendDelId) {
             clearPendingDelete();                            // вернулись к треку, который ждал удаления: он остаётся, а не удаляется под ногами
         }
-        if (skipDeleteOn() && mp != null && prepared && cur >= 0 && cur < tracks.size()) armAutoDelete(tracks.get(cur));
+        if (autoDeleteOn() && mp != null && prepared && cur >= 0 && cur < tracks.size()) armAutoDelete(tracks.get(cur));
         if (dir > 0) next(); else prev();
     }
 
@@ -1953,6 +1949,16 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         return p != null && p.getBoolean("stop_after_each", false);
     }
 
+    private void toggleAutoDelete() {
+        SharedPreferences p = prefs();
+        if (p == null) return;
+        boolean enabled = !p.getBoolean("auto_delete", false);
+        p.edit().putBoolean("auto_delete", enabled).apply();
+        if (!enabled) clearPendingDelete();
+        speak(enabled ? "Автоудаление включено" : "Автоудаление выключено");
+        refreshUiHead();
+    }
+
     private void toggleStopAfter() {
         SharedPreferences p = prefs();
         if (p == null) return;
@@ -3161,6 +3167,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         if (a.equals("say_pct")) { sayPercent(); return; }
         if (a.equals("lock")) { toggleTouchLock(); return; }
         if (a.equals("stop_after")) { toggleStopAfter(); return; }
+        if (a.equals("auto_delete")) { toggleAutoDelete(); return; }
         if (a.equals("speed_up")) { setSpeed(speed() + 0.1f); return; }
         if (a.equals("speed_down")) { setSpeed(speed() - 0.1f); return; }
         if (a.equals("speed_reset")) { setSpeed(1f); return; }
@@ -3206,8 +3213,6 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 "Трек доиграл: тишина, без перехода дальше", false));
         r.add(SettingItem.toggle("auto_delete", "🗑 Удалять прослушанное",
                 "Трек доигран сам, началось следующее: через несколько секунд доигранный удаляется. Нажми play/пауза на наушнике в эти секунды, и трек останется (воспроизведение не прервётся). Избранное не удаляется", false));
-        r.add(SettingItem.toggle("auto_delete_skip", "⏭🗑 Удалять и пропущенное наушниками",
-                "Пропустил трек кнопкой «следующий» или «предыдущий» на гарнитуре: он удаляется по той же схеме. Работает при включённом «Удалять прослушанное»", true));
         r.add(SettingItem.slider("auto_delete_sec", "⏳ Окно «оставить», с",
                 "Сколько секунд после начала следующего трека можно нажать play/пауза, чтобы оставить предыдущий", 5, 60, 5, 20));
         r.add(SettingItem.toggle("unplug_pause", "🎧✕ Пауза, если наушники отключили", "", true));
