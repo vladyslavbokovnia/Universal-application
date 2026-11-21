@@ -1286,6 +1286,7 @@ public class Browser implements IPlugin, ISettingsProvider {
         private int savedUi;
         private boolean backPending;
         private boolean closed;
+        private Intent lastHandledIntent;     // тот же Intent повторно (поворот, пересоздание окна) вторую вкладку не открывает
         private ValueCallback<Uri[]> fileCb;
         private String defaultUa;
         private boolean fullscreen, dockHidden, started, wantPanel, tabsPanel, lightBar;
@@ -1531,6 +1532,8 @@ public class Browser implements IPlugin, ISettingsProvider {
             long stamp = in.getLongExtra("stamp", 0);
             if (stamp != 0 && stamp == sp.getLong("last_stamp", -1)) return;     // тот же запуск после поворота экрана
             sp.edit().putLong("last_stamp", stamp).apply();
+            boolean replay = in == lastHandledIntent || (in.getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0;
+            lastHandledIntent = in;
             String url = in.getStringExtra("url");
             String action = in.getAction();
             if (url == null || url.length() == 0) {
@@ -1545,6 +1548,10 @@ public class Browser implements IPlugin, ISettingsProvider {
                         url = m.find() ? m.group() : text.trim();
                     }
                 }
+            }
+            if (url != null && url.length() > 0 && replay) {
+                if (started) flushPanel();      // тот же запуск (Недавние, пересоздание окна): страница уже открыта прежде
+                return;
             }
             if (url != null && url.length() > 0) {
                 String norm = normalize(url);
@@ -3175,7 +3182,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             Tab t = cur;
             if (t == null) return;
             if (t.wv != null && t.wv.canGoBack()) t.wv.goBack();
-            else if (t.opener != null && tabs.contains(t.opener)) closeTab(t);
+            else if (t.opener != null && tabs.contains(t.opener)) closeTabKeep(t);      // остаётся в истории закрытых
         }
 
         // ------------------------------------------------------------ вкладки
@@ -3445,7 +3452,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             if (raw == null) return;
             try {
                 JSONArray a = new JSONArray(raw);
-                for (int i = 0; i < a.length() && i < 60; i++) {
+                for (int i = 0; i < a.length(); i++) {
                     JSONObject o = a.getJSONObject(i);
                     Tab t = new Tab(nextId++, o.optString("u", ""), Math.max(0, Math.min(PROFILES - 1, o.optInt("p", 0))));
                     t.title = o.optString("t", "");
@@ -3842,7 +3849,7 @@ public class Browser implements IPlugin, ISettingsProvider {
             }
 
             @Override public void onCloseWindow(WebView v) {
-                if (tabs.size() > 1) closeTab(t);
+                if (tabs.size() > 1) closeTabKeep(t);       // страница закрыла себя сама: вкладка остаётся в истории закрытых
             }
 
             @Override public boolean onJsAlert(WebView v, String url, String message, final JsResult r) {
