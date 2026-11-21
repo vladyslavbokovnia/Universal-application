@@ -286,7 +286,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                     n.getBoundsInScreen(r);
                     int selS = -1, selE = -1;
                     try { selS = n.getTextSelectionStart(); selE = n.getTextSelectionEnd(); } catch (Throwable x) { }
-                    suspendFocusCatcher(10000);                     // пока окно фокуса держит фокус, клавиатура под ним не откроется
+                    suspendFocusCatcher(2500);                      // короткая пауза на передачу оконного фокуса приложению
                     tapField(r, selS, selE, 0);
                 }
             } catch (Throwable x) { }
@@ -303,30 +303,43 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     }
 
     /**
-     * Окно фокуса убрано, поле ввода под ним уже в фокусе, но тап по нему клавиатуру не показал (окно приложения тогда
-     * не имело фокуса). Настоящий тап жестом службы показывает её: ACTION_CLICK на обычном EditText этого не делает.
-     * Через секунду проверяем, что клавиатура появилась, и при неудаче повторяем (до трёх раз). Место курсора восстанавливается.
+     * После снятия окна геймпадного фокуса даём приложению получить оконный фокус и нажимаем поле ввода.
+     * Делаем не более двух попыток; если клавиатура не появилась, сразу возвращаем окно геймпада.
      */
     private void tapField(final android.graphics.Rect r, final int selS, final int selE, final int attempt) {
         final AccessibilityService s = svc;
-        if (s == null || h == null || r == null || r.isEmpty() || Build.VERSION.SDK_INT < 24) return;
-        h.postDelayed(new Runnable() {
+        final Handler hh = h;
+        if (s == null || hh == null || r == null || r.isEmpty() || Build.VERSION.SDK_INT < 24) return;
+        hh.postDelayed(new Runnable() {
             @Override public void run() {
                 try {
-                    if (imeShown(s)) { focusLog("клавиатура есть"); return; }
-                    if (attempt >= 3) { focusLog("клавиатура не появилась после 3 тапов"); return; }
+                    if (imeShown(s)) {
+                        focusLog("клавиатура есть");
+                        return;
+                    }
+                    if (attempt >= 2) {
+                        focusLog("клавиатура не появилась после 2 тапов");
+                        focusSuspendUntil = 0;
+                        updateFocusCatcher();
+                        return;
+                    }
+
                     android.graphics.Path path = new android.graphics.Path();
                     path.moveTo(r.exactCenterX(), r.exactCenterY());
-                    android.accessibilityservice.GestureDescription g = new android.accessibilityservice.GestureDescription.Builder()
-                            .addStroke(new android.accessibilityservice.GestureDescription.StrokeDescription(path, 0, 50)).build();
+                    android.accessibilityservice.GestureDescription g =
+                            new android.accessibilityservice.GestureDescription.Builder()
+                                    .addStroke(new android.accessibilityservice.GestureDescription.StrokeDescription(path, 0, 50))
+                                    .build();
                     boolean ok = s.dispatchGesture(g, null, null);
                     focusLog("тап по полю " + Math.round(r.exactCenterX()) + "," + Math.round(r.exactCenterY())
                             + (ok ? "" : " (не принят)") + ", попытка " + (attempt + 1));
+
                     if (selS >= 0 && selE >= 0) {
-                        h.postDelayed(new Runnable() {
+                        hh.postDelayed(new Runnable() {
                             @Override public void run() {
                                 try {
-                                    android.view.accessibility.AccessibilityNodeInfo f = s.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT);
+                                    android.view.accessibility.AccessibilityNodeInfo f =
+                                            s.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT);
                                     if (isEditNode(f)) {
                                         android.os.Bundle b = new android.os.Bundle();
                                         b.putInt(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, selS);
@@ -335,12 +348,16 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                                     }
                                 } catch (Throwable x) { }
                             }
-                        }, 250);
+                        }, 180);
                     }
                     tapField(r, selS, selE, attempt + 1);
-                } catch (Throwable x) { focusLog("тап: " + x); }
+                } catch (Throwable x) {
+                    focusLog("тап: " + x);
+                    focusSuspendUntil = 0;
+                    updateFocusCatcher();
+                }
             }
-        }, attempt == 0 ? 500 : 1100);
+        }, attempt == 0 ? 120 : 350);
     }
 
     private static boolean isEditNode(android.view.accessibility.AccessibilityNodeInfo n) {
