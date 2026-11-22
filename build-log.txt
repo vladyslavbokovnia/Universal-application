@@ -1,0 +1,76 @@
+Сборка упала. Коммит: e1d573a: KeyboardButton v5: проверка и самовосстановление конфигурации службы доступности (типы событий, флаг окон, возможности) + конфигурация в отчёте диагностики поля ввода
+
+=== Первые ошибки ===
+294:modules/KeyboardButtonModule.java:230: error: cannot find symbol
+295-            info.setCapabilities(info.getCapabilities() | needCaps);
+296-                ^
+297-  symbol:   method setCapabilities(int)
+298-  location: variable info of type AccessibilityServiceInfo
+--
+301:::error title=Module KeyboardButtonModule failed::warning: [options] bootstrap class path not set in conjunction with -source 8%0Amodules/KeyboardButtonModule.java:230: error: cannot find symbol%0A            info.setCapabilities(info.getCapabilities() | needCaps);%0A                ^%0A  symbol:   method setCapabilities(int)%0A  location: variable info of type AccessibilityServiceInfo%0A1 error%0A1 warning
+302-Building module: KeyboardModule
+303-Building module: RadioGesturesModule
+304-Building module: RecentAppsPanelModule
+305-Building module: ShizukuModule
+
+=== Хвост вывода ===
+> Task :dep-uhm:validateSigningDebug
+> Task :dep-uhm:writeDebugAppMetadata
+> Task :dep-uhm:writeDebugSigningConfigVersions
+> Task :dep-uhm:mergeDebugNativeLibs
+
+> Task :dep-uhm:stripDebugDebugSymbols
+Unable to strip the following libraries, packaging them as they are: libLiteRt.so, libLiteRtClGlAccelerator.so, libUhmAndroid.so.
+
+> Task :dep-uhm:packageDebug
+> Task :dep-uhm:createDebugApkListingFileRedirect
+> Task :dep-uhm:assembleDebug
+> Task :dep-newpipe:l8DexDesugarLibDebug
+> Task :dep-newpipe:packageDebug
+> Task :dep-newpipe:createDebugApkListingFileRedirect
+> Task :dep-newpipe:assembleDebug
+
+> Task :app:compileDebugKotlin
+w: file:///home/runner/work/Universal-application/Universal-application/app/src/main/kotlin/im/manus/universalhost/AppImagesActivity.kt:77:27 'fun queryIntentActivities(p0: Intent, p1: Int): (Mutable)List<ResolveInfo!>' is deprecated. Deprecated in Java.
+w: file:///home/runner/work/Universal-application/Universal-application/app/src/main/kotlin/im/manus/universalhost/MainActivity.kt:144:61 'fun onBackPressed(): Unit' is deprecated. Deprecated in Java.
+w: file:///home/runner/work/Universal-application/Universal-application/app/src/main/kotlin/im/manus/universalhost/ModuleSettingsActivity.kt:725:20 'fun getApplicationInfo(p0: String, p1: Int): ApplicationInfo' is deprecated. Deprecated in Java.
+w: file:///home/runner/work/Universal-application/Universal-application/app/src/main/kotlin/im/manus/universalhost/ModuleSettingsActivity.kt:740:27 'fun queryIntentActivities(p0: Intent, p1: Int): (Mutable)List<ResolveInfo!>' is deprecated. Deprecated in Java.
+w: file:///home/runner/work/Universal-application/Universal-application/app/src/main/kotlin/im/manus/universalhost/ModuleUpdater.kt:259:26 'fun getPackageInfo(p0: String, p1: Int): PackageInfo!' is deprecated. Deprecated in Java.
+w: file:///home/runner/work/Universal-application/Universal-application/app/src/main/kotlin/im/manus/universalhost/ModuleWakeActivity.kt:60:18 This declaration overrides a deprecated member but is not marked as deprecated itself. Add the '@Deprecated' annotation or suppress the diagnostic.
+
+> Task :app:compileDebugJavaWithJavac
+Note: Some input files use or override a deprecated API.
+Note: Recompile with -Xlint:deprecation for details.
+
+> Task :app:processDebugJavaRes
+> Task :app:mergeDebugJavaResource
+> Task :app:dexBuilderDebug
+> Task :app:mergeProjectDexDebug
+> Task :app:packageDebug
+> Task :app:createDebugApkListingFileRedirect
+> Task :app:assembleDebug
+
+BUILD SUCCESSFUL in 1m 9s
+191 actionable tasks: 191 executed
+Building module: AnTTSModule
+Building module: AudioPlayer
+Building module: Browser
+Building module: ClockWallpaperModule
+Building module: Flashlight
+Building module: GamepadModule
+Building module: KeyboardButtonModule
+warning: [options] bootstrap class path not set in conjunction with -source 8
+modules/KeyboardButtonModule.java:230: error: cannot find symbol
+            info.setCapabilities(info.getCapabilities() | needCaps);
+                ^
+  symbol:   method setCapabilities(int)
+  location: variable info of type AccessibilityServiceInfo
+1 error
+1 warning
+::error title=Module KeyboardButtonModule failed::warning: [options] bootstrap class path not set in conjunction with -source 8%0Amodules/KeyboardButtonModule.java:230: error: cannot find symbol%0A            info.setCapabilities(info.getCapabilities() | needCaps);%0A                ^%0A  symbol:   method setCapabilities(int)%0A  location: variable info of type AccessibilityServiceInfo%0A1 error%0A1 warning
+Building module: KeyboardModule
+Building module: RadioGesturesModule
+Building module: RecentAppsPanelModule
+Building module: ShizukuModule
+Building module: TrafficModule
+Building module: YouTubeAudio
