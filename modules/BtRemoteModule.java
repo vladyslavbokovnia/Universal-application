@@ -1,29 +1,26 @@
 package im.manus.plugins;
 
 import android.accessibilityservice.AccessibilityService;
-import android.accessibilityservice.AccessibilityServiceInfo;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.media.AudioManager;
-import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
-import android.view.InputDevice;
 import android.view.KeyEvent;
-import android.view.MotionEvent;
 import android.view.accessibility.AccessibilityEvent;
 import android.widget.Toast;
-import im.manus.universalhost.IKeyHandler;
-import im.manus.universalhost.IMotionHandler;
 import im.manus.universalhost.IPlugin;
 import im.manus.universalhost.ISettingsProvider;
 import im.manus.universalhost.SettingItem;
+import im.manus.universalhost.ShizukuBridge;
 
-import java.lang.reflect.Method;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -31,14 +28,15 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Bluetooth-пульт (например, для TikTok): записывает его кнопки и назначает на них медиафункции.
  *
+ * Сигналы читаются напрямую из ядра: через Shizuku запускается «getevent -l», и модуль видит всё, что шлёт пульт
+ * (клавиши, клики и движения «мыши», колесо), даже если Android до службы специальных возможностей это не довёл.
+ * Работает на любой версии Android, нужен только запущенный Shizuku с разрешением для хоста.
+ *
  * Как назначить: в настройках модуля нажать нужную функцию, затем нажать кнопку на пульте. Кнопка запоминается.
- * Два источника сигналов:
- *  - клавиши (IKeyHandler, любой Android): пульт, который представляется клавиатурой/медиа-кнопками;
- *  - указка (IMotionHandler, только Android 14+, по включению): пульт, который представляется мышью —
- *    это те самые «курсор появился и дёргается». Свайпы и клики указки превращаются в кнопки.
- * Назначенные кнопки по умолчанию поглощаются, то есть TikTok и другие приложения их не получают.
+ * Читать события — не значит их гасить: getevent ничего не перехватывает, поэтому родное действие пульта
+ * (курсор, пролистывание в TikTok) никуда не девается.
  */
-public class BtRemoteModule implements IPlugin, ISettingsProvider, IKeyHandler, IMotionHandler {
+public class BtRemoteModule implements IPlugin, ISettingsProvider {
 
     private static final String NAME = "BtRemote";
     private static final String PREFS = "module_" + NAME;
@@ -56,8 +54,6 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, IKeyHandler, 
             {"stop", "⏹ Стоп"},
     };
 
-    private static final int MOTION_MASK = InputDevice.SOURCE_MOUSE | InputDevice.SOURCE_MOUSE_RELATIVE
-            | InputDevice.SOURCE_TOUCHPAD | InputDevice.SOURCE_TRACKBALL;
     private static final long GESTURE_GAP_MS = 150;
     private static final long LEARN_TIMEOUT_MS = 20000;
 
@@ -69,15 +65,23 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, IKeyHandler, 
     private final Map<String, String> bound = new ConcurrentHashMap<String, String>();
     private volatile String learnFn;
 
+    // чтение getevent
+    private volatile boolean alive;
+    private volatile Process proc;
+    private Thread reader;
+    private volatile String readerState = "не запущено";
+    private final Map<String, String> devNames = new HashMap<String, String>();   // /dev/input/eventN -> имя устройства
+    private String curPath;
+
     // журнал для монитора
     private final Object lock = new Object();
     private final long[] stamps = new long[200];
     private int stampN;
     private String lastEvent = "—";
+    private final LinkedHashSet<String> seen = new LinkedHashSet<String>();
 
-    // накопление свайпа указки
+    // накопление движения указки
     private float gdx, gdy;
-    private float lastX = Float.NaN, lastY = Float.NaN;
     private String gDev = "";
 
     private final Runnable gestureEnd = new Runnable() {
@@ -91,26 +95,33 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, IKeyHandler, 
             }
         }
     };
+    private final Runnable readyCb = new Runnable() {
+        @Override public void run() { startReader(); }
+    };
 
     @Override public String getName() { return NAME; }
-    @Override public int getVersion() { return 1; }
+    @Override public int getVersion() { return 2; }
     @Override public String getDescription() {
-        return "Bluetooth-пульт: запись кнопок и назначение медиафункций";
+        return "Bluetooth-пульт через Shizuku: запись кнопок и назначение медиафункций";
     }
     @Override public String getIconName() { return "ic_launcher"; }
 
     @Override
     public void init(Context context) {
         ctx = context;
+        alive = true;
         main = new Handler(Looper.getMainLooper());
         prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         loadBindings();
-        applyMotionCapture(prefs.getBoolean("motion", false));
+        ShizukuBridge.addReadyListener(readyCb);   // Shizuku мог ещё не запуститься: стартуем, когда он будет готов
+        startReader();
     }
 
     @Override
     public void stop() {
-        applyMotionCapture(false);
+        alive = false;
+        ShizukuBridge.removeReadyListener(readyCb);
+        killProcess();
         if (main != null) {
             main.removeCallbacks(gestureEnd);
             main.removeCallbacks(learnTimeout);
@@ -140,100 +151,175 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, IKeyHandler, 
         return null;
     }
 
-    // ------------------------------------------------------------------ клавиши
+    // ------------------------------------------------------------------ чтение событий ядра
 
-    @Override
-    public boolean onKeyEvent(KeyEvent e) {
-        if (ctx == null || prefs == null) return false;
-        int code = e.getKeyCode();
-        if (code == KeyEvent.KEYCODE_POWER || code == KeyEvent.KEYCODE_HOME
-                || code == KeyEvent.KEYCODE_APP_SWITCH) return false;
-        boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
-        int rep = e.getRepeatCount();
-        String sig = "K|" + code + "|" + devName(e.getDevice());
-
-        String learn = learnFn;
-        if (learn != null) {
-            // пока ждём кнопку, поглощаем всё, чтобы пульт не нажал что-то в приложении
-            if (down && rep == 0) {
-                note(sig);
-                finishLearn(learn, sig);
-            }
-            return true;
+    private void startReader() {
+        if (!alive || ctx == null) return;
+        synchronized (lock) {
+            if (reader != null && reader.isAlive()) return;
         }
-        if (down && rep == 0) note(sig);
-
-        String fn = bound.get(sig);
-        if (fn == null) return false;
-        if (down && (rep == 0 || "vol_up".equals(fn) || "vol_down".equals(fn))) run(fn);
-        return prefs.getBoolean("swallow", true);
+        if (!ShizukuBridge.hasPermission()) {
+            readerState = ShizukuBridge.isRunning()
+                    ? "у приложения нет разрешения Shizuku"
+                    : "Shizuku не запущен";
+            return;                                  // readyCb запустит чтение, когда Shizuku будет готов
+        }
+        Thread t = new Thread(new Runnable() {
+            @Override public void run() { readLoop(); }
+        }, "BtRemote-getevent");
+        t.setDaemon(true);
+        synchronized (lock) { reader = t; }
+        t.start();
     }
 
-    // ------------------------------------------------------------------ указка (Android 14+)
+    private void killProcess() {
+        Process p = proc;
+        proc = null;
+        if (p != null) {
+            try { p.destroy(); } catch (Throwable t) { /* уже закрыт */ }
+        }
+    }
 
-    @Override
-    public void onMotionEvent(MotionEvent e) {
-        if (ctx == null || prefs == null || main == null) return;
-        int src = e.getSource();
-        if ((src & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) return;   // стики геймпада — не наше
-
-        switch (e.getActionMasked()) {
-            case MotionEvent.ACTION_HOVER_MOVE:
-            case MotionEvent.ACTION_MOVE: {
-                if ((src & InputDevice.SOURCE_MOUSE_RELATIVE) == InputDevice.SOURCE_MOUSE_RELATIVE) {
-                    gdx += e.getAxisValue(MotionEvent.AXIS_RELATIVE_X);
-                    gdy += e.getAxisValue(MotionEvent.AXIS_RELATIVE_Y);
-                } else {
-                    float x = e.getX(), y = e.getY();
-                    if (!Float.isNaN(lastX)) {
-                        gdx += x - lastX;
-                        gdy += y - lastY;
-                    }
-                    lastX = x;
-                    lastY = y;
+    private void readLoop() {
+        while (alive) {
+            Process p = ShizukuBridge.startProcess("exec getevent -l");
+            if (p == null) {
+                readerState = "не удалось запустить getevent через Shizuku";
+                return;
+            }
+            proc = p;
+            readerState = "читаю события пульта";
+            try {
+                BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
+                try {
+                    String line;
+                    while (alive && (line = r.readLine()) != null) handleLine(line);
+                } finally {
+                    r.close();
                 }
-                gDev = devName(e.getDevice());
-                main.removeCallbacks(gestureEnd);
-                main.postDelayed(gestureEnd, GESTURE_GAP_MS);
-                break;
+            } catch (Throwable t) {
+                // поток закрылся — перезапустим ниже
             }
-            case MotionEvent.ACTION_BUTTON_PRESS: {
-                int b = e.getActionButton();
-                String name = b == MotionEvent.BUTTON_PRIMARY ? "CLICK"
-                        : b == MotionEvent.BUTTON_SECONDARY ? "RCLICK" : "BTN" + b;
-                trigger("M|" + name + "|" + devName(e.getDevice()));
-                break;
+            killProcess();
+            if (!alive) return;
+            readerState = "getevent завершился, перезапуск";
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException e) {
+                return;
             }
-            case MotionEvent.ACTION_SCROLL: {
-                float v = e.getAxisValue(MotionEvent.AXIS_VSCROLL);
-                float h = e.getAxisValue(MotionEvent.AXIS_HSCROLL);
-                String d = Math.abs(v) >= Math.abs(h) ? (v > 0 ? "SCROLL_UP" : "SCROLL_DOWN")
-                        : (h > 0 ? "SCROLL_RIGHT" : "SCROLL_LEFT");
-                if (v != 0 || h != 0) trigger("M|" + d + "|" + devName(e.getDevice()));
-                break;
-            }
-            default:
-                break;
         }
     }
 
-    /** Пауза в движении указки: решаем, был ли это свайп, и в какую сторону. */
+    /** Разбор одной строки «getevent -l». */
+    private void handleLine(String line) {
+        String s = line.trim();
+        if (s.length() == 0) return;
+        if (s.startsWith("add device")) {
+            int i = s.indexOf(": ");
+            curPath = i > 0 ? s.substring(i + 2).trim() : null;
+            return;
+        }
+        if (s.startsWith("name:")) {
+            int a = s.indexOf('"'), b = s.lastIndexOf('"');
+            if (curPath != null && a >= 0 && b > a) {
+                synchronized (devNames) { devNames.put(curPath, s.substring(a + 1, b)); }
+            }
+            return;
+        }
+        if (!s.startsWith("/dev/input/")) return;
+        int c = s.indexOf(':');
+        if (c < 0) return;
+        String path = s.substring(0, c);
+        String[] t = s.substring(c + 1).trim().split("\\s+");
+        if (t.length < 3) return;
+        String type = t[0], code = t[1], val = t[2];
+
+        if ("EV_SYN".equals(type) || "EV_MSC".equals(type) || "EV_LED".equals(type)) return;
+        if ("EV_ABS".equals(type)) {
+            if (!code.startsWith("ABS_MT")) markSeen(path);   // экран трогаем постоянно, его не считаем
+            return;
+        }
+
+        String dev;
+        synchronized (devNames) { dev = devNames.get(path); }
+        if (dev == null) dev = path;
+        dev = dev.replace('|', '/');
+
+        if ("EV_KEY".equals(type)) {
+            if ("BTN_TOUCH".equals(code) || code.startsWith("BTN_TOOL")) return;   // касания экрана
+            markSeen(dev);
+            if ("DOWN".equals(val)) {
+                trigger("K|" + code + "|" + dev);
+            } else if ("REPEAT".equals(val)) {
+                String fn = bound.get("K|" + code + "|" + dev);      // удержание: только громкость
+                if ("vol_up".equals(fn) || "vol_down".equals(fn)) run(fn);
+            }
+        } else if ("EV_REL".equals(type)) {
+            markSeen(dev);
+            int v = parseHex(val);
+            if ("REL_X".equals(code) || "REL_Y".equals(code)) {
+                addRel(dev, "REL_X".equals(code), v);
+            } else if ("REL_WHEEL".equals(code)) {
+                if (v != 0) trigger("R|WHEEL_" + (v > 0 ? "UP" : "DOWN") + "|" + dev);
+            } else if ("REL_HWHEEL".equals(code)) {
+                if (v != 0) trigger("R|HWHEEL_" + (v > 0 ? "RIGHT" : "LEFT") + "|" + dev);
+            }
+        }
+    }
+
+    private static int parseHex(String h) {
+        try {
+            return (int) Long.parseLong(h, 16);
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    private void markSeen(String name) {
+        synchronized (lock) {
+            if (seen.size() < 8) seen.add(name);
+        }
+    }
+
+    // ------------------------------------------------------------------ указка: рывки
+
+    private void addRel(String dev, boolean isX, int v) {
+        synchronized (lock) {
+            if (isX) gdx += v; else gdy += v;
+            gDev = dev;
+        }
+        if (main != null) {
+            main.removeCallbacks(gestureEnd);
+            main.postDelayed(gestureEnd, GESTURE_GAP_MS);
+        }
+    }
+
+    /** Пауза в движении указки: решаем, был ли это заметный рывок, и в какую сторону. */
     private void finishGesture() {
-        float ax = Math.abs(gdx), ay = Math.abs(gdy);
-        int min = prefs != null ? prefs.getInt("swipe_min", 24) : 24;
-        if (Math.max(ax, ay) >= min) {
-            String d = ax > ay ? (gdx > 0 ? "RIGHT" : "LEFT") : (gdy > 0 ? "DOWN" : "UP");
-            trigger("M|SWIPE_" + d + "|" + gDev);
-        } else if (Math.max(ax, ay) > 0) {
+        float dx, dy;
+        String dev;
+        synchronized (lock) {
+            dx = gdx;
+            dy = gdy;
+            dev = gDev;
+            gdx = 0;
+            gdy = 0;
+        }
+        float ax = Math.abs(dx), ay = Math.abs(dy), mx = Math.max(ax, ay);
+        int min = prefs != null ? prefs.getInt("swipe_min", 20) : 20;
+        if (mx >= min) {
+            String d = (ay >= mx * 0.4f ? (dy > 0 ? "DOWN" : "UP") : "")
+                    + (ax >= mx * 0.4f ? (dx > 0 ? "RIGHT" : "LEFT") : "");
+            trigger("R|MOVE_" + d + "|" + dev);
+        } else if (mx > 0) {
             synchronized (lock) {
-                lastEvent = "указка дрогнула: " + Math.round(gdx) + ", " + Math.round(gdy) + " px (меньше порога)";
+                lastEvent = "указка дрогнула: " + Math.round(dx) + ", " + Math.round(dy) + " (меньше порога)";
             }
         }
-        gdx = 0;
-        gdy = 0;
     }
 
-    /** Общий вход для сигналов указки: запись кнопки, если ждём её, иначе выполнение назначенной функции. */
+    /** Общий вход: запись кнопки, если ждём её, иначе выполнение назначенной функции. */
     private void trigger(String sig) {
         note(sig);
         String learn = learnFn;
@@ -243,30 +329,6 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, IKeyHandler, 
         }
         String fn = bound.get(sig);
         if (fn != null) run(fn);
-    }
-
-    /** Включает или выключает перехват указки у службы (Android 14+), не трогая биты других модулей. */
-    private void applyMotionCapture(boolean on) {
-        if (Build.VERSION.SDK_INT < 34) return;
-        try {
-            Class<?> c = Class.forName("im.manus.universalhost.CoreAccessibilityService");
-            Object comp = c.getField("Companion").get(null);
-            Object inst = comp.getClass().getMethod("getInstance").invoke(comp);
-            if (!(inst instanceof AccessibilityService)) return;
-            AccessibilityService svc = (AccessibilityService) inst;
-            AccessibilityServiceInfo info = svc.getServiceInfo();
-            if (info == null) return;
-            Method get = AccessibilityServiceInfo.class.getMethod("getMotionEventSources");
-            Method set = AccessibilityServiceInfo.class.getMethod("setMotionEventSources", int.class);
-            int cur = ((Integer) get.invoke(info)).intValue();
-            int next = on ? (cur | MOTION_MASK) : (cur & ~MOTION_MASK);
-            if (next != cur) {
-                set.invoke(info, Integer.valueOf(next));
-                svc.setServiceInfo(info);
-            }
-        } catch (Throwable t) {
-            t.printStackTrace();
-        }
     }
 
     // ------------------------------------------------------------------ назначение
@@ -345,6 +407,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, IKeyHandler, 
         Map<String, Object> m = new HashMap<String, Object>();
         int[] buckets = new int[30];            // события по секундам за последние 30 секунд
         String last;
+        String devs;
         long now = SystemClock.uptimeMillis();
         synchronized (lock) {
             for (long t : stamps) {
@@ -353,13 +416,24 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, IKeyHandler, 
                 if (age >= 0 && age < 30000) buckets[29 - (int) (age / 1000)]++;
             }
             last = lastEvent;
+            StringBuilder sb = new StringBuilder();
+            for (String d : seen) {
+                if (sb.length() > 0) sb.append(", ");
+                sb.append(d);
+            }
+            devs = sb.toString();
         }
         String learn = learnFn;
+        String status;
+        if (learn != null) {
+            status = "⏺ Нажмите кнопку на пульте для: " + label(learn);
+        } else {
+            status = "Shizuku: " + readerState + ". Назначено: " + bound.size() + " из " + FNS.length
+                    + (devs.length() > 0 ? ". Устройства: " + devs : "");
+        }
         m.put("values", buckets);
         m.put("value", last);
-        m.put("status", learn != null
-                ? "⏺ Нажмите кнопку на пульте для: " + label(learn)
-                : "Назначено кнопок: " + bound.size() + " из " + FNS.length);
+        m.put("status", status);
         return m;
     }
 
@@ -369,9 +443,10 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, IKeyHandler, 
     public List<SettingItem> getSettingsSchema() {
         SharedPreferences p = schemaPrefs();
         List<SettingItem> l = new ArrayList<SettingItem>();
-        l.add(SettingItem.section("🎛 Пульт"));
+        l.add(SettingItem.section("🎛 Пульт (нужен запущенный Shizuku)"));
         l.add(SettingItem.monitor("live", "📡 Что присылает пульт",
-                "Нажмите кнопку на пульте: последнее событие и активность за 30 секунд"));
+                "Нажмите кнопку на пульте: последнее событие, активность за 30 секунд и найденные устройства"));
+        l.add(SettingItem.action("restart", "🔄 Перезапустить чтение", "Если пульт переподключали или Shizuku запустили позже"));
         l.add(SettingItem.section("🎯 Назначение: нажмите функцию, затем кнопку на пульте"));
         for (String[] f : FNS) {
             String sig = p == null ? null : p.getString("bind_" + f[0], null);
@@ -380,13 +455,8 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, IKeyHandler, 
         }
         l.add(SettingItem.action("unbind_all", "🗑 Сбросить все назначения", "Пульт снова работает как обычно"));
         l.add(SettingItem.section("⚙ Параметры"));
-        l.add(SettingItem.toggle("swallow", "🙈 Не пускать нажатия дальше",
-                "Назначенная кнопка не доходит до приложений (например, не листает TikTok)", true));
-        l.add(SettingItem.toggle("motion", "🖱 Ловить указку пульта (Android 14+)",
-                "Свайпы и клики пульта-«мыши» становятся кнопками. Пока включено, обычная мышь в других приложениях не работает",
-                false));
-        l.add(SettingItem.slider("swipe_min", "📏 Минимальный свайп указки",
-                "Сколько пикселей должна пройти указка, чтобы считаться свайпом", 4, 300, 2, 24));
+        l.add(SettingItem.slider("swipe_min", "📏 Минимальный рывок указки",
+                "Сколько единиц должна пройти указка пульта, чтобы считаться кнопкой", 2, 500, 2, 20));
         return l;
     }
 
@@ -401,10 +471,10 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, IKeyHandler, 
             ed.apply();
             loadBindings();
             toast("Все назначения сброшены");
-        } else if ("motion".equals(key)) {
-            boolean on = prefs.getBoolean("motion", false);
-            applyMotionCapture(on);
-            if (on && Build.VERSION.SDK_INT < 34) toast("Указка работает только на Android 14 и новее");
+        } else if ("restart".equals(key)) {
+            killProcess();                            // цикл чтения сам запустит getevent заново
+            startReader();
+            toast("Чтение событий перезапущено");
         }
     }
 
@@ -429,40 +499,35 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, IKeyHandler, 
         }
     }
 
-    private static String devName(InputDevice d) {
-        if (d == null || d.getName() == null) return "";
-        return d.getName().replace('|', '/');
-    }
-
     private static String label(String fn) {
         for (String[] f : FNS) if (f[0].equals(fn)) return f[1];
         return null;
     }
 
-    /** Подпись кнопки человеческим языком: «NEXTSONG · BT Remote» или «свайп вверх · BT Mouse». */
+    private static String arrows(String d) {
+        if ("UP".equals(d)) return "↑";
+        if ("DOWN".equals(d)) return "↓";
+        if ("LEFT".equals(d)) return "←";
+        if ("RIGHT".equals(d)) return "→";
+        if ("UPLEFT".equals(d)) return "↖";
+        if ("UPRIGHT".equals(d)) return "↗";
+        if ("DOWNLEFT".equals(d)) return "↙";
+        if ("DOWNRIGHT".equals(d)) return "↘";
+        return d;
+    }
+
+    /** Подпись кнопки человеческим языком: «KEY_NEXTSONG · BT Remote» или «рывок указки ↑ · BT Mouse». */
     private static String describe(String sig) {
         String[] p = sig.split("\\|", 3);
         if (p.length < 2) return sig;
         String dev = p.length > 2 && p[2].length() > 0 ? " · " + p[2] : "";
-        if ("K".equals(p[0])) {
-            try {
-                String s = KeyEvent.keyCodeToString(Integer.parseInt(p[1]));
-                return (s.startsWith("KEYCODE_") ? s.substring(8) : s) + dev;
-            } catch (NumberFormatException ex) {
-                return sig;
-            }
-        }
+        if ("K".equals(p[0])) return p[1] + dev;
         String g = p[1];
-        if ("CLICK".equals(g)) g = "клик";
-        else if ("RCLICK".equals(g)) g = "правый клик";
-        else if ("SWIPE_UP".equals(g)) g = "свайп вверх";
-        else if ("SWIPE_DOWN".equals(g)) g = "свайп вниз";
-        else if ("SWIPE_LEFT".equals(g)) g = "свайп влево";
-        else if ("SWIPE_RIGHT".equals(g)) g = "свайп вправо";
-        else if ("SCROLL_UP".equals(g)) g = "колесо вверх";
-        else if ("SCROLL_DOWN".equals(g)) g = "колесо вниз";
-        else if ("SCROLL_LEFT".equals(g)) g = "колесо влево";
-        else if ("SCROLL_RIGHT".equals(g)) g = "колесо вправо";
+        if (g.startsWith("MOVE_")) g = "рывок указки " + arrows(g.substring(5));
+        else if ("WHEEL_UP".equals(g)) g = "колесо вверх";
+        else if ("WHEEL_DOWN".equals(g)) g = "колесо вниз";
+        else if ("HWHEEL_LEFT".equals(g)) g = "колесо влево";
+        else if ("HWHEEL_RIGHT".equals(g)) g = "колесо вправо";
         return g + dev;
     }
 
