@@ -107,7 +107,7 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
     // ---------------------------------------------------------------- IPlugin
 
     @Override public String getName() { return "KeyboardButton"; }
-    @Override public int getVersion() { return 7; }
+    @Override public int getVersion() { return 8; }
     @Override public String getDescription() {
         return "Кнопка для Gboard: клавиатура, голосовой ввод, буфер обмена, переводчик, выбор клавиатуры";
     }
@@ -270,8 +270,8 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
             int res = si.metaData != null ? si.metaData.getInt("android.view.accessibilityservice") : 0;
             if (res == 0) { sb.append("конфига службы в манифесте нет"); return sb.toString(); }
             android.content.res.XmlResourceParser x = svc.getResources().getXml(res);
-            int ev;
-            while ((ev = x.getEventType()) != android.content.res.XmlResourceParser.END_DOCUMENT) {
+            int ev = x.getEventType();
+            for (int step = 0; ev != android.content.res.XmlResourceParser.END_DOCUMENT && step < 100; step++) {
                 if (ev == android.content.res.XmlResourceParser.START_TAG) {
                     sb.append("конфиг: типы=").append(x.getAttributeValue(null, "accessibilityEventTypes"))
                             .append(", флаги=").append(x.getAttributeValue(null, "accessibilityFlags"))
@@ -279,6 +279,7 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
                             .append(", жесты=").append(x.getAttributeValue(null, "canPerformGestures"));
                     break;
                 }
+                ev = x.next();       // v7 забывал next() — парсер стоял на месте и вешал главный поток намертво
             }
         } catch (Throwable t) {
             sb.append("ошибка чтения: ").append(t);
@@ -646,7 +647,7 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
 
     /** Отчёт о том, что модуль видит в окне с полем ввода: окна, активный корень, узлы, поля, события. */
     private String inputDiagText() {
-        StringBuilder sb = new StringBuilder("KeyboardButton v7, поле ввода:\n");
+        StringBuilder sb = new StringBuilder("KeyboardButton v8, поле ввода:\n");
         try {
             repairServiceInfo();
             sb.append(serviceInfoText()).append('\n');
