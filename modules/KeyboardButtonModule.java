@@ -26,6 +26,7 @@ import android.view.ViewConfiguration;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.accessibilityservice.AccessibilityServiceInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Toast;
@@ -100,11 +101,12 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
     private int sizePx;
     private long inputEventAt;
     private int evTotal, evInput;           // счётчики для проверки «Что видит модуль в поле ввода»
+    private String infoProblem;             // что было не так с конфигурацией службы при запуске (null — всё в порядке)
 
     // ---------------------------------------------------------------- IPlugin
 
     @Override public String getName() { return "KeyboardButton"; }
-    @Override public int getVersion() { return 4; }
+    @Override public int getVersion() { return 5; }
     @Override public String getDescription() {
         return "Кнопка для Gboard: клавиатура, голосовой ввод, буфер обмена, переводчик, выбор клавиатуры";
     }
@@ -122,6 +124,7 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
         loadConfig();
         last = clamp(st.getInt("last", F_KEYBOARD), 0, FUNCTIONS - 1);
         active = true;
+        repairServiceInfo();
         try {
             svc.getSoftKeyboardController().setShowMode(AccessibilityService.SHOW_MODE_AUTO);
             sizePx = dp(sizeDp);
@@ -199,6 +202,48 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
         onlyWhenInput = sp.getInt("visibility", 0) == 1;
         haptic = sp.getBoolean("haptic", true);
         menuTimeoutMs = clamp(sp.getInt("menu_timeout", 6), 2, 15) * 1000L;
+    }
+
+    /**
+     * Конфигурация службы (какие события присылать, можно ли читать окна) задана в accessibility_config.xml,
+     * но на устройстве она может оказаться битой: например, другой код хоста переписывает serviceInfo
+     * (перехват движений геймпада на Android 14+) и затирает типы событий или флаг окон — тогда служба жива,
+     * кнопка рисуется, а событий и окон приходит ноль. Проверяем и чиним прямо из модуля.
+     */
+    private void repairServiceInfo() {
+        try {
+            AccessibilityServiceInfo info = svc.getServiceInfo();
+            if (info == null) { infoProblem = "serviceInfo отсутствует"; return; }
+            int needFlags = AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+                    | AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
+                    | AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
+            int needCaps = AccessibilityServiceInfo.CAPABILITY_CAN_RETRIEVE_WINDOW_CONTENT
+                    | AccessibilityServiceInfo.CAPABILITY_CAN_PERFORM_GESTURES
+                    | AccessibilityServiceInfo.CAPABILITY_CAN_REQUEST_FILTER_KEY_EVENTS;
+            StringBuilder bad = new StringBuilder();
+            if (info.eventTypes != AccessibilityEvent.TYPES_ALL_MASK) bad.append("типы событий=").append(info.eventTypes).append("; ");
+            if ((info.flags & needFlags) != needFlags) bad.append("флаги=").append(info.flags).append("; ");
+            if ((info.getCapabilities() & needCaps) != needCaps) bad.append("возможности=").append(info.getCapabilities()).append("; ");
+            if (bad.length() == 0) { infoProblem = null; return; }
+            info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK;
+            info.flags |= needFlags;
+            info.setCapabilities(info.getCapabilities() | needCaps);
+            svc.setServiceInfo(info);
+            infoProblem = bad.toString().trim();
+        } catch (Throwable t) {
+            infoProblem = "ошибка проверки конфигурации: " + t;
+        }
+    }
+
+    private String serviceInfoText() {
+        try {
+            AccessibilityServiceInfo info = svc.getServiceInfo();
+            if (info == null) return "служба: конфигурации нет";
+            return "служба: типы событий=" + info.eventTypes + ", флаги=" + info.flags
+                    + ", возможности=" + info.getCapabilities();
+        } catch (Throwable t) {
+            return "служба: ошибка чтения конфигурации: " + t;
+        }
     }
 
     @Override
@@ -550,8 +595,12 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
 
     /** Отчёт о том, что модуль видит в окне с полем ввода: окна, активный корень, узлы, поля, события. */
     private String inputDiagText() {
-        StringBuilder sb = new StringBuilder("KeyboardButton v4, поле ввода:\n");
+        StringBuilder sb = new StringBuilder("KeyboardButton v5, поле ввода:\n");
         try {
+            repairServiceInfo();
+            sb.append(serviceInfoText()).append('\n');
+            if (infoProblem != null) sb.append("конфигурация службы была сломана (").append(infoProblem)
+                    .append(") — только что исправил, подожди 5 секунд и нажми проверку ещё раз\n");
             int app = 0, ime = 0, ovl = 0, other = 0;
             for (AccessibilityWindowInfo w : svc.getWindows()) {
                 int t = w.getType();
