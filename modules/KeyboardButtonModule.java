@@ -107,7 +107,7 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
     // ---------------------------------------------------------------- IPlugin
 
     @Override public String getName() { return "KeyboardButton"; }
-    @Override public int getVersion() { return 6; }
+    @Override public int getVersion() { return 7; }
     @Override public String getDescription() {
         return "Кнопка для Gboard: клавиатура, голосовой ввод, буфер обмена, переводчик, выбор клавиатуры";
     }
@@ -251,6 +251,39 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
                 return;
             } catch (Throwable ignored) { }
         }
+    }
+
+    /**
+     * Что реально стоит на телефоне: дата обновления APK хоста и конфиг службы доступности из самого APK.
+     * Если APK свежий, а конфига с canRetrieveWindowContent в нём нет — APK собран не из текущего репозитория;
+     * если конфиг есть, а возможности всё равно 0 — систему надо заставить перечитать манифест (службу перевключить).
+     */
+    private String hostApkText() {
+        StringBuilder sb = new StringBuilder("APK хоста: ");
+        try {
+            android.content.pm.PackageInfo pi = svc.getPackageManager().getPackageInfo(svc.getPackageName(), 0);
+            sb.append("обновлён ").append(new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.ROOT)
+                    .format(new java.util.Date(pi.lastUpdateTime))).append("; ");
+            android.content.ComponentName cn = new android.content.ComponentName(svc.getPackageName(), svc.getClass().getName());
+            android.content.pm.ServiceInfo si = svc.getPackageManager()
+                    .getServiceInfo(cn, android.content.pm.PackageManager.GET_META_DATA);
+            int res = si.metaData != null ? si.metaData.getInt("android.view.accessibilityservice") : 0;
+            if (res == 0) { sb.append("конфига службы в манифесте нет"); return sb.toString(); }
+            android.content.res.XmlResourceParser x = svc.getResources().getXml(res);
+            int ev;
+            while ((ev = x.getEventType()) != android.content.res.XmlResourceParser.END_DOCUMENT) {
+                if (ev == android.content.res.XmlResourceParser.START_TAG) {
+                    sb.append("конфиг: типы=").append(x.getAttributeValue(null, "accessibilityEventTypes"))
+                            .append(", флаги=").append(x.getAttributeValue(null, "accessibilityFlags"))
+                            .append(", окна=").append(x.getAttributeValue(null, "canRetrieveWindowContent"))
+                            .append(", жесты=").append(x.getAttributeValue(null, "canPerformGestures"));
+                    break;
+                }
+            }
+        } catch (Throwable t) {
+            sb.append("ошибка чтения: ").append(t);
+        }
+        return sb.toString();
     }
 
     private String serviceInfoText() {
@@ -613,10 +646,11 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
 
     /** Отчёт о том, что модуль видит в окне с полем ввода: окна, активный корень, узлы, поля, события. */
     private String inputDiagText() {
-        StringBuilder sb = new StringBuilder("KeyboardButton v6, поле ввода:\n");
+        StringBuilder sb = new StringBuilder("KeyboardButton v7, поле ввода:\n");
         try {
             repairServiceInfo();
             sb.append(serviceInfoText()).append('\n');
+            sb.append(hostApkText()).append('\n');
             if (capsBroken) sb.append("возможности службы = 0: чтение окон запрещено системой. Это задаётся только в APK хоста (accessibility_config.xml) и модулем не чинится — нужен свежий app-debug.apk из CI, после установки службу доступности перевключить\n");
             else if (infoProblem != null) sb.append("конфигурация службы была сломана (").append(infoProblem)
                     .append(") — только что исправил, подожди 5 секунд и нажми проверку ещё раз\n");
