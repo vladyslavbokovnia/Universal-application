@@ -227,11 +227,27 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
             if (bad.length() == 0) { infoProblem = null; return; }
             info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK;
             info.flags |= needFlags;
-            info.setCapabilities(info.getCapabilities() | needCaps);
+            setCapabilities(info, info.getCapabilities() | needCaps);
             svc.setServiceInfo(info);
             infoProblem = bad.toString().trim();
         } catch (Throwable t) {
             infoProblem = "ошибка проверки конфигурации: " + t;
+        }
+    }
+
+    /** setCapabilities в SDK, которым собирает CI, ещё нет (появился в API 33) — ставим рефлексией: метод или поле. */
+    private static void setCapabilities(AccessibilityServiceInfo info, int caps) {
+        try {
+            AccessibilityServiceInfo.class.getMethod("setCapabilities", int.class).invoke(info, Integer.valueOf(caps));
+            return;
+        } catch (Throwable ignored) { }
+        for (String name : new String[]{"capabilities", "mCapabilities"}) {
+            try {
+                java.lang.reflect.Field f = AccessibilityServiceInfo.class.getDeclaredField(name);
+                f.setAccessible(true);
+                f.setInt(info, caps);
+                return;
+            } catch (Throwable ignored) { }
         }
     }
 
