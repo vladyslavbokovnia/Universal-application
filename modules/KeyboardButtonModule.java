@@ -1,17 +1,21 @@
 package im.manus.plugins;
 
 import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.GestureDescription;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.DisplayMetrics;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
@@ -27,6 +31,7 @@ import im.manus.universalhost.IPlugin;
 import im.manus.universalhost.ISettingsProvider;
 import im.manus.universalhost.SettingItem;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -65,6 +70,8 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
     private static final long LONG_PRESS_MS = 450L;
     private static final long VISIBILITY_DEBOUNCE_MS = 200L;
     private static final int MAX_ATTEMPTS = 8;
+    private static final int MAX_NODES = 5000;          // потолок обхода дерева (веб-страницы очень глубокие и большие)
+    private static final long EVENT_HINT_MS = 4000L;    // сколько доверяем событию «фокус в поле ввода»
 
     // подписи значков (в нижнем регистре, часть слова); Gboard на разных языках и в разных версиях называет их по-разному
     private static final String[] VOICE_KEYS = {"голосов", "голос", "voice", "микрофон", "microphone", "диктов", "dictat"};
@@ -89,11 +96,12 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
     private long menuTimeoutMs = 6000L;
     private int last = F_KEYBOARD;
     private int sizePx;
+    private long inputEventAt;
 
     // ---------------------------------------------------------------- IPlugin
 
     @Override public String getName() { return "KeyboardButton"; }
-    @Override public int getVersion() { return 2; }
+    @Override public int getVersion() { return 3; }
     @Override public String getDescription() {
         return "Кнопка для Gboard: клавиатура, голосовой ввод, буфер обмена, переводчик, выбор клавиатуры";
     }
@@ -145,11 +153,20 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
     public void onAccessibilityEvent(AccessibilityEvent event, AccessibilityService service) {
         if (!active || !onlyWhenInput || event == null) return;
         int t = event.getEventType();
+        if (t == AccessibilityEvent.TYPE_VIEW_FOCUSED || t == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED
+                || t == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED) {
+            try {
+                AccessibilityNodeInfo src = event.getSource();      // само событие надёжнее поиска по дереву (особенно в WebView)
+                if (src != null && isInputNode(src)) inputEventAt = SystemClock.uptimeMillis();
+            } catch (Throwable ignored) { }
+        }
         if (t == AccessibilityEvent.TYPE_WINDOWS_CHANGED || t == AccessibilityEvent.TYPE_VIEW_FOCUSED
                 || t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
                 || t == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED) {
             main.removeCallbacks(visibilityTask);
             main.postDelayed(visibilityTask, VISIBILITY_DEBOUNCE_MS);
+            main.postDelayed(visibilityTask, 800L);                 // клавиатура появляется позже события — проверяем ещё раз
+            if (SystemClock.uptimeMillis() - inputEventAt < EVENT_HINT_MS) main.postDelayed(visibilityTask, EVENT_HINT_MS + 200L);
         }
     }
 
@@ -295,12 +312,61 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
 
     private boolean inputActive() {
         if (imeVisible()) return true;
+        if (SystemClock.uptimeMillis() - inputEventAt < EVENT_HINT_MS) return true;
+        return findInputField(true) != null;
+    }
+
+    /** Узел — поле ввода? В WebView у веб-полей бывает не isEditable, а класс EditText или inputType. */
+    private boolean isInputNode(AccessibilityNodeInfo n) {
         try {
-            AccessibilityNodeInfo root = svc.getRootInActiveWindow();
-            return root != null && root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) != null;
+            if (n.isEditable()) return true;
+            CharSequence cn = n.getClassName();
+            if (cn != null && cn.toString().contains("EditText")) return true;
+            return n.getInputType() != 0;
         } catch (Throwable t) {
             return false;
         }
+    }
+
+    /** Обход в ширину без рекурсии и без ограничения глубины (у веб-страниц она больше 40). */
+    private AccessibilityNodeInfo findInput(AccessibilityNodeInfo root, boolean focusedOnly) {
+        if (root == null) return null;
+        ArrayDeque<AccessibilityNodeInfo> q = new ArrayDeque<AccessibilityNodeInfo>();
+        q.add(root);
+        AccessibilityNodeInfo firstVisible = null;
+        int seen = 0;
+        while (!q.isEmpty() && seen < MAX_NODES) {
+            AccessibilityNodeInfo n = q.poll();
+            seen++;
+            if (isInputNode(n)) {
+                if (n.isFocused()) return n;
+                if (!focusedOnly && firstVisible == null && n.isVisibleToUser()) firstVisible = n;
+            }
+            int c = n.getChildCount();
+            for (int i = 0; i < c; i++) {
+                AccessibilityNodeInfo ch = n.getChild(i);
+                if (ch != null) q.add(ch);
+            }
+        }
+        return firstVisible;
+    }
+
+    /** Поле ввода: сначала активное окно, потом остальные окна приложений. focusedOnly — только сфокусированное. */
+    private AccessibilityNodeInfo findInputField(boolean focusedOnly) {
+        try {
+            AccessibilityNodeInfo root = svc.getRootInActiveWindow();
+            if (root != null) {
+                AccessibilityNodeInfo f = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+                if (f == null) f = findInput(root, focusedOnly);
+                if (f != null) return f;
+            }
+            for (AccessibilityWindowInfo w : svc.getWindows()) {
+                if (w.getType() != AccessibilityWindowInfo.TYPE_APPLICATION) continue;
+                AccessibilityNodeInfo f = findInput(w.getRoot(), focusedOnly);
+                if (f != null) return f;
+            }
+        } catch (Throwable ignored) { }
+        return null;
     }
 
     private AccessibilityNodeInfo imeRoot() {
@@ -346,27 +412,35 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
         return node != null && clickNode(node);
     }
 
-    private AccessibilityNodeInfo firstEditable(AccessibilityNodeInfo node, int depth) {
-        if (node == null || depth > 40) return null;
-        if (node.isVisibleToUser() && node.isEditable()) return node;
-        for (int i = 0; i < node.getChildCount(); i++) {
-            AccessibilityNodeInfo r = firstEditable(node.getChild(i), depth + 1);
-            if (r != null) return r;
-        }
-        return null;
+    /** Настоящее касание по центру узла: ACTION_CLICK на EditText/веб-поле часто не открывает клавиатуру. */
+    private void tapNode(AccessibilityNodeInfo node) {
+        try {
+            Rect r = new Rect();
+            node.getBoundsInScreen(r);
+            if (r.isEmpty()) return;
+            Path p = new Path();
+            p.moveTo(r.exactCenterX(), r.exactCenterY());
+            GestureDescription g = new GestureDescription.Builder()
+                    .addStroke(new GestureDescription.StrokeDescription(p, 0L, 50L)).build();
+            svc.dispatchGesture(g, null, null);
+        } catch (Throwable ignored) { }
     }
 
-    /** Показывает клавиатуру тапом по полю ввода: сфокусированному или первому видимому. */
+    /** Показывает клавиатуру: фокус на поле (сфокусированное или первое видимое), клик, а если не помогло — тап. */
     private boolean focusInputField() {
         try {
-            AccessibilityNodeInfo root = svc.getRootInActiveWindow();
-            if (root == null) return false;
-            AccessibilityNodeInfo field = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
-            if (field == null) {
-                field = firstEditable(root, 0);
-                if (field != null) field.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
-            }
-            return field != null && field.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+            AccessibilityNodeInfo field = findInputField(true);
+            if (field == null) field = findInputField(false);
+            if (field == null) return false;
+            final AccessibilityNodeInfo f = field;
+            f.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+            f.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+            main.postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (active && !imeVisible()) tapNode(f);
+                }
+            }, 250L);
+            return true;
         } catch (Throwable t) {
             return false;
         }
