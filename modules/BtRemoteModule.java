@@ -32,7 +32,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * (клавиши, клики и движения «мыши», колесо), даже если Android до службы специальных возможностей это не довёл.
  * Работает на любой версии Android, нужен только запущенный Shizuku с разрешением для хоста.
  *
- * Как назначить: в настройках модуля нажать нужную функцию, затем нажать кнопку на пульте. Кнопка запоминается.
+ * Как назначить: в настройках модуля удерживать нужную функцию, затем нажать кнопку на пульте. Кнопка запоминается.
  * Читать события — не значит их гасить: getevent ничего не перехватывает, поэтому родное действие пульта
  * (курсор, пролистывание в TikTok) никуда не девается.
  */
@@ -100,7 +100,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider {
     };
 
     @Override public String getName() { return NAME; }
-    @Override public int getVersion() { return 2; }
+    @Override public int getVersion() { return 3; }
     @Override public String getDescription() {
         return "Bluetooth-пульт через Shizuku: запись кнопок и назначение медиафункций";
     }
@@ -428,8 +428,16 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider {
         if (learn != null) {
             status = "⏺ Нажмите кнопку на пульте для: " + label(learn);
         } else {
-            status = "Shizuku: " + readerState + ". Назначено: " + bound.size() + " из " + FNS.length
-                    + (devs.length() > 0 ? ". Устройства: " + devs : "");
+            StringBuilder sb = new StringBuilder();
+            sb.append("Shizuku: ").append(readerState);
+            if (devs.length() > 0) sb.append("\nУстройства: ").append(devs);
+            sb.append("\nНазначено ").append(bound.size()).append(" из ").append(FNS.length);
+            for (String[] f : FNS) {
+                for (Map.Entry<String, String> e : bound.entrySet()) {
+                    if (f[0].equals(e.getValue())) sb.append("\n").append(f[1]).append(" ← ").append(describe(e.getKey()));
+                }
+            }
+            status = sb.toString();
         }
         m.put("values", buckets);
         m.put("value", last);
@@ -441,17 +449,16 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider {
 
     @Override
     public List<SettingItem> getSettingsSchema() {
-        SharedPreferences p = schemaPrefs();
         List<SettingItem> l = new ArrayList<SettingItem>();
         l.add(SettingItem.section("🎛 Пульт (нужен запущенный Shizuku)"));
         l.add(SettingItem.monitor("live", "📡 Что присылает пульт",
-                "Нажмите кнопку на пульте: последнее событие, активность за 30 секунд и найденные устройства"));
+                "Нажмите кнопку на пульте: последнее событие, активность за 30 секунд, устройства и текущие назначения"));
         l.add(SettingItem.action("restart", "🔄 Перезапустить чтение", "Если пульт переподключали или Shizuku запустили позже"));
-        l.add(SettingItem.section("🎯 Назначение: нажмите функцию, затем кнопку на пульте"));
+        l.add(SettingItem.section("🎯 Назначение: удерживайте функцию, затем нажмите кнопку на пульте"));
+        // Состояние в подписи не пишем: экран настроек её не обновляет, а озвучивает при каждом нажатии.
+        // Текущие назначения видны в мониторе вверху.
         for (String[] f : FNS) {
-            String sig = p == null ? null : p.getString("bind_" + f[0], null);
-            l.add(SettingItem.action("learn_" + f[0], f[1],
-                    sig == null ? "Не назначено" : "Сейчас: " + describe(sig)));
+            l.add(SettingItem.action("learn_" + f[0], f[1], "Удерживайте, затем нажмите кнопку на пульте"));
         }
         l.add(SettingItem.action("unbind_all", "🗑 Сбросить все назначения", "Пульт снова работает как обычно"));
         l.add(SettingItem.section("⚙ Параметры"));
@@ -484,20 +491,6 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider {
     }
 
     // ------------------------------------------------------------------ вспомогательное
-
-    /** Настройки для экрана: модуль может быть ещё не запущен, поэтому контекст берём у приложения. */
-    private SharedPreferences schemaPrefs() {
-        try {
-            Context c = ctx;
-            if (c == null) {
-                Class<?> at = Class.forName("android.app.ActivityThread");
-                c = (Context) at.getMethod("currentApplication").invoke(null);
-            }
-            return c == null ? null : c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        } catch (Throwable t) {
-            return null;
-        }
-    }
 
     private static String label(String fn) {
         for (String[] f : FNS) if (f[0].equals(fn)) return f[1];
