@@ -18,7 +18,9 @@ import im.manus.universalhost.ShizukuBridge;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -26,22 +28,28 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Bluetooth-пульт (например, для TikTok): записывает его кнопки и назначает на них медиафункции.
+ * Bluetooth-пульт (например, для TikTok): записывает его кнопки и назначает на них функции.
  *
  * Сигналы читаются напрямую из ядра: через Shizuku запускается «getevent -l», и модуль видит всё, что шлёт пульт
  * (клавиши, клики и движения «мыши», колесо), даже если Android до службы специальных возможностей это не довёл.
- * Работает на любой версии Android, нужен только запущенный Shizuku с разрешением для хоста.
+ * Работает на любой версии Android, в том числе с выключенным экраном; нужен запущенный Shizuku.
  *
- * Как назначить: в настройках модуля удерживать нужную функцию, затем нажать кнопку на пульте. Кнопка запоминается.
+ * На одну кнопку можно назначить три разные функции: одно нажатие, двойное и долгое. Функции бывают двух видов:
+ * системные медиакнопки и команды модуля «Аудиоплеер» (те же, что у геймпада: скорость, избранное, «назвать трек»).
+ *
+ * Как назначить: в настройках выбрать тип нажатия, удержать нужную функцию и сделать такое нажатие на пульте.
  * Читать события — не значит их гасить: getevent ничего не перехватывает, поэтому родное действие пульта
  * (курсор, пролистывание в TikTok) никуда не девается.
+ *
+ * Задержки: пока на кнопке нет двойного и долгого нажатий, одно нажатие срабатывает сразу. Если назначено долгое,
+ * одно нажатие срабатывает при отпускании; если назначено двойное, оно ждёт паузу двойного нажатия.
  */
 public class BtRemoteModule implements IPlugin, ISettingsProvider {
 
     private static final String NAME = "BtRemote";
     private static final String PREFS = "module_" + NAME;
 
-    /** id функции, подпись. */
+    /** id функции, подпись. Первые SYSTEM_COUNT — системные; "ap:<id>" — команда модуля «Аудиоплеер» (его doPerform). */
     private static final String[][] FNS = {
             {"play_pause", "⏯ Пауза / воспроизведение"},
             {"next", "⏭ Следующий трек"},
@@ -52,7 +60,32 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider {
             {"vol_down", "🔉 Громкость −"},
             {"mute", "🔇 Без звука (вкл/выкл)"},
             {"stop", "⏹ Стоп"},
+            {"ap:play_pause", "▶️ Плеер: пауза / пуск"},
+            {"ap:next", "➡️ Плеер: следующий трек"},
+            {"ap:prev", "⬅️ Плеер: предыдущий трек"},
+            {"ap:seek_back", "↩️ Плеер: назад на шаг"},
+            {"ap:seek_fwd", "↪️ Плеер: вперёд на шаг"},
+            {"ap:later", "🕓 Плеер: послушать позже"},
+            {"ap:fav", "⭐ Плеер: в избранное"},
+            {"ap:pl_switch", "🔀 Плеер: сменить список"},
+            {"ap:say", "🗣 Плеер: назвать трек"},
+            {"ap:say_pct", "📊 Плеер: сколько прослушано"},
+            {"ap:speed_up", "🐇 Плеер: быстрее"},
+            {"ap:speed_down", "🐢 Плеер: медленнее"},
+            {"ap:speed_reset", "🎚 Плеер: скорость 1×"},
+            {"ap:reverse", "🔃 Плеер: обратный порядок"},
+            {"ap:stop_after", "🛑 Плеер: стоп после трека"},
+            {"ap:lock", "🔒 Плеер: блок касаний"},
     };
+    private static final int SYSTEM_COUNT = 9;
+
+    /** Типы нажатия: S — одно, D — двойное, L — долгое. */
+    private static final String[] G = {"S", "D", "L"};
+    private static final String[] G_NAME = {"одно нажатие", "двойное нажатие", "долгое нажатие"};
+    private static final String[] G_MARK = {"1×", "2×", "⏱"};
+
+    /** Модуль «Аудиоплеер» кладёт свой работающий экземпляр в системные свойства JVM под этим ключом. */
+    private static final String PLAYER_LIVE_KEY = "manus.audioplayer.live";
 
     private static final long GESTURE_GAP_MS = 150;
     private static final long LEARN_TIMEOUT_MS = 20000;
@@ -61,9 +94,21 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider {
     private Handler main;
     private SharedPreferences prefs;
 
-    /** подпись кнопки -> id функции */
+    /** "<подпись кнопки>#<тип нажатия>" -> id функции */
     private final Map<String, String> bound = new ConcurrentHashMap<String, String>();
+
+    // назначение (всё, кроме запуска, — на главном потоке)
     private volatile String learnFn;
+    private volatile String learnG = "S";
+    private String learnTapSig;
+    private long learnTapAt;
+
+    /** Состояние одной кнопки для распознавания одно/двойное/долгое (главный поток). */
+    private static final class KeyState {
+        boolean down, longFired, suppress;
+        Runnable longTimer, tapTimer;
+    }
+    private final Map<String, KeyState> keyStates = new HashMap<String, KeyState>();
 
     // чтение getevent
     private volatile boolean alive;
@@ -100,9 +145,9 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider {
     };
 
     @Override public String getName() { return NAME; }
-    @Override public int getVersion() { return 3; }
+    @Override public int getVersion() { return 4; }
     @Override public String getDescription() {
-        return "Bluetooth-пульт через Shizuku: запись кнопок и назначение медиафункций";
+        return "Bluetooth-пульт через Shizuku: кнопки, двойное и долгое нажатие, медиа и команды плеера";
     }
     @Override public String getIconName() { return "ic_launcher"; }
 
@@ -122,10 +167,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider {
         alive = false;
         ShizukuBridge.removeReadyListener(readyCb);
         killProcess();
-        if (main != null) {
-            main.removeCallbacks(gestureEnd);
-            main.removeCallbacks(learnTimeout);
-        }
+        if (main != null) main.removeCallbacksAndMessages(null);    // таймеры нажатий и назначения этого модуля
         learnFn = null;
         ctx = null;
     }
@@ -211,7 +253,12 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider {
         }
     }
 
-    /** Разбор одной строки «getevent -l». */
+    private void postMain(Runnable r) {
+        Handler h = main;
+        if (h != null) h.post(r);
+    }
+
+    /** Разбор одной строки «getevent -l» (поток чтения). Логика нажатий уходит на главный поток. */
     private void handleLine(String line) {
         String s = line.trim();
         if (s.length() == 0) return;
@@ -249,11 +296,13 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider {
         if ("EV_KEY".equals(type)) {
             if ("BTN_TOUCH".equals(code) || code.startsWith("BTN_TOOL")) return;   // касания экрана
             markSeen(dev);
+            final String sig = "K|" + code + "|" + dev;
             if ("DOWN".equals(val)) {
-                trigger("K|" + code + "|" + dev);
+                postMain(new Runnable() { @Override public void run() { keyDown(sig); } });
+            } else if ("UP".equals(val)) {
+                postMain(new Runnable() { @Override public void run() { keyUp(sig); } });
             } else if ("REPEAT".equals(val)) {
-                String fn = bound.get("K|" + code + "|" + dev);      // удержание: только громкость
-                if ("vol_up".equals(fn) || "vol_down".equals(fn)) run(fn);
+                postMain(new Runnable() { @Override public void run() { keyRepeat(sig); } });
             }
         } else if ("EV_REL".equals(type)) {
             markSeen(dev);
@@ -261,11 +310,15 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider {
             if ("REL_X".equals(code) || "REL_Y".equals(code)) {
                 addRel(dev, "REL_X".equals(code), v);
             } else if ("REL_WHEEL".equals(code)) {
-                if (v != 0) trigger("R|WHEEL_" + (v > 0 ? "UP" : "DOWN") + "|" + dev);
+                if (v != 0) postTrigger("R|WHEEL_" + (v > 0 ? "UP" : "DOWN") + "|" + dev);
             } else if ("REL_HWHEEL".equals(code)) {
-                if (v != 0) trigger("R|HWHEEL_" + (v > 0 ? "RIGHT" : "LEFT") + "|" + dev);
+                if (v != 0) postTrigger("R|HWHEEL_" + (v > 0 ? "RIGHT" : "LEFT") + "|" + dev);
             }
         }
+    }
+
+    private void postTrigger(final String sig) {
+        postMain(new Runnable() { @Override public void run() { trigger(sig); } });
     }
 
     private static int parseHex(String h) {
@@ -282,7 +335,100 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider {
         }
     }
 
-    // ------------------------------------------------------------------ указка: рывки
+    // ------------------------------------------------------------------ кнопки: одно, двойное, долгое
+
+    private long longMs() { return prefs != null ? prefs.getInt("long_ms", 600) : 600; }
+    private long doubleMs() { return prefs != null ? prefs.getInt("double_ms", 350) : 350; }
+
+    private boolean has(String sig, String g) { return bound.containsKey(sig + "#" + g); }
+
+    private void fire(String sig, String g) {
+        String fn = bound.get(sig + "#" + g);
+        if (fn != null) run(fn);
+    }
+
+    private KeyState stateOf(String sig) {
+        KeyState st = keyStates.get(sig);
+        if (st == null) {
+            st = new KeyState();
+            keyStates.put(sig, st);
+        }
+        return st;
+    }
+
+    private void keyDown(final String sig) {
+        final KeyState st = stateOf(sig);
+        if (st.longTimer != null) { main.removeCallbacks(st.longTimer); st.longTimer = null; }
+        st.down = true;
+        st.longFired = false;
+        st.suppress = false;
+        note(sig);
+
+        String learn = learnFn;
+        if (learn != null) {
+            learnDown(learn, sig, st);
+            return;
+        }
+        boolean hasL = has(sig, "L"), hasD = has(sig, "D");
+        if (!hasL && !hasD) {                       // обычная кнопка: одно нажатие сразу, без задержки
+            fire(sig, "S");
+            return;
+        }
+        if (hasL) {
+            st.longTimer = new Runnable() {
+                @Override public void run() {
+                    st.longTimer = null;
+                    if (st.down) {
+                        st.longFired = true;
+                        fire(sig, "L");
+                    }
+                }
+            };
+            main.postDelayed(st.longTimer, longMs());
+        }
+    }
+
+    private void keyUp(final String sig) {
+        final KeyState st = stateOf(sig);
+        if (!st.down) return;
+        st.down = false;
+        if (st.longTimer != null) { main.removeCallbacks(st.longTimer); st.longTimer = null; }
+        if (st.suppress) { st.suppress = false; return; }        // нажатие уже ушло в назначение
+        if (st.longFired) { st.longFired = false; return; }
+
+        if (learnFn != null) {
+            learnUp(learnFn, sig);
+            return;
+        }
+        boolean hasL = has(sig, "L"), hasD = has(sig, "D");
+        if (!hasL && !hasD) return;                  // одно нажатие уже сработало при нажатии
+        if (hasD) {
+            if (st.tapTimer != null) {               // второе нажатие в пределах паузы — двойное
+                main.removeCallbacks(st.tapTimer);
+                st.tapTimer = null;
+                fire(sig, "D");
+            } else {
+                st.tapTimer = new Runnable() {
+                    @Override public void run() {
+                        st.tapTimer = null;
+                        fire(sig, "S");
+                    }
+                };
+                main.postDelayed(st.tapTimer, doubleMs());
+            }
+        } else {
+            fire(sig, "S");
+        }
+    }
+
+    /** Удержание кнопки с автоповтором: повторяем только громкость, и только когда у кнопки нет долгого и двойного. */
+    private void keyRepeat(String sig) {
+        if (learnFn != null || has(sig, "L") || has(sig, "D")) return;
+        String fn = bound.get(sig + "#S");
+        if ("vol_up".equals(fn) || "vol_down".equals(fn)) run(fn);
+    }
+
+    // ------------------------------------------------------------------ указка: рывки и колесо
 
     private void addRel(String dev, boolean isX, int v) {
         synchronized (lock) {
@@ -295,7 +441,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider {
         }
     }
 
-    /** Пауза в движении указки: решаем, был ли это заметный рывок, и в какую сторону. */
+    /** Пауза в движении указки: решаем, был ли это заметный рывок, и в какую сторону (главный поток). */
     private void finishGesture() {
         float dx, dy;
         String dev;
@@ -319,54 +465,108 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider {
         }
     }
 
-    /** Общий вход: запись кнопки, если ждём её, иначе выполнение назначенной функции. */
+    /** Мгновенные сигналы без отпускания (рывок указки, колесо): только одно нажатие. */
     private void trigger(String sig) {
         note(sig);
         String learn = learnFn;
         if (learn != null) {
-            finishLearn(learn, sig);
+            if ("S".equals(learnG)) finishLearn(learn, sig, "S");   // двойное и долгое ждут именно кнопку
             return;
         }
-        String fn = bound.get(sig);
-        if (fn != null) run(fn);
+        fire(sig, "S");
     }
 
     // ------------------------------------------------------------------ назначение
 
+    private int gestureIndex() {
+        int gi = prefs != null ? prefs.getInt("gesture", 0) : 0;
+        return gi < 0 || gi >= G.length ? 0 : gi;
+    }
+
+    private static String learnHint(String g) {
+        if ("D".equals(g)) return "Дважды нажмите кнопку на пульте";
+        if ("L".equals(g)) return "Нажмите кнопку на пульте и держите";
+        return "Нажмите кнопку на пульте";
+    }
+
     private void startLearn(String fn) {
         if (label(fn) == null || main == null) return;
+        learnG = G[gestureIndex()];
+        learnTapSig = null;
         learnFn = fn;
         main.removeCallbacks(learnTimeout);
         main.postDelayed(learnTimeout, LEARN_TIMEOUT_MS);
-        toast("Нажмите кнопку на пульте для: " + label(fn) + " (20 с)");
+        toast(learnHint(learnG) + " для: " + label(fn) + " (20 с)");
     }
 
-    private void finishLearn(String fn, String sig) {
+    /** Кнопка нажата, пока ждём назначения. */
+    private void learnDown(final String fn, final String sig, final KeyState st) {
+        if ("S".equals(learnG)) {
+            finishLearn(fn, sig, "S");
+            st.suppress = true;
+        } else if ("L".equals(learnG)) {
+            st.longTimer = new Runnable() {
+                @Override public void run() {
+                    st.longTimer = null;
+                    if (st.down && fn.equals(learnFn)) {
+                        finishLearn(fn, sig, "L");
+                        st.suppress = true;
+                    }
+                }
+            };
+            main.postDelayed(st.longTimer, longMs());
+        }
+    }
+
+    /** Кнопка отпущена, пока ждём назначения: для двойного нажатия сравниваем паузу между отпусканиями. */
+    private void learnUp(String fn, String sig) {
+        if (!"D".equals(learnG)) return;
+        long now = SystemClock.uptimeMillis();
+        if (sig.equals(learnTapSig) && now - learnTapAt <= doubleMs()) {
+            finishLearn(fn, sig, "D");
+        } else {
+            learnTapSig = sig;
+            learnTapAt = now;
+        }
+    }
+
+    private static String bindKey(String fn, String g) {
+        return ("S".equals(g) ? "bind_" : "bind" + g + "_") + fn;
+    }
+
+    private void finishLearn(String fn, String sig, String g) {
         learnFn = null;
+        learnTapSig = null;
         if (main != null) main.removeCallbacks(learnTimeout);
         SharedPreferences.Editor ed = prefs.edit();
         for (String[] f : FNS) {
-            if (sig.equals(prefs.getString("bind_" + f[0], null))) ed.remove("bind_" + f[0]);   // одна кнопка — одна функция
+            if (sig.equals(prefs.getString(bindKey(f[0], g), null))) ed.remove(bindKey(f[0], g));   // одна кнопка и тип нажатия — одна функция
         }
-        ed.putString("bind_" + fn, sig);
+        ed.putString(bindKey(fn, g), sig);
         ed.apply();
         loadBindings();
-        toast("Назначено: " + label(fn) + " ← " + describe(sig));
+        toast("Назначено (" + G_NAME[Arrays.asList(G).indexOf(g)] + "): " + label(fn) + " ← " + describe(sig));
     }
 
     private void loadBindings() {
         bound.clear();
         for (String[] f : FNS) {
-            String sig = prefs.getString("bind_" + f[0], null);
-            if (sig != null) bound.put(sig, f[0]);
+            for (String g : G) {
+                String sig = prefs.getString(bindKey(f[0], g), null);
+                if (sig != null) bound.put(sig + "#" + g, f[0]);
+            }
         }
     }
 
-    // ------------------------------------------------------------------ медиафункции
+    // ------------------------------------------------------------------ функции
 
     private void run(String fn) {
         Context c = ctx;
         if (c == null || fn == null) return;
+        if (fn.startsWith("ap:")) {
+            runPlayer(fn.substring(3));
+            return;
+        }
         AudioManager am = (AudioManager) c.getSystemService(Context.AUDIO_SERVICE);
         if (am == null) return;
         try {
@@ -391,6 +591,26 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider {
         long t = SystemClock.uptimeMillis();
         am.dispatchMediaKeyEvent(new KeyEvent(t, t, KeyEvent.ACTION_DOWN, code, 0));
         am.dispatchMediaKeyEvent(new KeyEvent(t, t, KeyEvent.ACTION_UP, code, 0));
+    }
+
+    /**
+     * Команда модуля «Аудиоплеер»: тот же doPerform(id), что вызывается нажатием кнопки геймпада. Экземпляр плеера
+     * лежит в системных свойствах JVM, метод закрытый, поэтому вызов через рефлексию. Плеер должен быть включён.
+     */
+    private void runPlayer(String id) {
+        try {
+            Object ap = System.getProperties().get(PLAYER_LIVE_KEY);
+            if (ap == null) {
+                toast("Аудиоплеер не запущен");
+                return;
+            }
+            Method m = ap.getClass().getDeclaredMethod("doPerform", String.class);
+            m.setAccessible(true);
+            m.invoke(ap, id);
+        } catch (Throwable t) {
+            t.printStackTrace();
+            toast("Не удалось вызвать команду плеера");
+        }
     }
 
     // ------------------------------------------------------------------ монитор
@@ -426,15 +646,21 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider {
         String learn = learnFn;
         String status;
         if (learn != null) {
-            status = "⏺ Нажмите кнопку на пульте для: " + label(learn);
+            status = "⏺ " + learnHint(learnG) + " для: " + label(learn);
         } else {
             StringBuilder sb = new StringBuilder();
             sb.append("Shizuku: ").append(readerState);
             if (devs.length() > 0) sb.append("\nУстройства: ").append(devs);
-            sb.append("\nНазначено ").append(bound.size()).append(" из ").append(FNS.length);
+            sb.append("\nНазначено: ").append(bound.size());
             for (String[] f : FNS) {
-                for (Map.Entry<String, String> e : bound.entrySet()) {
-                    if (f[0].equals(e.getValue())) sb.append("\n").append(f[1]).append(" ← ").append(describe(e.getKey()));
+                for (int gi = 0; gi < G.length; gi++) {
+                    for (Map.Entry<String, String> e : bound.entrySet()) {
+                        String k = e.getKey();
+                        if (f[0].equals(e.getValue()) && k.endsWith("#" + G[gi])) {
+                            sb.append("\n").append(G_MARK[gi]).append(" ").append(f[1])
+                                    .append(" ← ").append(describe(k.substring(0, k.length() - 2)));
+                        }
+                    }
                 }
             }
             status = sb.toString();
@@ -454,14 +680,26 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider {
         l.add(SettingItem.monitor("live", "📡 Что присылает пульт",
                 "Нажмите кнопку на пульте: последнее событие, активность за 30 секунд, устройства и текущие назначения"));
         l.add(SettingItem.action("restart", "🔄 Перезапустить чтение", "Если пульт переподключали или Shizuku запустили позже"));
-        l.add(SettingItem.section("🎯 Назначение: удерживайте функцию, затем нажмите кнопку на пульте"));
+        l.add(SettingItem.section("👆 Какое нажатие назначать"));
+        l.add(SettingItem.choice("gesture", "👆 Тип нажатия",
+                "Выбранный тип назначается на функцию, которую вы удержите ниже",
+                Arrays.asList("1× Одно нажатие", "2× Двойное нажатие", "⏱ Долгое нажатие"), 0));
+        l.add(SettingItem.section("🎯 Системные медиафункции: удерживайте функцию, затем нажмите кнопку на пульте"));
         // Состояние в подписи не пишем: экран настроек её не обновляет, а озвучивает при каждом нажатии.
         // Текущие назначения видны в мониторе вверху.
-        for (String[] f : FNS) {
-            l.add(SettingItem.action("learn_" + f[0], f[1], "Удерживайте, затем нажмите кнопку на пульте"));
+        for (int i = 0; i < SYSTEM_COUNT; i++) {
+            l.add(SettingItem.action("learn_" + FNS[i][0], FNS[i][1], "Удерживайте, затем нажмите кнопку на пульте"));
+        }
+        l.add(SettingItem.section("🎧 Команды плеера (модуль «Аудиоплеер» должен быть включён)"));
+        for (int i = SYSTEM_COUNT; i < FNS.length; i++) {
+            l.add(SettingItem.action("learn_" + FNS[i][0], FNS[i][1], "Удерживайте, затем нажмите кнопку на пульте"));
         }
         l.add(SettingItem.action("unbind_all", "🗑 Сбросить все назначения", "Пульт снова работает как обычно"));
         l.add(SettingItem.section("⚙ Параметры"));
+        l.add(SettingItem.slider("long_ms", "⏱ Долгое нажатие, мс",
+                "Сколько держать кнопку, чтобы нажатие считалось долгим", 300, 1500, 50, 600));
+        l.add(SettingItem.slider("double_ms", "⚡ Пауза двойного нажатия, мс",
+                "Максимальная пауза между двумя нажатиями; чем больше, тем позже сработает одиночное", 150, 800, 25, 350));
         l.add(SettingItem.slider("swipe_min", "📏 Минимальный рывок указки",
                 "Сколько единиц должна пройти указка пульта, чтобы считаться кнопкой", 2, 500, 2, 20));
         return l;
@@ -474,7 +712,9 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider {
             startLearn(key.substring(6));
         } else if ("unbind_all".equals(key)) {
             SharedPreferences.Editor ed = prefs.edit();
-            for (String[] f : FNS) ed.remove("bind_" + f[0]);
+            for (String[] f : FNS) {
+                for (String g : G) ed.remove(bindKey(f[0], g));
+            }
             ed.apply();
             loadBindings();
             toast("Все назначения сброшены");
