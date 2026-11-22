@@ -2,6 +2,8 @@ package im.manus.plugins;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
@@ -97,11 +99,12 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
     private int last = F_KEYBOARD;
     private int sizePx;
     private long inputEventAt;
+    private int evTotal, evInput;           // счётчики для проверки «Что видит модуль в поле ввода»
 
     // ---------------------------------------------------------------- IPlugin
 
     @Override public String getName() { return "KeyboardButton"; }
-    @Override public int getVersion() { return 3; }
+    @Override public int getVersion() { return 4; }
     @Override public String getDescription() {
         return "Кнопка для Gboard: клавиатура, голосовой ввод, буфер обмена, переводчик, выбор клавиатуры";
     }
@@ -151,13 +154,15 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event, AccessibilityService service) {
-        if (!active || !onlyWhenInput || event == null) return;
+        if (!active || event == null) return;
+        evTotal++;
+        if (!onlyWhenInput) return;
         int t = event.getEventType();
         if (t == AccessibilityEvent.TYPE_VIEW_FOCUSED || t == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED
                 || t == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED) {
             try {
                 AccessibilityNodeInfo src = event.getSource();      // само событие надёжнее поиска по дереву (особенно в WebView)
-                if (src != null && isInputNode(src)) inputEventAt = SystemClock.uptimeMillis();
+                if (src != null && isInputNode(src)) { inputEventAt = SystemClock.uptimeMillis(); evInput++; }
             } catch (Throwable ignored) { }
         }
         if (t == AccessibilityEvent.TYPE_WINDOWS_CHANGED || t == AccessibilityEvent.TYPE_VIEW_FOCUSED
@@ -208,6 +213,7 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
         l.add(SettingItem.slider("menu_timeout", "⏱ Автозакрытие меню, сек", "", 2, 15, 1, 6));
         l.add(SettingItem.section("🧪 Проверка"));
         l.add(SettingItem.action("diag", "🔍 Какие значки видит модуль", "Подписи кнопок в окне клавиатуры; открой клавиатуру и нажми"));
+        l.add(SettingItem.action("diag_input", "🔎 Что видит модуль в поле ввода", "Нажми, открой браузер и поставь курсор в поле; через 8 секунд отчёт появится и скопируется в буфер"));
         l.add(SettingItem.action("reset_pos", "↩ Вернуть кнопку на место", ""));
         return l;
     }
@@ -216,6 +222,18 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
     public void onSettingChanged(String key) {
         if (svc == null || !active) return;
         if ("diag".equals(key)) { toast(diagText()); return; }
+        if ("diag_input".equals(key)) {
+            toast("KeyboardButton: открой браузер и поставь курсор в поле ввода — проверю через 8 секунд");
+            main.postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (!active || svc == null) return;
+                    String report = inputDiagText();
+                    copyToClipboard(report);
+                    toast(report + "\n(скопировано в буфер обмена)");
+                }
+            }, 8000L);
+            return;
+        }
         if ("reset_pos".equals(key)) {
             st.edit().remove("posX").remove("posY").apply();
             hideButton();
@@ -520,6 +538,72 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
         if (names.isEmpty()) return "KeyboardButton: в окне клавиатуры нет подписанных кнопок";
         StringBuilder sb = new StringBuilder("Значки клавиатуры (" + names.size() + "):\n");
         for (int i = 0; i < names.size() && i < 30; i++) sb.append(names.get(i)).append(i + 1 < names.size() ? " | " : "");
+        return sb.toString();
+    }
+
+    private void copyToClipboard(String text) {
+        try {
+            ClipboardManager cm = (ClipboardManager) svc.getSystemService(Context.CLIPBOARD_SERVICE);
+            cm.setPrimaryClip(ClipData.newPlainText("KeyboardButton", text));
+        } catch (Throwable ignored) { }
+    }
+
+    /** Отчёт о том, что модуль видит в окне с полем ввода: окна, активный корень, узлы, поля, события. */
+    private String inputDiagText() {
+        StringBuilder sb = new StringBuilder("KeyboardButton v4, поле ввода:\n");
+        try {
+            int app = 0, ime = 0, ovl = 0, other = 0;
+            for (AccessibilityWindowInfo w : svc.getWindows()) {
+                int t = w.getType();
+                if (t == AccessibilityWindowInfo.TYPE_APPLICATION) app++;
+                else if (t == AccessibilityWindowInfo.TYPE_INPUT_METHOD) ime++;
+                else if (t == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) ovl++;
+                else other++;
+            }
+            sb.append("окна: приложений ").append(app).append(", клавиатура ").append(ime)
+                    .append(", оверлеи ").append(ovl).append(", другие ").append(other).append('\n');
+            sb.append("события: всего ").append(evTotal).append(", из полей ввода ").append(evInput)
+                    .append(", режим «только с полем» ").append(onlyWhenInput ? "да" : "нет").append('\n');
+            AccessibilityNodeInfo root = svc.getRootInActiveWindow();
+            if (root == null) { sb.append("активное окно: корня нет"); return sb.toString(); }
+            sb.append("активное окно: ").append(root.getPackageName()).append('\n');
+            AccessibilityNodeInfo fi = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+            sb.append("FOCUS_INPUT: ").append(fi == null ? "нет" : "есть, " + fi.getClassName()).append('\n');
+            ArrayDeque<AccessibilityNodeInfo> q = new ArrayDeque<AccessibilityNodeInfo>();
+            ArrayDeque<Integer> qd = new ArrayDeque<Integer>();
+            q.add(root);
+            qd.add(Integer.valueOf(0));
+            int seen = 0, maxDepth = 0, inputs = 0, focused = 0, web = 0;
+            String first = "";
+            while (!q.isEmpty() && seen < 8000) {
+                AccessibilityNodeInfo n = q.poll();
+                int d = qd.poll().intValue();
+                seen++;
+                if (d > maxDepth) maxDepth = d;
+                CharSequence cn = n.getClassName();
+                if (cn != null && cn.toString().contains("WebView")) web++;
+                if (isInputNode(n)) {
+                    inputs++;
+                    if (n.isFocused()) focused++;
+                    if (first.length() == 0) {
+                        first = cn + (n.isEditable() ? ", editable" : "") + (n.isFocused() ? ", в фокусе" : "")
+                                + (n.isVisibleToUser() ? ", видим" : ", не видим") + ", глубина " + d;
+                    }
+                }
+                int c = n.getChildCount();
+                for (int i = 0; i < c; i++) {
+                    AccessibilityNodeInfo ch = n.getChild(i);
+                    if (ch != null) { q.add(ch); qd.add(Integer.valueOf(d + 1)); }
+                }
+            }
+            sb.append("узлов ").append(seen).append(q.isEmpty() ? "" : "+ (обход оборван)")
+                    .append(", глубина ").append(maxDepth).append(", WebView ").append(web).append('\n');
+            sb.append("полей ввода ").append(inputs).append(", в фокусе ").append(focused);
+            if (first.length() > 0) sb.append("\nпервое: ").append(first);
+            sb.append("\nклавиатура видна: ").append(imeVisible() ? "да" : "нет");
+        } catch (Throwable t) {
+            sb.append("ошибка: ").append(t);
+        }
         return sb.toString();
     }
 
