@@ -4,18 +4,18 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.widget.FrameLayout
-import android.widget.LinearLayout
 import android.widget.ScrollView
 
 /**
  * Главное окно модуля (PWA-стиль): отдельная карточка в недавних со значком и именем модуля, внутри только
  * вид модуля (IMainViewProvider): сетка списка загрузок или сетка треков плеера. Настройки открываются
- * шестерёнкой сверху. Окно записывается в реестр ModuleWindows, поэтому его видит и модуль «Недавние».
+ * шестерёнкой в нижнем углу поверх списка. Окно записывается в реестр ModuleWindows, поэтому его видит и модуль «Недавние».
  */
 class ModuleViewActivity : Activity() {
 
@@ -59,20 +59,32 @@ class ModuleViewActivity : Activity() {
         }
 
         val d = resources.displayMetrics.density
-        val root = LinearLayout(this)
-        root.orientation = LinearLayout.VERTICAL
+        val root = FrameLayout(this)
         root.setBackgroundColor(Color.BLACK)
 
-        val bar = FrameLayout(this)
-        val gear = GlyphView(this, GlyphView.GEAR)
-        gear.alpha = 0.6f
+        // список на всё окно; шестерёнка не занимает полосу сверху, а лежит в нижнем углу поверх списка
+        val body: View = if (view is ScrollView) view else ScrollView(this).apply { addView(view) }
+        (body as ScrollView).apply {
+            clipToPadding = false
+            setPadding(paddingLeft, paddingTop, paddingRight, paddingBottom + (72 * d).toInt())   // последняя плитка не под кнопкой
+        }
+        root.addView(body, FrameLayout.LayoutParams(-1, -1))
+
+        val gear = FrameLayout(this)
+        val ring = GradientDrawable()
+        ring.shape = GradientDrawable.OVAL
+        ring.setColor(0xCC000000.toInt())
+        ring.setStroke((1 * d).toInt().coerceAtLeast(1), Color.WHITE)
+        gear.background = ring
         gear.contentDescription = "Настройки модуля"
         gear.setOnClickListener { openSettings() }
-        bar.addView(gear, FrameLayout.LayoutParams((56 * d).toInt(), (56 * d).toInt(), Gravity.END or Gravity.CENTER_VERTICAL))
-        root.addView(bar, LinearLayout.LayoutParams(-1, (56 * d).toInt()))
-
-        val body: View = if (view is ScrollView) view else ScrollView(this).apply { addView(view) }
-        root.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
+        val glyph = GlyphView(this, GlyphView.GEAR)
+        glyph.alpha = 0.85f
+        gear.addView(glyph, FrameLayout.LayoutParams(-1, -1))
+        gear.setPadding((8 * d).toInt(), (8 * d).toInt(), (8 * d).toInt(), (8 * d).toInt())
+        root.addView(gear, FrameLayout.LayoutParams((52 * d).toInt(), (52 * d).toInt(), Gravity.BOTTOM or Gravity.END).apply {
+            setMargins(0, 0, (16 * d).toInt(), (16 * d).toInt())
+        })
         setContentView(root)
     }
 

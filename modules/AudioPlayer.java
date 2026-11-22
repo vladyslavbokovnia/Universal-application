@@ -417,6 +417,70 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
     }
 
+    /** Тонкая полоска прогресса на нижнем краю плитки; перерисовывается, только когда сместилась хотя бы на пиксель (e-ink). */
+    private static class PBar extends View {
+        private final android.graphics.Paint bgPaint = new android.graphics.Paint();
+        private final android.graphics.Paint fgPaint = new android.graphics.Paint();
+        private float frac = -1f;
+        private int shownPx = -1;
+
+        PBar(Context c) {
+            super(c);
+            bgPaint.setColor(0xB0000000);
+            fgPaint.setColor(0xFFFFFFFF);
+            setVisibility(View.GONE);
+        }
+
+        /** 0..1: показать полоску с этой долей; отрицательное число: спрятать. */
+        void setFraction(float f) {
+            if (f < 0f) {
+                frac = -1f;
+                shownPx = -1;
+                if (getVisibility() != View.GONE) setVisibility(View.GONE);
+                return;
+            }
+            frac = Math.min(1f, f);
+            if (getVisibility() != View.VISIBLE) setVisibility(View.VISIBLE);
+            int px = Math.round(frac * getWidth());
+            if (px != shownPx) {
+                shownPx = px;
+                invalidate();
+            }
+        }
+
+        @Override protected void onDraw(android.graphics.Canvas c) {
+            int w = getWidth();
+            int hgt = getHeight();
+            c.drawRect(0f, 0f, w, hgt, bgPaint);
+            if (frac > 0f) c.drawRect(0f, 0f, w * frac, hgt, fgPaint);
+        }
+    }
+
+    /** Играет ли то, что сейчас открыто: видео в окне, иначе свой аудиоплеер. */
+    private boolean ownPlaying() {
+        try {
+            android.widget.VideoView vv = videoVv;
+            if (vv != null) return vv.isPlaying();
+        } catch (Throwable t) { }
+        return isPlaying();
+    }
+
+    /** Доля прослушанного именно своего текущего трека (видео или аудио) для полоски на плитке; -1: неизвестно. */
+    private float ownFraction() {
+        try {
+            android.widget.VideoView vv = videoVv;
+            if (vv != null) {
+                int dur = vv.getDuration();
+                return dur > 0 ? Math.max(0f, Math.min(1f, vv.getCurrentPosition() / (float) dur)) : -1f;
+            }
+            if (mp != null && prepared) {
+                int dur = mp.getDuration();
+                if (dur > 0) return Math.max(0f, Math.min(1f, mp.getCurrentPosition() / (float) dur));
+            }
+        } catch (Throwable t) { }
+        return -1f;
+    }
+
     // ---------------------------------------------------------- автоудаление прослушанного
 
     /** Настройка «Удалять прослушанное»: трек доигран сам, началось следующее, через несколько секунд доигранный удаляется. */
@@ -1714,14 +1778,87 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     public void askDelete(final Context actCtx, final int i) {
         if (i < 0 || i >= tracks.size()) return;
         final Track t = tracks.get(i);
-        new AlertDialog.Builder(actCtx)
-                .setTitle("Удалить песню?")
-                .setMessage(t.title + "\nФайл будет удалён с устройства.")
-                .setPositiveButton("Удалить", new DialogInterface.OnClickListener() {
-                    @Override public void onClick(DialogInterface d, int w) { deleteTrack(i); }
-                })
-                .setNegativeButton("Отмена", null)
-                .show();
+        ViewGroup host = null;
+        if (actCtx instanceof Activity) {
+            try { host = (ViewGroup) ((Activity) actCtx).findViewById(android.R.id.content); } catch (Throwable e) { }
+        }
+        if (host == null) {
+            toast("Не удалось показать подтверждение");
+            return;
+        }
+        // Не системное окно: на этом телефоне в нём белый шрифт на белом фоне. Панель рисуется внутри окна плеера.
+        final ViewGroup fHost = host;
+        final FrameLayout scrim = new FrameLayout(actCtx);
+        scrim.setBackgroundColor(0xCC000000);
+        scrim.setClickable(true);
+        final Runnable close = new Runnable() {
+            @Override public void run() { fHost.removeView(scrim); }
+        };
+        scrim.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { close.run(); }
+        });
+        scrim.setFocusableInTouchMode(true);
+        scrim.setOnKeyListener(new View.OnKeyListener() {
+            @Override public boolean onKey(View v, int keyCode, KeyEvent ev) {
+                if (keyCode == KeyEvent.KEYCODE_BACK && ev.getAction() == KeyEvent.ACTION_UP) { close.run(); return true; }
+                return keyCode == KeyEvent.KEYCODE_BACK;
+            }
+        });
+        LinearLayout box = new LinearLayout(actCtx);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setClickable(true);
+        box.setPadding(dp(actCtx, 20), dp(actCtx, 18), dp(actCtx, 20), dp(actCtx, 18));
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setColor(0xFF111111);
+        bg.setStroke(dp(actCtx, 1), 0xFFFFFFFF);
+        bg.setCornerRadius(dp(actCtx, 12));
+        box.setBackground(bg);
+        TextView q = new TextView(actCtx);
+        q.setText("🗑 Удалить песню?");
+        q.setTextSize(20);
+        q.setTextColor(0xFFFFFFFF);
+        box.addView(q);
+        TextView nm = new TextView(actCtx);
+        nm.setText(t.title + "\nФайл будет удалён с устройства.");
+        nm.setTextSize(15);
+        nm.setTextColor(0xFFCCCCCC);
+        nm.setPadding(0, dp(actCtx, 8), 0, dp(actCtx, 16));
+        box.addView(nm);
+        LinearLayout row = new LinearLayout(actCtx);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        String[] labels = {"✕ Отмена", "🗑 Удалить"};
+        for (int k = 0; k < 2; k++) {
+            final boolean del = k == 1;
+            TextView b = new TextView(actCtx);
+            b.setText(labels[k]);
+            b.setTextSize(18);
+            b.setTextColor(0xFFFFFFFF);
+            b.setGravity(Gravity.CENTER);
+            b.setPadding(dp(actCtx, 12), dp(actCtx, 14), dp(actCtx, 12), dp(actCtx, 14));
+            android.graphics.drawable.GradientDrawable bb = new android.graphics.drawable.GradientDrawable();
+            bb.setColor(del ? 0xFF333333 : 0x00000000);
+            bb.setStroke(dp(actCtx, 1), 0xFFFFFFFF);
+            bb.setCornerRadius(dp(actCtx, 8));
+            b.setBackground(bb);
+            b.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    close.run();
+                    if (del) deleteTrack(i);
+                }
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            if (k == 0) lp.rightMargin = dp(actCtx, 8);
+            row.addView(b, lp);
+        }
+        box.addView(row);
+        FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER);
+        blp.leftMargin = dp(actCtx, 24);
+        blp.rightMargin = dp(actCtx, 24);
+        scrim.addView(box, blp);
+        fHost.addView(scrim, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        scrim.requestFocus();
     }
 
     private void deleteTrack(int i) {
@@ -3310,6 +3447,41 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         private final List<Integer> rowIdx = new ArrayList<Integer>();   // номер песни в tracks для каждой строки
         private int markedCur = -2;
 
+        /** Плитка, на которой может появиться значок ▶/⏸ и полоска прогресса (если её трек сейчас текущий). */
+        private final class Live {
+            final Track tr;
+            final TextView mark;
+            final PBar bar;
+            Live(Track tr, TextView mark, PBar bar) { this.tr = tr; this.mark = mark; this.bar = bar; }
+        }
+        private final List<Live> live = new ArrayList<Live>();
+        private final Runnable liveTick = new Runnable() {
+            @Override public void run() {
+                syncLive();
+                if (isAttachedToWindow()) postDelayed(this, 1000);
+            }
+        };
+
+        /**
+         * У плитки текущего трека: значок ▶ (играет) или ⏸ (пауза) и полоска прогресса поверх картинки.
+         * У остальных плиток оба скрыты. Вызывается раз в секунду и после смены состояния; перерисовывается
+         * только то, что изменилось.
+         */
+        void syncLive() {
+            Track ct = (cur >= 0 && cur < tracks.size()) ? tracks.get(cur) : null;
+            boolean playing = ct != null && ownPlaying();
+            float f = ct != null ? ownFraction() : -1f;
+            String glyph = playing ? "▶" : "⏸";
+            for (int k = 0; k < live.size(); k++) {
+                Live l = live.get(k);
+                boolean mine = ct != null && l.tr != null && (l.tr == ct || (l.tr.id >= 0 && l.tr.id == ct.id));
+                int vis = mine ? View.VISIBLE : View.GONE;
+                if (l.mark.getVisibility() != vis) l.mark.setVisibility(vis);
+                if (mine && !glyph.contentEquals(l.mark.getText())) l.mark.setText(glyph);
+                l.bar.setFraction(mine ? f : -1f);
+            }
+        }
+
         PlayerView(Context ctx) {
             super(ctx);
             body = new LinearLayout(ctx);
@@ -3463,6 +3635,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             ensureObserver();
             reloadIfChanged();                       // песни могли появиться, пока окно было закрыто
             refresh();
+            removeCallbacks(liveTick);
+            post(liveTick);
             // при открытии активная песня выводится в окно (один раз, без перерисовок потом)
             postDelayed(new Runnable() {
                 @Override public void run() {
@@ -3479,6 +3653,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         }
 
         @Override protected void onDetachedFromWindow() {
+            removeCallbacks(liveTick);
             if (boundView == this) boundView = null;
             updateFocusCatcher();
             if (shieldParent != null) unlockTouch();
@@ -3606,6 +3781,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             if (bAll != null) updateListButtons();
             if (bRev != null) bRev.setText(reverseOn() ? "🔃 ●" : "🔃");
             if (cur != markedCur) markCurrent(true);
+            syncLive();
         }
 
         /** Полное обновление: шапка + список песен. */
@@ -3692,6 +3868,11 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                     Gravity.TOP | Gravity.START));
             if (markOut != null) markOut[0] = mark;
 
+            // полоска прогресса поверх картинки у нижнего края; видна только у текущего трека
+            PBar pbar = new PBar(ctx);
+            tile.addView(pbar, new FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(6), Gravity.BOTTOM));
+            live.add(new Live(tr, mark, pbar));
+
             LinearLayout bar = new LinearLayout(ctx);
             bar.setOrientation(LinearLayout.HORIZONTAL);
             final TextView link = btn(ctx, "\uD83D\uDD17");
@@ -3763,6 +3944,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 }
                 trackRows.addView(row);
             }
+            syncLive();
         }
 
         /**
@@ -3829,6 +4011,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
         private void buildTrackRows() {
             trackRows.removeAllViews();
+            live.clear();
             rowMarks.clear();
             rowViews.clear();
             rowIdx.clear();

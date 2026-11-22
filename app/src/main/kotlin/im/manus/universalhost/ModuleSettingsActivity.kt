@@ -1,9 +1,9 @@
 package im.manus.universalhost
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
@@ -17,7 +17,10 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
+import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -31,8 +34,9 @@ import java.util.Locale
  * на экране модулей остаются только значки.
  *
  * Управление настройками: нажатие на логотип озвучивает настройку; долгое нажатие переключает
- * (для включателей; отдельного переключателя на экране нет, выключенное тускнеет); долгое нажатие
- * и движение пальцем перетаскивает настройку на новое место, порядок запоминается для модуля.
+ * (для включателей; отдельного переключателя на экране нет, выключенное тускнеет), а у ползунка открывает
+ * панель с ним внизу экрана; долгое нажатие и движение пальцем перетаскивает настройку на новое место,
+ * порядок запоминается для модуля. Выбор, список приложений и ввод текста тоже панели внутри окна, не диалоги.
  */
 class ModuleSettingsActivity : Activity() {
 
@@ -50,6 +54,8 @@ class ModuleSettingsActivity : Activity() {
     private var pendingKey: String? = null
     private lateinit var scroll: ScrollView
     private lateinit var content: LinearLayout
+    private lateinit var root: FrameLayout      // экран настроек + панели поверх него (вместо системных диалогов)
+    private var panel: View? = null
 
     // живые мониторы (SettingItem.MONITOR)
     private class MonitorRow(val key: String, val value: TextView, val status: TextView, val graph: MonitorView)
@@ -94,13 +100,21 @@ class ModuleSettingsActivity : Activity() {
         content.clipToPadding = false
         content.setPadding(dp(16), dp(16), dp(16), dp(32))
         scroll.addView(content)
-        setContentView(scroll)
+        root = FrameLayout(this)
+        root.setBackgroundColor(Color.BLACK)
+        root.addView(scroll, FrameLayout.LayoutParams(-1, -1))
+        setContentView(root)
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         build()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putString("pending", pendingKey)
+    }
+
+    override fun onBackPressed() {
+        if (panel != null) closePanel() else super.onBackPressed()
     }
 
     /** Карточка в недавних со значком самого модуля, а не хоста; окно из ярлыка (module://) попадает в модуль «Недавние». */
@@ -514,10 +528,61 @@ class ModuleSettingsActivity : Activity() {
         return t.removePrefix(logo).trim()
     }
 
+    /**
+     * Делит эмодзи-логотип на символы: «🎧✕» даёт [🎧, ✕]. Вариационные селекторы, модификаторы цвета кожи, знак
+     * keycap и склейка через ZWJ остаются в своём символе, флаги (пары региональных индикаторов) тоже.
+     */
+    private fun glyphs(logo: String): List<String> {
+        val out = ArrayList<String>()
+        var i = 0
+        var cur = StringBuilder()
+        var joinNext = false
+        while (i < logo.length) {
+            val cp = logo.codePointAt(i)
+            val n = Character.charCount(cp)
+            val cont = cp == 0x200D || cp in 0xFE00..0xFE0F || cp in 0x1F3FB..0x1F3FF || cp == 0x20E3
+            val flagSecond = cp in 0x1F1E6..0x1F1FF && cur.isNotEmpty() &&
+                cur.codePointAt(0) in 0x1F1E6..0x1F1FF && cur.codePointCount(0, cur.length) == 1
+            if (cur.isEmpty() || cont || joinNext || flagSecond) {
+                cur.appendCodePoint(cp)
+            } else {
+                out.add(cur.toString())
+                cur = StringBuilder().appendCodePoint(cp)
+            }
+            joinNext = cp == 0x200D
+            i += n
+        }
+        if (cur.isNotEmpty()) out.add(cur.toString())
+        return out
+    }
+
     private fun logoView(title: String, sizeDp: Int, say: () -> String): View {
         val logo = logoOf(title)
         val v: View
-        if (logo != null) {
+        val parts = if (logo != null) glyphs(logo) else emptyList()
+        if (parts.size >= 2) {
+            // два значка в одном: основной во всю плитку, второй маленьким значком в углу; размер плитки стандартный
+            val fl = FrameLayout(this)
+            val main = TextView(this)
+            main.text = parts[0]
+            main.textSize = sizeDp * 0.55f
+            main.gravity = Gravity.CENTER
+            main.setTextColor(Color.WHITE)
+            fl.addView(main, FrameLayout.LayoutParams(-1, -1))
+            val badge = TextView(this)
+            badge.text = parts.drop(1).joinToString("")
+            badge.textSize = sizeDp * 0.26f
+            badge.gravity = Gravity.CENTER
+            badge.setTextColor(Color.WHITE)
+            val bg = GradientDrawable()
+            bg.shape = GradientDrawable.OVAL
+            bg.setColor(Color.BLACK)
+            bg.setStroke(dp(1), Color.WHITE)
+            badge.background = bg
+            val bs = dp((sizeDp * 0.4f).toInt())
+            fl.addView(badge, FrameLayout.LayoutParams(bs, bs, Gravity.BOTTOM or Gravity.END))
+            v = fl
+        } else if (logo != null) {
             val tv = TextView(this)
             tv.text = logo
             tv.textSize = sizeDp * 0.55f
@@ -651,17 +716,15 @@ class ModuleSettingsActivity : Activity() {
                 },
                 4
             )
-            SettingItem.SLIDER -> place(item, sliderRow(item, prefs), 0)
+            SettingItem.SLIDER -> place(item, sliderTile(item, prefs), 4)
             SettingItem.CHOICE -> {
                 val current = prefs.getInt(item.key, item.defInt).coerceIn(0, maxOf(0, item.options.size - 1))
                 place(item, actionTile(item.title, item.summary, item.options.getOrElse(current) { "" }) {
-                    AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                        .setTitle(plain(item.title))
-                        .setItems(item.options.toTypedArray()) { _, which ->
-                            prefs.edit().putInt(item.key, which).apply()
-                            notifyModule(item.key)
-                            build()
-                        }.show()
+                    choosePanel(item, current) { which ->
+                        prefs.edit().putInt(item.key, which).apply()
+                        notifyModule(item.key)
+                        build()
+                    }
                 }, 4)
             }
             SettingItem.TEXT -> {
@@ -744,51 +807,84 @@ class ModuleSettingsActivity : Activity() {
             apps.sortWith(compareBy<Pair<String, String>>({ !chosen.contains(it.first) }, { it.second.lowercase() }))
             runOnUiThread {
                 if (isFinishing) return@runOnUiThread
-                val labels = apps.map { it.second }.toTypedArray()
                 val checked = BooleanArray(apps.size) { chosen.contains(apps[it].first) }
-                AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                    .setTitle(item.title)
-                    .setMultiChoiceItems(labels, checked) { _, which, on -> checked[which] = on }
-                    .setPositiveButton("Готово") { _, _ ->
-                        val result = ArrayList<String>()
-                        // пакеты, которых нет в списке запуска (например, введённые раньше), не теряем
-                        for (p in chosen) if (apps.none { it.first == p }) result.add(p)
-                        for (i in apps.indices) if (checked[i]) result.add(apps[i].first)
-                        prefs.edit().putString(item.key, result.joinToString(",")).apply()
-                        notifyModule(item.key)
-                        build()
-                    }
-                    .setNegativeButton("Отмена", null)
-                    .show()
+                appsPanel(item, apps.map { it.second }, checked) {
+                    val result = ArrayList<String>()
+                    // пакеты, которых нет в списке запуска (например, введённые раньше), не теряем
+                    for (p in chosen) if (apps.none { it.first == p }) result.add(p)
+                    for (k in apps.indices) if (checked[k]) result.add(apps[k].first)
+                    prefs.edit().putString(item.key, result.joinToString(",")).apply()
+                    notifyModule(item.key)
+                    build()
+                }
             }
         }.start()
     }
 
-    private fun sliderRow(item: SettingItem, prefs: SharedPreferences): View {
+    /**
+     * Ползунок спрятан внутри значка: нажатие озвучивает название и значение, долгое нажатие открывает панель
+     * с ползунком (и кнопками «−» «+» для шага) внизу экрана.
+     */
+    private fun sliderTile(item: SettingItem, prefs: SharedPreferences): View {
+        val say: () -> String = {
+            val cur = prefs.getInt(item.key, item.defInt).coerceIn(item.min, item.max)
+            plain(item.title) + (if (item.summary.isNotEmpty()) ". " + item.summary else "") + ". Сейчас: " + cur
+        }
+        val tile = logoView(item.title, 72, say)
+        says[tile] = say
+        toggles[tile] = { sliderPanel(item, prefs) }
+        return tile
+    }
+
+    private fun sliderPanel(item: SettingItem, prefs: SharedPreferences) {
         val steps = (item.max - item.min) / item.step
         val cur = prefs.getInt(item.key, item.defInt).coerceIn(item.min, item.max)
-        val valueText = text(cur.toString(), 16f, Color.WHITE, true)
-        val c = iconCard(item.title) {
-            plain(item.title) + (if (item.summary.isNotEmpty()) ". " + item.summary else "") + ". Сейчас: " + valueText.text
-        }
-        val bar = SeekBar(this)
-        bar.max = steps
-        bar.progress = (cur - item.min) / item.step
-        bar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
-                valueText.text = (item.min + progress * item.step).toString()
-            }
+        openPanel(Gravity.BOTTOM) { box, close ->
+            val head = LinearLayout(this)
+            head.orientation = LinearLayout.HORIZONTAL
+            head.gravity = Gravity.CENTER_VERTICAL
+            val value = text(cur.toString(), 28f, Color.WHITE, true)
+            head.addView(logoView(item.title, 56) { plain(item.title) + ". Сейчас: " + value.text })
+            head.addView(value, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(16) })
+            head.addView(smallBtn("✕") { close() })
+            box.addView(head)
 
-            override fun onStartTrackingTouch(sb: SeekBar) {}
+            val bar = SeekBar(this)
+            bar.max = steps
+            bar.progress = (cur - item.min) / item.step
+            val white = ColorStateList.valueOf(Color.WHITE)
+            bar.progressTintList = white
+            bar.thumbTintList = white
+            bar.progressBackgroundTintList = ColorStateList.valueOf(Color.GRAY)
 
-            override fun onStopTrackingTouch(sb: SeekBar) {
-                prefs.edit().putInt(item.key, item.min + sb.progress * item.step).apply()
+            fun valueOf(progress: Int) = item.min + progress * item.step
+            fun commit() {
+                prefs.edit().putInt(item.key, valueOf(bar.progress)).apply()
                 notifyModule(item.key)      // применяем один раз, когда палец отпущен
+                speak(plain(item.title) + ". " + valueOf(bar.progress))
             }
-        })
-        c.addView(bar, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(8); rightMargin = dp(8) })
-        c.addView(valueText)
-        return c
+            bar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
+                    value.text = valueOf(progress).toString()
+                }
+
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+
+                override fun onStopTrackingTouch(sb: SeekBar) { commit() }
+            })
+            val line = LinearLayout(this)
+            line.orientation = LinearLayout.HORIZONTAL
+            line.gravity = Gravity.CENTER_VERTICAL
+            line.setPadding(0, dp(12), 0, 0)
+            line.addView(smallBtn("−") {
+                if (bar.progress > 0) { bar.progress = bar.progress - 1; value.text = valueOf(bar.progress).toString(); commit() }
+            })
+            line.addView(bar, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(8); rightMargin = dp(8) })
+            line.addView(smallBtn("+") {
+                if (bar.progress < steps) { bar.progress = bar.progress + 1; value.text = valueOf(bar.progress).toString(); commit() }
+            })
+            box.addView(line)
+        }
     }
 
     private fun imageRow(item: SettingItem): View {
@@ -858,15 +954,125 @@ class ModuleSettingsActivity : Activity() {
     }
 
     private fun askText(title: String, current: String, onOk: (String) -> Unit) {
-        val input = EditText(this)
-        input.setText(current)
-        input.setSelection(input.text.length)
-        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle(title)
-            .setView(input)
-            .setPositiveButton("OK") { _, _ -> onOk(input.text.toString()) }
-            .setNegativeButton("Отмена", null)
-            .show()
+        openPanel(Gravity.BOTTOM) { box, close ->
+            box.addView(text(title, 18f, Color.WHITE, true))
+            val input = EditText(this)
+            input.setText(current)
+            input.setSelection(input.text.length)
+            input.setTextColor(Color.WHITE)
+            input.setHintTextColor(Color.GRAY)
+            input.backgroundTintList = ColorStateList.valueOf(Color.WHITE)
+            box.addView(input, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+            box.addView(buttonsRow(
+                "✕ Отмена" to { close() },
+                "OK" to { close(); onOk(input.text.toString()) }
+            ))
+            input.requestFocus()
+            input.post {
+                (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(input, 0)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ панели вместо системных диалогов
+    // Системное окно на части телефонов рисуется белым шрифтом на белом фоне. Панель лежит внутри окна
+    // настроек и красится явно: чёрный фон, белый текст, белая рамка. Закрывается кнопкой, касанием вне панели
+    // и кнопкой «Назад».
+
+    private fun closePanel() {
+        panel?.let { root.removeView(it) }
+        panel = null
+    }
+
+    private fun openPanel(gravity: Int, fill: (LinearLayout, () -> Unit) -> Unit) {
+        closePanel()
+        val scrim = FrameLayout(this)
+        scrim.setBackgroundColor(0xB3000000.toInt())
+        scrim.isClickable = true
+        scrim.setOnClickListener { closePanel() }
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.isClickable = true          // касание внутри панели не закрывает её
+        box.setPadding(dp(16), dp(16), dp(16), dp(16))
+        val bg = GradientDrawable()
+        bg.setColor(Color.rgb(17, 17, 17))
+        bg.setStroke(dp(1), Color.WHITE)
+        bg.cornerRadius = dp(12).toFloat()
+        box.background = bg
+        scrim.addView(box, FrameLayout.LayoutParams(-1, -2, gravity).apply { setMargins(dp(8), dp(8), dp(8), dp(8)) })
+        root.addView(scrim, FrameLayout.LayoutParams(-1, -1))
+        panel = scrim
+        fill(box) { closePanel() }
+    }
+
+    /** ScrollView, который не выше [cap] пикселей: длинный список в панели прокручивается, короткий не растягивается. */
+    private inner class CappedScroll(private val cap: Int) : ScrollView(this@ModuleSettingsActivity) {
+        override fun onMeasure(widthSpec: Int, heightSpec: Int) {
+            super.onMeasure(widthSpec, MeasureSpec.makeMeasureSpec(cap, MeasureSpec.AT_MOST))
+        }
+    }
+
+    private fun buttonsRow(vararg items: Pair<String, () -> Unit>): LinearLayout {
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.setPadding(0, dp(12), 0, 0)
+        for ((i, entry) in items.withIndex()) {
+            val b = text(entry.first, 18f, Color.WHITE, false)
+            b.gravity = Gravity.CENTER
+            b.setPadding(dp(12), dp(12), dp(12), dp(12))
+            val bg = GradientDrawable()
+            bg.setColor(if (i == items.size - 1) Color.rgb(51, 51, 51) else Color.TRANSPARENT)
+            bg.setStroke(dp(1), Color.WHITE)
+            bg.cornerRadius = dp(8).toFloat()
+            b.background = bg
+            val action = entry.second
+            b.setOnClickListener { action() }
+            row.addView(b, LinearLayout.LayoutParams(0, -2, 1f).apply { if (i > 0) leftMargin = dp(8) })
+        }
+        return row
+    }
+
+    /** Выбор одного из вариантов (SettingItem.CHOICE): список строк, выбранный отмечен «●». */
+    private fun choosePanel(item: SettingItem, current: Int, onPick: (Int) -> Unit) {
+        openPanel(Gravity.BOTTOM) { box, close ->
+            box.addView(text(plain(item.title), 18f, Color.WHITE, true))
+            val list = LinearLayout(this)
+            list.orientation = LinearLayout.VERTICAL
+            for ((i, opt) in item.options.withIndex()) {
+                val r = text((if (i == current) "● " else "○ ") + opt, 20f, Color.WHITE, i == current)
+                r.setPadding(dp(8), dp(12), dp(8), dp(12))
+                r.setOnClickListener { close(); onPick(i) }
+                list.addView(r)
+            }
+            val sc = CappedScroll((resources.displayMetrics.heightPixels * 0.6f).toInt())
+            sc.addView(list)
+            box.addView(sc, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        }
+    }
+
+    /** Список приложений с отметками (APP_PICKER); [checked] меняется на месте, «Готово» вызывает [onDone]. */
+    private fun appsPanel(item: SettingItem, labels: List<String>, checked: BooleanArray, onDone: () -> Unit) {
+        openPanel(Gravity.BOTTOM) { box, close ->
+            box.addView(text(plain(item.title), 18f, Color.WHITE, true))
+            val list = LinearLayout(this)
+            list.orientation = LinearLayout.VERTICAL
+            for (i in labels.indices) {
+                val r = text((if (checked[i]) "☑ " else "☐ ") + labels[i], 18f, Color.WHITE, false)
+                r.setPadding(dp(8), dp(11), dp(8), dp(11))
+                r.setOnClickListener {
+                    checked[i] = !checked[i]
+                    r.text = (if (checked[i]) "☑ " else "☐ ") + labels[i]
+                }
+                list.addView(r)
+            }
+            val sc = CappedScroll((resources.displayMetrics.heightPixels * 0.65f).toInt())
+            sc.addView(list)
+            box.addView(sc, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+            box.addView(buttonsRow(
+                "✕ Отмена" to { close() },
+                "Готово" to { close(); onDone() }
+            ))
+        }
     }
 
     private fun notifyModule(key: String) {
