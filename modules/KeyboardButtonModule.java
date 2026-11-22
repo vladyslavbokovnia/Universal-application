@@ -102,11 +102,12 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
     private long inputEventAt;
     private int evTotal, evInput;           // счётчики для проверки «Что видит модуль в поле ввода»
     private String infoProblem;             // что было не так с конфигурацией службы при запуске (null — всё в порядке)
+    private boolean capsBroken;             // возможности службы = 0: модулем не чинится, нужен свежий APK хоста
 
     // ---------------------------------------------------------------- IPlugin
 
     @Override public String getName() { return "KeyboardButton"; }
-    @Override public int getVersion() { return 5; }
+    @Override public int getVersion() { return 6; }
     @Override public String getDescription() {
         return "Кнопка для Gboard: клавиатура, голосовой ввод, буфер обмена, переводчик, выбор клавиатуры";
     }
@@ -224,6 +225,7 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
             if (info.eventTypes != AccessibilityEvent.TYPES_ALL_MASK) bad.append("типы событий=").append(info.eventTypes).append("; ");
             if ((info.flags & needFlags) != needFlags) bad.append("флаги=").append(info.flags).append("; ");
             if ((info.getCapabilities() & needCaps) != needCaps) bad.append("возможности=").append(info.getCapabilities()).append("; ");
+            capsBroken = (info.getCapabilities() & AccessibilityServiceInfo.CAPABILITY_CAN_RETRIEVE_WINDOW_CONTENT) == 0;
             if (bad.length() == 0) { infoProblem = null; return; }
             info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK;
             info.flags |= needFlags;
@@ -611,11 +613,12 @@ public class KeyboardButtonModule implements IPlugin, ISettingsProvider {
 
     /** Отчёт о том, что модуль видит в окне с полем ввода: окна, активный корень, узлы, поля, события. */
     private String inputDiagText() {
-        StringBuilder sb = new StringBuilder("KeyboardButton v5, поле ввода:\n");
+        StringBuilder sb = new StringBuilder("KeyboardButton v6, поле ввода:\n");
         try {
             repairServiceInfo();
             sb.append(serviceInfoText()).append('\n');
-            if (infoProblem != null) sb.append("конфигурация службы была сломана (").append(infoProblem)
+            if (capsBroken) sb.append("возможности службы = 0: чтение окон запрещено системой. Это задаётся только в APK хоста (accessibility_config.xml) и модулем не чинится — нужен свежий app-debug.apk из CI, после установки службу доступности перевключить\n");
+            else if (infoProblem != null) sb.append("конфигурация службы была сломана (").append(infoProblem)
                     .append(") — только что исправил, подожди 5 секунд и нажми проверку ещё раз\n");
             int app = 0, ime = 0, ovl = 0, other = 0;
             for (AccessibilityWindowInfo w : svc.getWindows()) {
