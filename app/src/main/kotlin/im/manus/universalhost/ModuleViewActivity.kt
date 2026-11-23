@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.widget.ScrollView
 
 /**
@@ -59,33 +60,51 @@ class ModuleViewActivity : Activity() {
         }
 
         val d = resources.displayMetrics.density
-        val root = FrameLayout(this)
-        root.setBackgroundColor(Color.BLACK)
-
-        // список на всё окно; шестерёнка не занимает полосу сверху, а лежит в нижнем углу поверх списка
         val body: View = if (view is ScrollView) view else ScrollView(this).apply { addView(view) }
-        (body as ScrollView).apply {
-            clipToPadding = false
-            setPadding(paddingLeft, paddingTop, paddingRight, paddingBottom + (72 * d).toInt())   // последняя плитка не под кнопкой
-        }
-        root.addView(body, FrameLayout.LayoutParams(-1, -1))
 
-        val gear = FrameLayout(this)
-        val ring = GradientDrawable()
-        ring.shape = GradientDrawable.OVAL
-        ring.setColor(0xCC000000.toInt())
-        ring.setStroke((1 * d).toInt().coerceAtLeast(1), Color.WHITE)
-        gear.background = ring
-        gear.contentDescription = "Настройки модуля"
-        gear.setOnClickListener { openSettings() }
-        val glyph = GlyphView(this, GlyphView.GEAR)
-        glyph.alpha = 0.85f
-        gear.addView(glyph, FrameLayout.LayoutParams(-1, -1))
-        gear.setPadding((8 * d).toInt(), (8 * d).toInt(), (8 * d).toInt(), (8 * d).toInt())
-        root.addView(gear, FrameLayout.LayoutParams((52 * d).toInt(), (52 * d).toInt(), Gravity.BOTTOM or Gravity.END).apply {
-            setMargins(0, 0, (16 * d).toInt(), (16 * d).toInt())
-        })
-        setContentView(root)
+        fun makeGear(): FrameLayout {
+            val gear = FrameLayout(this)
+            val ring = GradientDrawable()
+            ring.shape = GradientDrawable.OVAL
+            ring.setColor(0xCC000000.toInt())
+            ring.setStroke((1 * d).toInt().coerceAtLeast(1), Color.WHITE)
+            gear.background = ring
+            gear.contentDescription = "Настройки модуля"
+            gear.setOnClickListener { openSettings() }
+            val glyph = GlyphView(this, GlyphView.GEAR)
+            glyph.alpha = 0.85f
+            gear.addView(glyph, FrameLayout.LayoutParams(-1, -1))
+            gear.setPadding((8 * d).toInt(), (8 * d).toInt(), (8 * d).toInt(), (8 * d).toInt())
+            return gear
+        }
+
+        val bar: View? = try { (plugin as? IMainBarProvider)?.createBottomBar(this) } catch (e: Throwable) { null }
+        if (bar != null) {
+            // список на всё окно, под ним нижняя панель модуля; шестерёнка в её правом углу
+            val col = LinearLayout(this)
+            col.orientation = LinearLayout.VERTICAL
+            col.setBackgroundColor(Color.BLACK)
+            col.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
+            val row = LinearLayout(this)
+            row.orientation = LinearLayout.HORIZONTAL
+            row.gravity = Gravity.CENTER_VERTICAL
+            row.setBackgroundColor(Color.BLACK)
+            row.addView(bar, LinearLayout.LayoutParams(0, -2, 1f))
+            row.addView(makeGear(), LinearLayout.LayoutParams((52 * d).toInt(), (52 * d).toInt()).apply {
+                setMargins((4 * d).toInt(), (4 * d).toInt(), (8 * d).toInt(), (4 * d).toInt())
+            })
+            col.addView(row, LinearLayout.LayoutParams(-1, -2))
+            setContentView(col)
+        } else {
+            // список на всё окно; шестерёнка не занимает полосу, а лежит в нижнем углу поверх списка
+            val root = FrameLayout(this)
+            root.setBackgroundColor(Color.BLACK)
+            root.addView(body, FrameLayout.LayoutParams(-1, -1))
+            root.addView(makeGear(), FrameLayout.LayoutParams((52 * d).toInt(), (52 * d).toInt(), Gravity.BOTTOM or Gravity.END).apply {
+                setMargins(0, 0, (16 * d).toInt(), (16 * d).toInt())
+            })
+            setContentView(root)
+        }
     }
 
     private fun openSettings() {

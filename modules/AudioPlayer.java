@@ -70,6 +70,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 import im.manus.universalhost.IKeyHandler;
+import im.manus.universalhost.IMainBarProvider;
 import im.manus.universalhost.IMainViewProvider;
 import im.manus.universalhost.IMotionHandler;
 import im.manus.universalhost.IPlugin;
@@ -77,6 +78,7 @@ import im.manus.universalhost.ISettingsProvider;
 import im.manus.universalhost.ISettingsViewProvider;
 import im.manus.universalhost.IShareHandler;
 import im.manus.universalhost.PadMapper;
+import im.manus.universalhost.PanelConfirm;
 import im.manus.universalhost.SettingItem;
 
 import java.io.File;
@@ -104,7 +106,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * плейлист, из общего списка пропадает; вернуть его можно кнопкой «↩» в плейлисте. Следующий и предыдущий идут по
  * тому списку, с которого начали играть; кнопкой геймпада «Сменить список» можно перейти на следующий список.
  */
-public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewProvider, IMainViewProvider, IKeyHandler,
+public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewProvider, IMainViewProvider, IMainBarProvider, IKeyHandler,
         IMotionHandler, IShareHandler {
 
     /** Имя файла настроек, как его называет хост (ModuleStorage.prefsName): всё, кроме латиницы и цифр, он заменяет на «_». */
@@ -423,6 +425,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         private final android.graphics.Paint fgPaint = new android.graphics.Paint();
         private float frac = -1f;
         private int shownPx = -1;
+        private boolean drag;
 
         PBar(Context c) {
             super(c);
@@ -433,6 +436,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
 
         /** 0..1: показать полоску с этой долей; отрицательное число: спрятать. */
         void setFraction(float f) {
+            if (drag && f >= 0f) return;            // палец ведёт полоску: секундный опрос её не двигает
             if (f < 0f) {
                 frac = -1f;
                 shownPx = -1;
@@ -447,6 +451,16 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 invalidate();
             }
         }
+
+        /** Палец на полоске: показываем долю под пальцем, пока он не отпущен. */
+        void dragTo(float f) {
+            drag = true;
+            frac = Math.max(0f, Math.min(1f, f));
+            shownPx = -1;
+            invalidate();
+        }
+
+        void endDrag() { drag = false; }
 
         @Override protected void onDraw(android.graphics.Canvas c) {
             int w = getWidth();
@@ -1705,6 +1719,46 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     }
 
     /** Открывает ссылку в браузере этого приложения (мини-приложение «Браузер»). */
+    /** Варианты загрузки ролика по ссылке, как в меню скрипта YouTube TTS: {название, режим, параметр}. */
+    private static final String[][] DL_VARIANTS = {
+            {"🎧 Аудио (очистка «эээ» как в настройках модуля)", "audio", ""},
+            {"🧹 Аудио, «эээ» вырезать обязательно", "audio", "clean"},
+            {"🧹U Аудио, очистка движком Uhm", "audio", "0"},
+            {"🧹S Аудио, очистка движком Steady", "audio", "1"},
+            {"🧹G Аудио, очистка движком GigaAM", "audio", "2"},
+            {"🎬 Видео с русским переводом Яндекса", "video", ""},
+            {"↗ Открыть в браузере", "open", ""},
+    };
+
+    /** Долгое нажатие на 🔗: выбор, что загрузить по ссылке (звук, видео с переводом, другой движок очистки). */
+    void askDownload(final Context ctx, final String url, final String title) {
+        String[] labels = new String[DL_VARIANTS.length];
+        for (int i = 0; i < labels.length; i++) labels[i] = DL_VARIANTS[i][0];
+        boolean shown = PanelConfirm.pick(ctx, "Загрузить ролик", labels, -1, new PanelConfirm.OnPick() {
+            @Override public void pick(int index) { sendDownload(ctx, url, title, DL_VARIANTS[index]); }
+        });
+        if (!shown) toast("Не удалось показать выбор");
+    }
+
+    /** Отправляет ссылку модулям загрузки тем же «Поделиться», что и скрипт YouTube TTS. */
+    private void sendDownload(Context ctx, String url, String title, String[] variant) {
+        if ("open".equals(variant[1])) { openInBrowser(ctx, url); return; }
+        try {
+            Intent in = new Intent(Intent.ACTION_SEND);
+            in.setType("video".equals(variant[1]) ? "text/x-votaudio" : "text/x-ytaudio");
+            in.setPackage(ctx.getPackageName());
+            in.putExtra(Intent.EXTRA_TEXT, url);
+            in.putExtra(Intent.EXTRA_SUBJECT, title == null ? "" : title);
+            if ("clean".equals(variant[2])) in.putExtra("clean", true);
+            else if (variant[2].length() > 0) in.putExtra("engine", Integer.parseInt(variant[2]));
+            in.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            ctx.startActivity(in);
+            toast(firstToken(variant[0]) + " отправлено на загрузку");
+        } catch (Throwable t) {
+            toast("Не отправить: " + t.getMessage());
+        }
+    }
+
     void openInBrowser(Context c, String url) {
         try {
             Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
@@ -3365,6 +3419,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         r.add(SettingItem.toggle("pad_focus_fullscreen", "📺 Скрывать строку состояния",
                 "Пока работает окно фокуса: строка состояния скрыта (потянуть с верхнего края, чтобы показать на время)", true));
         r.add(SettingItem.section("🎮 Геймпад (окно открыто)"));
+        r.add(SettingItem.custom("pad", "🎮 Кнопки геймпада", "Нажми кнопку на картинке и выбери, что она делает"));
         r.add(SettingItem.toggle("intercept", "🚫 Перехват кнопок",
                 "Включено: назначенная кнопка только для плеера", true));
         r.add(SettingItem.slider("long_ms", "⏱ Долгое нажатие, мс", "", 300, 1000, 50, 500));
@@ -3411,15 +3466,195 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         }
     }
 
+    /** Схема кнопок геймпада: картинка геймпада с назначениями (живёт в настройках, а не в окне плеера). */
     @Override public View createSettingsView(Context context, String key) {
-        mapper(context);
-        return new PlayerView(context);
+        return mapper(context).createView(context, "");
     }
 
     /** Главное окно плеера (отдельная карточка в недавних): сетка треков и плейлисты сверху; настройки остаются в хосте. */
     @Override public View createMainView(Context context) {
         mapper(context);
-        return new PlayerView(context);
+        PlayerView pv = new PlayerView(context);
+        mainView = pv;
+        return pv;
+    }
+
+    private PlayerView mainView;
+    private BottomBar bottomBar;
+
+    @Override public View createBottomBar(Context context) {
+        BottomBar b = new BottomBar(context);
+        bottomBar = b;
+        return b;
+    }
+
+    // ---------------------------------------------------------- нижняя панель главного окна
+    //
+    // Сколько кнопок поместится по ширине, столько их и будет. Каждая назначается долгим нажатием: список песен,
+    // «найти новые», переключатель настройки или любое действие геймпада. Пустая кнопка («＋») открывает выбор
+    // по нажатию. Назначения лежат в настройках модуля (bar_0, bar_1, ...).
+
+    /** Переключатели настроек для кнопок панели: ключ, название, значение по умолчанию. */
+    private static final String[][] BAR_TOGGLES = {
+            {"newest_first", "🆕 Новые песни сверху", "0"},
+            {"resume", "📍 Помнить место в треке", "1"},
+            {"unplug_pause", "🎧✕ Пауза, если наушники отключили", "1"},
+            {"plug_play", "🎧▶ Играть, когда наушники подключили", "0"},
+            {"keep_screen", "💡 Не гасить экран", "1"},
+            {"tiles_one", "🖼 Плитки в один ряд", "0"},
+    };
+    private static final String[] BAR_DEFAULTS = {"list:0", "list:1", "list:2", "list:3", "scan"};
+    private static final String[] BAR_LISTS = {"♫ Все песни", "🕓 Послушать позже", "⭐ Избранное", "🎬 Видео"};
+
+    /** Все варианты назначения: {id, название}. Первый пункт делает кнопку пустой. */
+    private List<String[]> barOptions() {
+        List<String[]> o = new ArrayList<String[]>();
+        o.add(new String[]{"", "＋ Пусто"});
+        for (int i = 0; i < BAR_LISTS.length; i++) o.add(new String[]{"list:" + i, BAR_LISTS[i]});
+        o.add(new String[]{"scan", "🔄 Найти новые песни"});
+        for (String[] t : BAR_TOGGLES) o.add(new String[]{"tog:" + t[0], t[1]});
+        for (String[] a : ACTIONS) o.add(new String[]{a[0], a[1]});
+        return o;
+    }
+
+    private String barLabel(String id) {
+        for (String[] o : barOptions()) if (o[0].equals(id)) return o[1];
+        return id;
+    }
+
+    private String barSlotId(int i) {
+        SharedPreferences p = prefs();
+        String v = p == null ? null : p.getString("bar_" + i, null);
+        if (v != null) return v;
+        return i < BAR_DEFAULTS.length ? BAR_DEFAULTS[i] : "";
+    }
+
+    private static String firstToken(String label) {
+        int sp = label.indexOf(' ');
+        return sp > 0 ? label.substring(0, sp) : label;
+    }
+
+    private boolean barToggleOn(String key) {
+        SharedPreferences p = prefs();
+        for (String[] t : BAR_TOGGLES) {
+            if (t[0].equals(key)) return p != null ? p.getBoolean(key, "1".equals(t[2])) : "1".equals(t[2]);
+        }
+        return false;
+    }
+
+    private void barTap(Context ctx, int slot) {
+        String id = barSlotId(slot);
+        if (id.length() == 0) { barAssign(ctx, slot); return; }
+        if (id.startsWith("list:")) {
+            PlayerView v = mainView;
+            if (v != null) v.setMode(id.charAt(5) - '0');
+        } else if (id.equals("scan")) {
+            scanNewFiles();
+        } else if (id.startsWith("tog:")) {
+            String key = id.substring(4);
+            SharedPreferences p = prefs();
+            if (p != null) {
+                boolean now = !barToggleOn(key);
+                p.edit().putBoolean(key, now).apply();
+                onSettingChanged(key);
+                toast(firstToken(barLabel(id)) + (now ? " вкл" : " выкл"));
+            }
+        } else {
+            doPerform(id);
+        }
+        if (bottomBar != null) bottomBar.refresh();
+    }
+
+    private void barAssign(final Context ctx, final int slot) {
+        final List<String[]> opts = barOptions();
+        String[] labels = new String[opts.size()];
+        String cur = barSlotId(slot);
+        int sel = 0;
+        for (int i = 0; i < labels.length; i++) {
+            labels[i] = opts.get(i)[1];
+            if (opts.get(i)[0].equals(cur)) sel = i;
+        }
+        boolean shown = PanelConfirm.pick(ctx, "Кнопка " + (slot + 1), labels, sel, new PanelConfirm.OnPick() {
+            @Override public void pick(int index) {
+                SharedPreferences p = prefs();
+                if (p != null) p.edit().putString("bar_" + slot, opts.get(index)[0]).apply();
+                if (bottomBar != null) bottomBar.refresh();
+            }
+        });
+        if (!shown) toast("Не удалось показать выбор");
+    }
+
+    class BottomBar extends LinearLayout {
+        private final List<TextView> slots = new ArrayList<TextView>();
+
+        BottomBar(final Context ctx) {
+            super(ctx);
+            setOrientation(HORIZONTAL);
+            setBackgroundColor(0xFF000000);
+            float d = ctx.getResources().getDisplayMetrics().density;
+            int screen = ctx.getResources().getDisplayMetrics().widthPixels;
+            int n = Math.max(1, (int) ((screen - 64 * d) / (54 * d)));      // справа остаётся место шестерёнке
+            for (int i = 0; i < n; i++) {
+                final int slot = i;
+                TextView t = new TextView(ctx);
+                t.setGravity(Gravity.CENTER);
+                t.setOnClickListener(new OnClickListener() {
+                    @Override public void onClick(View v) { barTap(ctx, slot); }
+                });
+                t.setOnLongClickListener(new OnLongClickListener() {
+                    @Override public boolean onLongClick(View v) {
+                        barAssign(ctx, slot);
+                        return true;
+                    }
+                });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(ctx, 52), 1f);
+                lp.setMargins(dp(ctx, 2), dp(ctx, 4), dp(ctx, 2), dp(ctx, 4));
+                addView(t, lp);
+                slots.add(t);
+            }
+            refresh();
+        }
+
+        void refresh() {
+            PlayerView v = mainView;
+            int mode = v == null ? -1 : v.listMode;
+            Context ctx = getContext();
+            for (int i = 0; i < slots.size(); i++) {
+                String id = barSlotId(i);
+                TextView t = slots.get(i);
+                boolean on = false;
+                CharSequence text;
+                if (id.length() == 0) {
+                    text = "＋";
+                } else if (id.startsWith("list:")) {
+                    int m = id.charAt(5) - '0';
+                    int count = 0;
+                    try {
+                        if (m == 0) count = generalArray().length;
+                        else if (m == 1) count = plCount(PL_LATER);
+                        else if (m == 2) count = plCount(PL_FAV);
+                        else if (v != null) count = v.videoIdx().size();
+                    } catch (Throwable e) { }
+                    String g = firstToken(BAR_LISTS[Math.max(0, Math.min(BAR_LISTS.length - 1, m))]);
+                    android.text.SpannableString sp = new android.text.SpannableString(g + "\n" + count);
+                    sp.setSpan(new android.text.style.RelativeSizeSpan(0.55f), g.length(), sp.length(),
+                            android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    text = sp;
+                    on = m == mode;
+                } else {
+                    text = firstToken(barLabel(id));
+                    if (id.startsWith("tog:")) on = barToggleOn(id.substring(4));
+                }
+                t.setText(text);
+                t.setTextSize(id.length() == 0 ? 20 : 22);
+                t.setTextColor(on ? 0xFF000000 : (id.length() == 0 ? 0xFF888888 : 0xFFFFFFFF));
+                android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+                bg.setColor(on ? 0xFFFFFFFF : 0x00000000);
+                bg.setStroke(dp(ctx, 1), id.length() == 0 ? 0xFF666666 : 0xFFFFFFFF);
+                bg.setCornerRadius(dp(ctx, 8));
+                t.setBackground(bg);
+            }
+        }
     }
 
     // ---------------------------------------------------------- экран плеера
@@ -3487,7 +3722,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             body = new LinearLayout(ctx);
             body.setOrientation(LinearLayout.VERTICAL);
             int p = dp(12);
-            body.setPadding(p, p, p, p);
+            body.setPadding(p, 0, p, p);
             body.setClipToPadding(false);                    // схема геймпада выходит в поля до краёв экрана
             addView(body, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
             setFocusable(true);
@@ -3514,7 +3749,6 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             // сейчас играет
             nowTitle = new TextView(ctx);
             nowTitle.setTextSize(16);
-            body.addView(nowTitle);
 
             LinearLayout ctrls = new LinearLayout(ctx);
             ctrls.setOrientation(LinearLayout.HORIZONTAL);
@@ -3542,7 +3776,6 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 @Override public void onClick(View v) { toggleReverse(); }
             });
             ctrls.addView(bRev);
-            body.addView(ctrls);
 
             // списки: все песни / «Послушать позже» / «Избранное», справа «🔄» (найти новые песни)
             LinearLayout lists = new LinearLayout(ctx);
@@ -3561,7 +3794,6 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             lists.addView(bFav, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
             lists.addView(bVideo, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
             lists.addView(bScan, new LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT));
-            body.addView(lists);
 
             // геймпад: картинка открывается по кнопке; пока она открыта, кнопки геймпада выбирают
             // назначение, а не управляют плеером
@@ -3570,19 +3802,16 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             bPad.setOnClickListener(new OnClickListener() {
                 @Override public void onClick(View v) { togglePad(); }
             });
-            body.addView(bPad);
             padBox = new LinearLayout(ctx);
             padBox.setOrientation(LinearLayout.VERTICAL);
             LinearLayout.LayoutParams padLp = new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
             padLp.leftMargin = -dp(12);
             padLp.rightMargin = -dp(12);
-            body.addView(padBox, padLp);
 
             // песни
             trackHead = new TextView(ctx);
             trackHead.setTextSize(16);
             trackHead.setPadding(0, dp(8), 0, 0);
-            body.addView(trackHead);
             trackRows = new LinearLayout(ctx);
             trackRows.setOrientation(LinearLayout.VERTICAL);
             body.addView(trackRows);
@@ -3590,7 +3819,6 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             status = new TextView(ctx);
             status.setTextSize(13);
             status.setPadding(0, dp(8), 0, 0);
-            body.addView(status);
 
             Button bCopy = new Button(ctx);
             bCopy.setText("📋 Скопировать");
@@ -3605,7 +3833,6 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                     } catch (Throwable t) { }
                 }
             });
-            body.addView(bCopy);
 
             refresh();
         }
@@ -3624,6 +3851,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         void setMode(int mode) {
             listMode = mode;
             buildTrackRows();
+            if (bottomBar != null) bottomBar.refresh();
         }
 
         @Override protected void onAttachedToWindow() {
@@ -3710,6 +3938,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             bLater.setText((listMode == 1 ? "● " : "") + "🕓 " + plCount(PL_LATER));
             bFav.setText((listMode == 2 ? "● " : "") + "⭐ " + plCount(PL_FAV));
             bVideo.setText((listMode == 3 ? "● " : "") + "🎬 " + videoIdx().size());
+            if (bottomBar != null) bottomBar.refresh();
         }
 
         private void togglePad() {
@@ -3869,8 +4098,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             if (markOut != null) markOut[0] = mark;
 
             // полоска прогресса поверх картинки у нижнего края; видна только у текущего трека
-            PBar pbar = new PBar(ctx);
-            tile.addView(pbar, new FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(6), Gravity.BOTTOM));
+            final PBar pbar = new PBar(ctx);
             live.add(new Live(tr, mark, pbar));
 
             LinearLayout bar = new LinearLayout(ctx);
@@ -3881,6 +4109,14 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 @Override public void onClick(View v) {
                     Object u = v.getTag();
                     if (u != null) openInBrowser(getContext(), u.toString());
+                }
+            });
+            final String linkTitle = tr == null ? "" : tr.title;
+            link.setOnLongClickListener(new View.OnLongClickListener() {
+                @Override public boolean onLongClick(View v) {
+                    Object u = v.getTag();
+                    if (u != null) askDownload(getContext(), u.toString(), linkTitle);
+                    return true;
                 }
             });
             bar.addView(link);
@@ -3927,7 +4163,42 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             tile.setOnTouchListener(new View.OnTouchListener() {
                 @Override public boolean onTouch(View v, MotionEvent e) { return gd.onTouchEvent(e); }
             });
-            return tile;
+
+            // промежуток под плиткой: у текущего трека в нём полоска прогресса; её можно тянуть пальцем,
+            // перемотка делается при отпускании
+            final FrameLayout strip = new FrameLayout(ctx);
+            strip.addView(pbar, new FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(8), Gravity.CENTER_VERTICAL));
+            strip.setOnTouchListener(new View.OnTouchListener() {
+                private boolean seeking;
+
+                @Override public boolean onTouch(View v, MotionEvent e) {
+                    int a = e.getActionMasked();
+                    if (a == MotionEvent.ACTION_DOWN) {
+                        if (pbar.getVisibility() != View.VISIBLE) return false;
+                        seeking = true;
+                        if (v.getParent() != null) v.getParent().requestDisallowInterceptTouchEvent(true);
+                    }
+                    if (!seeking) return false;
+                    float f = Math.max(0f, Math.min(1f, e.getX() / Math.max(1, v.getWidth())));
+                    if (a == MotionEvent.ACTION_UP) {
+                        pbar.endDrag();
+                        seekFractionAny(f);
+                        pbar.setFraction(f);
+                        seeking = false;
+                    } else if (a == MotionEvent.ACTION_CANCEL) {
+                        pbar.endDrag();
+                        seeking = false;
+                    } else {
+                        pbar.dragTo(f);
+                    }
+                    return true;
+                }
+            });
+            LinearLayout cell = new LinearLayout(ctx);
+            cell.setOrientation(LinearLayout.VERTICAL);
+            cell.addView(tile, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+            cell.addView(strip, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(18)));
+            return cell;
         }
 
         /** Плитки по две в ряд; настройка «tiles_one»: по одной, крупно. */
@@ -3939,7 +4210,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 for (int k = 0; k < cols; k++) {
                     View v = i + k < tiles.size() ? tiles.get(i + k) : new View(ctx);
                     LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f);
-                    lp.setMargins(dp(3), dp(3), dp(3), dp(3));
+                    lp.setMargins(dp(3), 0, dp(3), 0);
                     row.addView(v, lp);
                 }
                 trackRows.addView(row);

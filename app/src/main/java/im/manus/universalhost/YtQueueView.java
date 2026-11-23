@@ -197,17 +197,10 @@ public final class YtQueueView extends LinearLayout {
     }
 
     private void confirmClear() {
-        try {
-            new AlertDialog.Builder(getContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                    .setTitle("Очистить список?")
-                    .setPositiveButton("Очистить", new android.content.DialogInterface.OnClickListener() {
-                        @Override public void onClick(android.content.DialogInterface d, int w) { q.clear(); }
-                    })
-                    .setNegativeButton("Отмена", null)
-                    .show();
-        } catch (Throwable t) {
-            q.clear();
-        }
+        Runnable clear = new Runnable() {
+            @Override public void run() { q.clear(); }
+        };
+        if (!PanelConfirm.show(getContext(), "🗑 Очистить список?", "🗑 Очистить", clear)) clear.run();
     }
 
     // ---------------------------------------------------------- плитка

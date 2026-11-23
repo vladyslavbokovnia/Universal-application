@@ -1247,24 +1247,16 @@ public class VoiceOverTranslation implements IPlugin, ISettingsProvider, IMainVi
         }
 
         private void confirmClear() {
-            try {
-                new AlertDialog.Builder(getContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                        .setTitle("Очистить список?")
-                        .setPositiveButton("Очистить", new android.content.DialogInterface.OnClickListener() {
-                            @Override public void onClick(android.content.DialogInterface d, int w) {
-                                synchronized (ITEMS) {
-                                    for (Item it : ITEMS) it.removed = true;
-                                    ITEMS.clear();
-                                }
-                                changed();
-                            }
-                        })
-                        .setNegativeButton("Отмена", null)
-                        .show();
-            } catch (Throwable t) {
-                synchronized (ITEMS) { ITEMS.clear(); }
-                changed();
-            }
+            Runnable clear = new Runnable() {
+                @Override public void run() {
+                    synchronized (ITEMS) {
+                        for (Item it : ITEMS) it.removed = true;
+                        ITEMS.clear();
+                    }
+                    changed();
+                }
+            };
+            if (!PanelConfirm.show(getContext(), "🗑 Очистить список?", "🗑 Очистить", clear)) clear.run();
         }
 
         /** Плитка 16:9: высота считается от ширины. */
