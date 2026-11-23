@@ -147,7 +147,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     private final Runnable readyCb = new Runnable() { @Override public void run() { startReader(); } };
 
     @Override public String getName() { return NAME; }
-    @Override public int getVersion() { return 6; }
+    @Override public int getVersion() { return 7; }
     @Override public String getDescription() {
         return "Bluetooth-пульт через Shizuku: схема кнопок, одно/двойное/долгое нажатие, команды плеера";
     }
@@ -340,16 +340,23 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
                     int min = prefs != null ? prefs.getInt("swipe_min", 20) : 20;
                     String g = Math.max(ax, ay) < min ? "TAP"
                             : ay >= ax ? (dy > 0 ? "SWIPE_DOWN" : "SWIPE_UP") : (dx > 0 ? "SWIPE_RIGHT" : "SWIPE_LEFT");
+                    Long ka; synchronized (keyAt) { ka = keyAt.get(devBase(dev)); }
+                    if ("TAP".equals(g) && ka != null && SystemClock.uptimeMillis() - ka < 500) return; // камера: клавиша + тап, тап лишний
                     postPress("P|" + g + "|" + dev, SystemClock.uptimeMillis() - p.t0);
                 }
                 return;
             }
             final String sig = "K|" + code + "|" + dev;
+            if ("DOWN".equals(val)) synchronized (keyAt) { keyAt.put(devBase(dev), SystemClock.uptimeMillis()); }
             if ("DOWN".equals(val)) postMain(new Runnable() { @Override public void run() { keyDown(sig); } });
             else if ("UP".equals(val)) postMain(new Runnable() { @Override public void run() { keyUp(sig); } });
             else if ("REPEAT".equals(val)) postMain(new Runnable() { @Override public void run() { keyRepeat(sig); } });
         }
     }
+
+    private final java.util.HashMap<String, Long> keyAt = new java.util.HashMap<String, Long>();
+    /** «BLE-M3 Mouse» и «BLE-M3 Consumer Control» — один пульт: общая часть имени до первого пробела. */
+    private static String devBase(String dev) { int i = dev.indexOf(' '); return i > 0 ? dev.substring(0, i) : dev; }
 
     private void postPress(final String sig, final long dur) {
         postMain(new Runnable() { @Override public void run() { pressDone(sig, dur); } });
@@ -364,6 +371,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     private void finishGesture() {
         float dx, dy; String dev;
         synchronized (lock) { dx = gdx; dy = gdy; dev = gDev; gdx = 0; gdy = 0; }
+        if (true) return; // рывки указки пульт делает сам после каждой кнопки: это шум, а не кнопка
         float ax = Math.abs(dx), ay = Math.abs(dy), mx = Math.max(ax, ay);
         int min = prefs != null ? prefs.getInt("swipe_min", 20) : 20;
         if (mx < min) return;
