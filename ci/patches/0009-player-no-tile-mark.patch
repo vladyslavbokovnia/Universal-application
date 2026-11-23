@@ -1,0 +1,15 @@
+diff --git a/modules/AudioPlayer.java b/modules/AudioPlayer.java
+index faea256..2d6e22d 100644
+--- a/modules/AudioPlayer.java
++++ b/modules/AudioPlayer.java
+@@ -4093,8 +4093,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
+ 
+             TextView mark = btn(ctx, "▶");
+             mark.setVisibility(View.GONE);
+-            tile.addView(mark, new FrameLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT,
+-                    Gravity.TOP | Gravity.START));
++            // значок ▶/⏸ на плитке не показывается: состояние видно по полоске прогресса; сам TextView остаётся
++            // для учёта текущей плитки, но в плитку не добавляется
+             if (markOut != null) markOut[0] = mark;
+ 
+             // полоска прогресса поверх картинки у нижнего края; видна только у текущего трека
