@@ -83,6 +83,7 @@ import im.manus.universalhost.PanelConfirm;
 import im.manus.universalhost.SettingItem;
 import im.manus.universalhost.YtAudioQueue;
 import im.manus.universalhost.YtPipeline;
+import im.manus.universalhost.YtVariants;
 import im.manus.universalhost.YtQueueView;
 
 import java.io.File;
@@ -1729,47 +1730,26 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         return "";
     }
 
-    /** Открывает ссылку в браузере этого приложения (мини-приложение «Браузер»). */
-    /** Варианты загрузки ролика по ссылке, как в меню скрипта YouTube TTS: {название, режим, параметр}. */
-    private static final String[][] DL_VARIANTS = {
-            {"🎧 Аудио (очистка «эээ» как в настройках модуля)", "audio", ""},
-            {"🧹 Аудио, «эээ» вырезать обязательно", "audio", "clean"},
-            {"🧹U Аудио, очистка движком Uhm", "audio", "0"},
-            {"🧹S Аудио, очистка движком Steady", "audio", "1"},
-            {"🧹G Аудио, очистка движком GigaAM", "audio", "2"},
-            {"🎬 Видео с русским переводом Яндекса", "video", ""},
-            {"↗ Открыть в браузере", "open", ""},
-    };
-
-    /** Долгое нажатие на 🔗: выбор, что загрузить по ссылке (звук, видео с переводом, другой движок очистки). */
+    /**
+     * Долгое нажатие на 🔗: выбор, что загрузить по ссылке (звук, видео с переводом, другой движок очистки).
+     * Варианты лежат в хосте (YtVariants), там же разбор «Поделиться» из скрипта: список один на всех.
+     */
     void askDownload(final Context ctx, final String url, final String title) {
-        String[] labels = new String[DL_VARIANTS.length];
-        for (int i = 0; i < labels.length; i++) labels[i] = DL_VARIANTS[i][0];
+        final int n = YtVariants.ALL.length;
+        String[] labels = new String[n + 1];
+        for (int i = 0; i < n; i++) labels[i] = YtVariants.ALL[i].label;
+        labels[n] = "↗ Открыть в браузере";
         boolean shown = PanelConfirm.pick(ctx, "Загрузить ролик", labels, -1, new PanelConfirm.OnPick() {
-            @Override public void pick(int index) { sendDownload(ctx, url, title, DL_VARIANTS[index]); }
+            @Override public void pick(int index) {
+                if (index >= n) { openInBrowser(ctx, url); return; }
+                YtVariants.Variant v = YtVariants.ALL[index];
+                if (YtVariants.submit(ctx, url, title, v)) toast(v.glyph() + " отправлено на загрузку");
+            }
         });
         if (!shown) toast("Не удалось показать выбор");
     }
 
-    /** Отправляет ссылку модулям загрузки тем же «Поделиться», что и скрипт YouTube TTS. */
-    private void sendDownload(Context ctx, String url, String title, String[] variant) {
-        if ("open".equals(variant[1])) { openInBrowser(ctx, url); return; }
-        try {
-            Intent in = new Intent(Intent.ACTION_SEND);
-            in.setType("video".equals(variant[1]) ? "text/x-votaudio" : "text/x-ytaudio");
-            in.setPackage(ctx.getPackageName());
-            in.putExtra(Intent.EXTRA_TEXT, url);
-            in.putExtra(Intent.EXTRA_SUBJECT, title == null ? "" : title);
-            if ("clean".equals(variant[2])) in.putExtra("clean", true);
-            else if (variant[2].length() > 0) in.putExtra("engine", Integer.parseInt(variant[2]));
-            in.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            ctx.startActivity(in);
-            toast(firstToken(variant[0]) + " отправлено на загрузку");
-        } catch (Throwable t) {
-            toast("Не отправить: " + t.getMessage());
-        }
-    }
-
+    /** Открывает ссылку в браузере этого приложения (мини-приложение «Браузер»). */
     void openInBrowser(Context c, String url) {
         try {
             Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
@@ -1992,41 +1972,9 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     @Override public List<String> shareMimeTypes() {
         List<String> r = new ArrayList<String>();
         r.add("audio/*");
-        r.add(YT_MIME);
-        r.add(YT_MIME_VOT);
+        r.add(YtVariants.MIME);
+        r.add(YtVariants.MIME_VOT);
         return r;
-    }
-
-    static final String YT_MIME = "text/x-ytaudio";
-    /** Тип кнопки 🎬: mp4 с видео YouTube и переводом Яндекса вместо звука. */
-    static final String YT_MIME_VOT = "text/x-votaudio";
-
-    private static boolean isYoutube(String u) {
-        if (u == null) return false;
-        String s = u.toLowerCase();
-        return s.startsWith("http") && (s.contains("youtu.be/") || s.contains("youtube.com/"));
-    }
-
-    /** Ссылка на ролик YouTube (из скрипта YouTube TTS или из долгого нажатия на 🔗): в очередь загрузки. */
-    private boolean onShareYoutube(Context ctx, Intent intent) {
-        try {
-            YtAudioQueue q = YtAudioQueue.get(ctx);
-            String url = intent.getStringExtra(Intent.EXTRA_TEXT);
-            String title = intent.getStringExtra(Intent.EXTRA_SUBJECT);
-            if (url != null) url = url.trim();
-            if (!isYoutube(url)) {
-                q.toast("⚠️🔗");
-                return false;
-            }
-            // clean: «эээ» вырезаются независимо от настройки; engine: движок очистки для этого ролика (0 Uhm,
-            // 1 Steady, 2 GigaAM), он же включает очистку; тип text/x-votaudio (или флаг video): mp4 с переводом
-            boolean video = intent.getBooleanExtra("video", false) || YT_MIME_VOT.equals(intent.getType());
-            int engine = intent.getIntExtra("engine", -1);
-            q.submit(url, title, intent.getBooleanExtra("clean", false) || engine >= 0, video, engine);
-            return true;
-        } catch (Throwable t) {
-            return false;
-        }
     }
 
     /**
@@ -2035,7 +1983,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
      */
     @Override public boolean onShare(Context ctx, Intent intent) {
         String type = intent.getType();
-        if (YT_MIME.equals(type) || YT_MIME_VOT.equals(type)) return onShareYoutube(ctx, intent);
+        if (YtVariants.MIME.equals(type) || YtVariants.MIME_VOT.equals(type)) return YtVariants.submitFromIntent(ctx, intent);
         try {
             if (appCtx == null) {
                 appCtx = ctx.getApplicationContext();
