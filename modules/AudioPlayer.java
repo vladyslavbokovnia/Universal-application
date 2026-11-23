@@ -80,6 +80,8 @@ import im.manus.universalhost.IShareHandler;
 import im.manus.universalhost.PadMapper;
 import im.manus.universalhost.PanelConfirm;
 import im.manus.universalhost.SettingItem;
+import im.manus.universalhost.YtAudioQueue;
+import im.manus.universalhost.YtQueueView;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -3503,8 +3505,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             {"keep_screen", "💡 Не гасить экран", "1"},
             {"tiles_one", "🖼 Плитки в один ряд", "0"},
     };
-    private static final String[] BAR_DEFAULTS = {"list:0", "list:1", "list:2", "list:3", "scan"};
-    private static final String[] BAR_LISTS = {"♫ Все песни", "🕓 Послушать позже", "⭐ Избранное", "🎬 Видео"};
+    private static final String[] BAR_DEFAULTS = {"list:0", "list:1", "list:2", "list:3", "scan", "list:4"};
+    private static final String[] BAR_LISTS = {"♫ Все песни", "🕓 Послушать позже", "⭐ Избранное", "🎬 Видео", "⬇ Загрузка"};
 
     /** Все варианты назначения: {id, название}. Первый пункт делает кнопку пустой. */
     private List<String[]> barOptions() {
@@ -3633,6 +3635,7 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                         if (m == 0) count = generalArray().length;
                         else if (m == 1) count = plCount(PL_LATER);
                         else if (m == 2) count = plCount(PL_FAV);
+                        else if (m == 4) count = YtAudioQueue.get(ctx).snapshot().size();
                         else if (v != null) count = v.videoIdx().size();
                     } catch (Throwable e) { }
                     String g = firstToken(BAR_LISTS[Math.max(0, Math.min(BAR_LISTS.length - 1, m))]);
@@ -4288,6 +4291,11 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
             rowIdx.clear();
             final Context ctx = getContext();
             updateListButtons();
+            if (listMode == 4) {                      // «Загрузка»: очередь модуля «YouTube аудио» прямо в плеере
+                markedCur = -2;
+                trackRows.addView(YtQueueView.create(ctx));
+                return;
+            }
             if (listMode == 3) {
                 markedCur = -2;
                 buildVideoRows(ctx);
