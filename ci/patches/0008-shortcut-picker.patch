@@ -1,0 +1,24 @@
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 7c2ed56..7f96a13 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -128,6 +128,19 @@
+             </intent-filter>
+         </activity>
+ 
++        <!-- Выбор команды браузера для приложений, создающих ярлыки через CREATE_SHORTCUT (Micro Gesture: App shortcut) -->
++        <activity android:name=".BrowserShortcutPickerActivity" android:exported="true"
++            android:label="Universal Host: команды браузера"
++            android:icon="@drawable/ic_browser_app"
++            android:theme="@android:style/Theme.Translucent.NoTitleBar"
++            android:taskAffinity=""
++            android:excludeFromRecents="true">
++            <intent-filter>
++                <action android:name="android.intent.action.CREATE_SHORTCUT" />
++                <category android:name="android.intent.category.DEFAULT" />
++            </intent-filter>
++        </activity>
++
+         <!-- Команды браузеру извне: broadcast im.manus.universalhost.BROWSER_COMMAND с параметром cmd -->
+         <receiver android:name=".BrowserCommandReceiver" android:exported="true">
+             <intent-filter>
