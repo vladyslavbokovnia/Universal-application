@@ -70,6 +70,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 import im.manus.universalhost.IKeyHandler;
+import im.manus.universalhost.Deps;
 import im.manus.universalhost.IMainBarProvider;
 import im.manus.universalhost.IMainViewProvider;
 import im.manus.universalhost.IMotionHandler;
@@ -81,10 +82,12 @@ import im.manus.universalhost.PadMapper;
 import im.manus.universalhost.PanelConfirm;
 import im.manus.universalhost.SettingItem;
 import im.manus.universalhost.YtAudioQueue;
+import im.manus.universalhost.YtPipeline;
 import im.manus.universalhost.YtQueueView;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -192,9 +195,10 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     };
 
     @Override public String getName() { return "Аудиоплеер"; }
-    @Override public int getVersion() { return 28; }
+    @Override public int getVersion() { return 29; }
     @Override public String getDescription() {
-        return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку.";
+        return "Аудиоплеер и пульт: песни с устройства, управление другим плеером, геймпад, гарнитура, стик-циферблат по треку; "
+                + "загрузка звука и видео с переводом по ссылкам YouTube (бывший модуль «YouTube аудио»).";
     }
     @Override public String getIconName() { return "ic_launcher"; }
 
@@ -226,9 +230,14 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         mapper(context);
         registerFocusWatch();
         updateFocusCatcher();
+        try {
+            YtPipeline.prepare(appCtx);               // перенос настроек бывшего модуля «VOT перевод»
+            YtAudioQueue.get(appCtx).tryDrain();      // ссылки, дожидавшиеся сети до перезапуска
+        } catch (Throwable t) { }
     }
 
     @Override public void stop() {
+        try { if (appCtx != null) YtAudioQueue.get(appCtx).unwatchNet(); } catch (Throwable t) { }
         try { if (System.getProperties().get(LIVE_KEY) == this) System.getProperties().remove(LIVE_KEY); } catch (Throwable t) { }
         try { if (coverPool != null) coverPool.shutdownNow(); } catch (Throwable t) { }
         coverPool = null;
@@ -1983,7 +1992,41 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
     @Override public List<String> shareMimeTypes() {
         List<String> r = new ArrayList<String>();
         r.add("audio/*");
+        r.add(YT_MIME);
+        r.add(YT_MIME_VOT);
         return r;
+    }
+
+    static final String YT_MIME = "text/x-ytaudio";
+    /** Тип кнопки 🎬: mp4 с видео YouTube и переводом Яндекса вместо звука. */
+    static final String YT_MIME_VOT = "text/x-votaudio";
+
+    private static boolean isYoutube(String u) {
+        if (u == null) return false;
+        String s = u.toLowerCase();
+        return s.startsWith("http") && (s.contains("youtu.be/") || s.contains("youtube.com/"));
+    }
+
+    /** Ссылка на ролик YouTube (из скрипта YouTube TTS или из долгого нажатия на 🔗): в очередь загрузки. */
+    private boolean onShareYoutube(Context ctx, Intent intent) {
+        try {
+            YtAudioQueue q = YtAudioQueue.get(ctx);
+            String url = intent.getStringExtra(Intent.EXTRA_TEXT);
+            String title = intent.getStringExtra(Intent.EXTRA_SUBJECT);
+            if (url != null) url = url.trim();
+            if (!isYoutube(url)) {
+                q.toast("⚠️🔗");
+                return false;
+            }
+            // clean: «эээ» вырезаются независимо от настройки; engine: движок очистки для этого ролика (0 Uhm,
+            // 1 Steady, 2 GigaAM), он же включает очистку; тип text/x-votaudio (или флаг video): mp4 с переводом
+            boolean video = intent.getBooleanExtra("video", false) || YT_MIME_VOT.equals(intent.getType());
+            int engine = intent.getIntExtra("engine", -1);
+            q.submit(url, title, intent.getBooleanExtra("clean", false) || engine >= 0, video, engine);
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     /**
@@ -1991,6 +2034,8 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
      * Работает, даже если модуль ещё не был проинициализирован службой.
      */
     @Override public boolean onShare(Context ctx, Intent intent) {
+        String type = intent.getType();
+        if (YT_MIME.equals(type) || YT_MIME_VOT.equals(type)) return onShareYoutube(ctx, intent);
         try {
             if (appCtx == null) {
                 appCtx = ctx.getApplicationContext();
@@ -3426,13 +3471,75 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
                 "Включено: назначенная кнопка только для плеера", true));
         r.add(SettingItem.slider("long_ms", "⏱ Долгое нажатие, мс", "", 300, 1000, 50, 500));
         r.add(SettingItem.slider("double_ms", "⏱⏱ Двойное нажатие, мс", "", 150, 600, 50, 300));
+        r.add(SettingItem.section("🎧 Загрузка YouTube"));
+        r.add(SettingItem.toggle("auto_mode", "🤖 Загружать автоматически",
+                "Включено: ссылки качаются сами, как только есть подходящая сеть. Выключено: ссылки ждут в списке «Загрузка», пока не нажмёшь на плитку.", true));
+        r.add(SettingItem.toggle("wifi_only", "📶 Только по Wi-Fi",
+                "Мобильная сеть не используется: ссылки ждут Wi-Fi.", false));
+        r.add(SettingItem.text("max_dl", "⬇ Одновременных загрузок",
+                "Сколько роликов качается с YouTube сразу (1–10). Перевод Яндекса идёт без ограничения, очистка «эээ» всегда по одной.", "3"));
+        r.add(SettingItem.text("video_height", "🎞 Высота видео для кнопки 🎬",
+                "Видео с переводом качается не выше этой высоты, пикселей (144–2160, обычно 720). Нужен формат H.264: другие в mp4 без перекодирования не кладутся.", "720"));
+        r.add(SettingItem.text("lang", "🌐 Язык дорожки", "Код языка: ru, en, uk.", "ru"));
+        r.add(SettingItem.choice("storage", "💾 Куда сохранять",
+                "Память телефона или SD-карта (карта должна быть подключена, приложению нужен доступ ко всем файлам). Если выбрана карта, а её нет, ссылки остаются в списке.",
+                Arrays.asList("📱 Память телефона", "💾 SD-карта"), 0));
+        r.add(SettingItem.text("out_dir", "📁 Папка", "Одна папка для оригинала, дубляжа и перевода, внутри выбранного места. Рядом с аудио кладутся превью и ссылка.", "Music/YouTube"));
+        r.add(SettingItem.section("🧩 Зависимости"));
+        r.add(SettingItem.action("dep_newpipe", "🧩 NewPipe (YouTube): " + depState(Deps.NEWPIPE),
+                "Скачать или обновить библиотеку из релиза. Нужна для загрузки дорожек: без неё ссылки ждут в списке. Новая версия вступает сразу."));
+        addDepDelete(r, "del_newpipe", "NewPipe", Deps.NEWPIPE);
+        r.add(SettingItem.toggle("clean_fillers", "🧹 Вырезать «эээ» из русского оригинала",
+                "Включено: после загрузки русского оригинала «эээ» вырезаются выбранным ниже движком. Вариант 🧹 в меню долгого нажатия на 🔗 вырезает «эээ» в любом случае. Если движок не скачался или нашёл слишком много, файл остаётся как есть.", true));
+        r.add(SettingItem.choice("clean_engine", "🧪 Движок очистки «эээ»",
+                "Работает только выбранный: остальные в память не загружаются, их можно удалить кнопками ниже. Uhm: модель на английском, для русской речи перенос. Steady: без модели, ищет долгие ровные гласные, от языка не зависит; ошибается на протянутых словах. GigaAM: русское распознавание речи (модель около 230 МБ, нужна память и время), ищет провалы между словами, где есть голос.",
+                Arrays.asList("Uhm (модель)", "Steady (ровные гласные)", "GigaAM (русская речь)"), 0));
+        r.add(SettingItem.action("dep_uhm", "🧩 Uhm («эээ»): " + depState(Deps.UHM),
+                "Скачать или обновить библиотеку из релиза (большой файл, лучше по Wi-Fi). Обновление вступает после перезапуска приложения."));
+        addDepDelete(r, "del_uhm", "Uhm", Deps.UHM);
+        r.add(SettingItem.action("dep_steady", "🧩 Steady («эээ»): " + depState(Deps.STEADY),
+                "Скачать или обновить лёгкую библиотеку из релиза (без модели, меньше мегабайта)."));
+        addDepDelete(r, "del_steady", "Steady", Deps.STEADY);
+        r.add(SettingItem.action("dep_gigaam", "🧩 GigaAM («эээ»): " + depState(Deps.GIGAAM),
+                "Скачать или обновить библиотеку из релиза. Саму модель русской речи (около 230 МБ) программа скачает при первой очистке, лучше по Wi-Fi. Обновление вступает после перезапуска приложения."));
+        addDepDelete(r, "del_gigaam", "GigaAM и модель", Deps.GIGAAM);
+        r.add(SettingItem.section("🗣 Перевод Яндекса"));
+        if (appCtx != null) r.addAll(YtPipeline.votSettings(appCtx));
         r.add(SettingItem.section("⚙"));
         r.add(SettingItem.action("pin", "📌 Ярлык на рабочий стол", ""));
         r.add(SettingItem.action("reset", "↺ Сбросить кнопки", ""));
         return r;
     }
 
+    private String depState(String name) {
+        return appCtx == null ? "" : Deps.state(appCtx, name);
+    }
+
+    /** Кнопка «удалить зависимость» показывается, только пока она скачана. */
+    private void addDepDelete(List<SettingItem> r, String key, String title, String dep) {
+        if (appCtx == null || !Deps.installed(appCtx, dep)) return;
+        r.add(SettingItem.action(key, "🗑 Удалить " + title + " (" + depState(dep) + ")",
+                "Стирает файлы с телефона. Скачать снова можно кнопкой выше. Нативный код Uhm, уже загруженный в этом запуске, освободится после перезапуска приложения."));
+    }
+
+    /** Настройки загрузки YouTube: то, что раньше делал модуль «YouTube аудио». true: ключ разобран. */
+    private boolean ytSettingChanged(String key) {
+        if (appCtx == null || key == null) return false;
+        if ("dep_newpipe".equals(key)) { Deps.updateAsync(appCtx, Deps.NEWPIPE); return true; }
+        if ("dep_uhm".equals(key)) { Deps.updateAsync(appCtx, Deps.UHM); return true; }
+        if ("dep_steady".equals(key)) { Deps.updateAsync(appCtx, Deps.STEADY); return true; }
+        if ("dep_gigaam".equals(key)) { Deps.updateAsync(appCtx, Deps.GIGAAM); return true; }
+        if ("del_gigaam".equals(key)) { Deps.deleteAsync(appCtx, Deps.GIGAAM); return true; }
+        if ("del_newpipe".equals(key)) { Deps.deleteAsync(appCtx, Deps.NEWPIPE); return true; }
+        if ("del_uhm".equals(key)) { Deps.deleteAsync(appCtx, Deps.UHM); return true; }
+        if ("del_steady".equals(key)) { Deps.deleteAsync(appCtx, Deps.STEADY); return true; }
+        if (key.startsWith("vot_")) { YtPipeline.votSettingChanged(appCtx, key); return true; }
+        if ("auto_mode".equals(key) || "wifi_only".equals(key)) { YtAudioQueue.get(appCtx).tryDrain(); return true; }
+        return false;
+    }
+
     @Override public void onSettingChanged(String key) {
+        if (ytSettingChanged(key)) return;
         if ("pin".equals(key)) {
             try { im.manus.universalhost.ModuleShortcuts.pin(appCtx, this); }
             catch (Throwable t) { }

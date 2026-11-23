@@ -40,7 +40,45 @@ import java.util.concurrent.Executors;
 public final class YtAudioQueue {
 
     // Хост хранит настройки модуля под именем module_ + ModuleStorage.safe(имя): всё, кроме латиницы, цифр и _.-, становится «_».
-    public static final String PREFS = "module_" + "YouTube аудио".replaceAll("[^A-Za-z0-9_.-]", "_");
+    /** Список и настройки лежат в файле плеера: модуль «YouTube аудио» влит в «Аудиоплеер». */
+    public static final String PREFS = "module_" + "Аудиоплеер".replaceAll("[^A-Za-z0-9_.-]", "_");
+    private static final String OLD_PREFS = "module_" + "YouTube аудио".replaceAll("[^A-Za-z0-9_.-]", "_");
+
+    /**
+     * Файл настроек с очередью. При первом обращении один раз переносит значения прежнего модуля «YouTube аудио»
+     * (ключи не пересекаются с ключами плеера; уже существующие в новом файле не трогаются).
+     */
+    public static SharedPreferences sharedPrefs(Context c) {
+        Context ctx = c.getApplicationContext();
+        SharedPreferences np = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        synchronized (YtAudioQueue.class) {
+            if (!np.getBoolean("yt_merged", false)) {
+                try {
+                    SharedPreferences old = ctx.getSharedPreferences(OLD_PREFS, Context.MODE_PRIVATE);
+                    SharedPreferences.Editor e = np.edit();
+                    for (java.util.Map.Entry<String, ?> en : old.getAll().entrySet()) {
+                        String k = en.getKey();
+                        Object v = en.getValue();
+                        if (v == null || np.contains(k)) continue;
+                        if (v instanceof String) e.putString(k, (String) v);
+                        else if (v instanceof Boolean) e.putBoolean(k, (Boolean) v);
+                        else if (v instanceof Integer) e.putInt(k, (Integer) v);
+                        else if (v instanceof Long) e.putLong(k, (Long) v);
+                        else if (v instanceof Float) e.putFloat(k, (Float) v);
+                        else if (v instanceof Set) {
+                            @SuppressWarnings("unchecked") Set<String> set = (Set<String>) v;
+                            e.putStringSet(k, set);
+                        }
+                    }
+                    e.putBoolean("yt_merged", true);
+                    e.apply();
+                } catch (Throwable t) {
+                    np.edit().putBoolean("yt_merged", true).apply();
+                }
+            }
+        }
+        return np;
+    }
     public static final String QUEUED = "q";      // ждёт загрузки
     public static final String NO_TRACK = "n";    // нет нужной дорожки (остаётся в списке)
     public static final String ERROR = "e";       // ошибка (остаётся в списке)
@@ -96,7 +134,7 @@ public final class YtAudioQueue {
     // ---------------------------------------------------------- настройки и хранение
 
     private SharedPreferences prefs() {
-        return app.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        return sharedPrefs(app);
     }
 
     public boolean autoMode() { return prefs().getBoolean("auto_mode", true); }
@@ -147,7 +185,7 @@ public final class YtAudioQueue {
      * (настройка «Куда сохранять»). null: выбрана SD-карта, а её нет.
      */
     public static File mediaDir(Context app) {
-        SharedPreferences p = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        SharedPreferences p = sharedPrefs(app);
         String rel = p.getString("out_dir", "Music/YouTube");
         if (rel == null || rel.trim().length() == 0) rel = "Music/YouTube";
         rel = rel.trim();

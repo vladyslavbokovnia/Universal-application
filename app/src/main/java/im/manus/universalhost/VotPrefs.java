@@ -8,7 +8,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Настройки движка перевода (бывший модуль «VOT перевод») внутри настроек модуля «YouTube аудио»: все его ключи лежат
+ * Настройки движка перевода (бывший модуль «VOT перевод») внутри настроек модуля «Аудиоплеер» (бывший «YouTube аудио»): все его ключи лежат
  * там с префиксом vot_. Единственный общий ключ без префикса — wifi_only («Только по Wi-Fi» для всего модуля).
  * При первом обращении значения (вход в Яндекс, голос и т. д.) копируются из старого файла настроек VOT.
  */
@@ -23,7 +23,7 @@ final class VotPrefs implements SharedPreferences {
 
     static SharedPreferences of(Context c) {
         Context app = c.getApplicationContext();
-        SharedPreferences base = app.getSharedPreferences(YtAudioQueue.PREFS, Context.MODE_PRIVATE);
+        SharedPreferences base = YtAudioQueue.sharedPrefs(app);
         synchronized (VotPrefs.class) {
             if (!base.getBoolean(PREFIX + "migrated", false)) migrate(app, base);
         }
