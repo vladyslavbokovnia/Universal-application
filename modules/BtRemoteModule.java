@@ -1,7 +1,10 @@
 package im.manus.plugins;
 
 import android.accessibilityservice.AccessibilityService;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -13,6 +16,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.view.Gravity;
+import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
@@ -40,6 +44,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Bluetooth-пульт (TikTok и подобные): кнопки читаются из ядра через Shizuku (getevent), работает и с выключенным экраном.
@@ -59,8 +65,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     private static final String[][] FNS = {
             {"play_pause", "⏯ Пауза / воспроизведение"}, {"next", "⏭ Следующий трек"},
             {"prev", "⏮ Предыдущий трек"}, {"ff", "⏩ Перемотка вперёд"}, {"rw", "⏪ Перемотка назад"},
-            {"vol_up", "🔊 Громкость +"}, {"vol_down", "🔉 Громкость −"}, {"mute", "🔇 Без звука"},
-            {"stop", "⏹ Стоп"},
+            {"vol_up", "🔊 Громкость +"}, {"vol_down", "🔉 Громкость −"},
             {"ap:play_pause", "▶️ Плеер: пауза / пуск"}, {"ap:next", "➡️ Плеер: следующий трек"},
             {"ap:prev", "⬅️ Плеер: предыдущий трек"}, {"ap:seek_back", "↩️ Плеер: назад на шаг"},
             {"ap:seek_fwd", "↪️ Плеер: вперёд на шаг"}, {"ap:later", "🕓 Плеер: послушать позже"},
@@ -69,6 +74,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
             {"ap:speed_up", "🐇 Плеер: быстрее"}, {"ap:speed_down", "🐢 Плеер: медленнее"},
             {"ap:speed_reset", "🎚 Плеер: скорость 1×"}, {"ap:reverse", "🔃 Плеер: обратный порядок"},
             {"ap:stop_after", "🛑 Плеер: стоп после трека"}, {"ap:lock", "🔒 Плеер: блок касаний"},
+            {"ap:auto_delete", "🗑 Плеер: автоудаление (вкл/выкл)"},
     };
 
     /** Типы нажатия: S — одно, D — двойное, L — долгое. */
@@ -109,6 +115,22 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     private final Map<String, Ptr> ptrs = new HashMap<String, Ptr>();
     private final Set<String> excluded = new HashSet<String>();    // сенсорный экран и кнопки самого телефона
 
+    // диагностика кнопок
+    private volatile String capLabel;
+    private long capT0;
+    private final StringBuilder capBuf = new StringBuilder();
+    private final Map<String, Integer> capCount = new HashMap<String, Integer>();
+    private volatile String devDump = "";
+    private volatile Runnable diagCb;
+
+    // геймпад через getevent: кнопки и оси идут в PadMapper модуля «Аудиоплеер», в том числе при выключенном экране
+    private static final Pattern ABS_RE = Pattern.compile("(ABS_[A-Z0-9_]+)\\s*:\\s*value\\s+-?\\d+,\\s*min\\s+(-?\\d+),\\s*max\\s+(-?\\d+)");
+    private final Map<String, Map<String, int[]>> absRange = new HashMap<String, Map<String, int[]>>();
+    private final Set<String> padPaths = new HashSet<String>();
+    private final Map<String, float[]> padAxes = new HashMap<String, float[]>();     // lx, ly, rx, ry, hx, hy, lt, rt
+    private final Map<String, float[]> padSent = new HashMap<String, float[]>();
+    private final Map<String, Boolean> padVirt = new HashMap<String, Boolean>();
+
     private volatile boolean alive;
     private volatile Process proc;
     private Thread reader;
@@ -125,7 +147,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     private final Runnable readyCb = new Runnable() { @Override public void run() { startReader(); } };
 
     @Override public String getName() { return NAME; }
-    @Override public int getVersion() { return 5; }
+    @Override public int getVersion() { return 6; }
     @Override public String getDescription() {
         return "Bluetooth-пульт через Shizuku: схема кнопок, одно/двойное/долгое нажатие, команды плеера";
     }
@@ -187,28 +209,43 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         if (p != null) { try { p.destroy(); } catch (Throwable t) { } }
     }
 
-    /** Сенсорный экран (INPUT_PROP_DIRECT) и кнопки самого телефона (шина 0019) пульта не касаются: не читаем. */
+    /**
+     * Читает «getevent -lp»: сенсорный экран (INPUT_PROP_DIRECT) и кнопки самого телефона (шина 0019) пульта не касаются,
+     * их не читаем; геймпады (есть BTN_GAMEPAD/BTN_SOUTH/BTN_TL) и пределы осей запоминаем; текст описания устройств идёт в отчёт.
+     */
     private void scanExcluded() {
         try {
             String out = ShizukuBridge.exec("getevent -lp").getOut();
+            Set<String> ex = new HashSet<String>(), pads = new HashSet<String>();
+            Map<String, Map<String, int[]>> ranges = new HashMap<String, Map<String, int[]>>();
+            StringBuilder dump = new StringBuilder(), blk = new StringBuilder();
+            Map<String, int[]> rng = new HashMap<String, int[]>();
             String path = null, bus = "";
-            boolean direct = false;
-            Set<String> ex = new HashSet<String>();
+            boolean direct = false, pad = false;
             for (String raw : (out + "\nadd device").split("\n")) {
                 String s = raw.trim();
                 if (s.startsWith("add device")) {
-                    if (path != null && (direct || "0019".equals(bus))) ex.add(path);
+                    if (path != null) {
+                        if (direct || "0019".equals(bus)) ex.add(path);
+                        else { dump.append(blk).append('\n'); ranges.put(path, rng); if (pad) pads.add(path); }
+                    }
                     int i = s.indexOf(": ");
                     path = i > 0 ? s.substring(i + 2).trim() : null;
-                    bus = "";
-                    direct = false;
-                } else if (s.startsWith("bus:")) {
-                    bus = s.substring(4).trim();
-                } else if (s.contains("INPUT_PROP_DIRECT")) {
-                    direct = true;
+                    bus = ""; direct = false; pad = false;
+                    blk.setLength(0); blk.append(s).append('\n');
+                    rng = new HashMap<String, int[]>();
+                    continue;
                 }
+                blk.append(raw).append('\n');
+                if (s.startsWith("bus:")) bus = s.substring(4).trim();
+                if (s.contains("INPUT_PROP_DIRECT")) direct = true;
+                if (s.contains("BTN_GAMEPAD") || s.contains("BTN_SOUTH") || s.contains("BTN_TL")) pad = true;
+                Matcher m = ABS_RE.matcher(s);
+                if (m.find()) rng.put(m.group(1), new int[]{Integer.parseInt(m.group(2)), Integer.parseInt(m.group(3))});
             }
-            synchronized (lock) { excluded.clear(); excluded.addAll(ex); }
+            synchronized (lock) { excluded.clear(); excluded.addAll(ex); devDump = dump.toString(); }
+            padPaths.clear(); padPaths.addAll(pads);
+            absRange.clear(); absRange.putAll(ranges);
         } catch (Throwable t) { }
     }
 
@@ -264,8 +301,10 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         String[] t = s.substring(c + 1).trim().split("\\s+");
         if (t.length < 3) return;
         String type = t[0], code = t[1], val = t[2];
-        if ("EV_SYN".equals(type) || "EV_MSC".equals(type) || "EV_LED".equals(type)) return;
         synchronized (lock) { if (excluded.contains(path)) return; }
+        capture(path, s);
+        if (padPaths.contains(path)) { handlePad(path, type, code, val); return; }
+        if ("EV_SYN".equals(type) || "EV_MSC".equals(type) || "EV_LED".equals(type)) return;
 
         String dev;
         synchronized (devNames) { dev = devNames.get(path); }
@@ -332,6 +371,168 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         pressDone("R|MOVE_" + d + "|" + dev, 0);
     }
 
+    // ------------------------------------------------------------------ диагностика кнопок
+
+    /** Запись сырых строк getevent выбранной кнопки (поток чтения). */
+    private void capture(String path, String raw) {
+        if (capLabel == null) return;
+        String dev;
+        synchronized (devNames) { dev = devNames.get(path); }
+        synchronized (lock) {
+            String label = capLabel;
+            if (label == null || capBuf.length() > 60000) return;
+            capBuf.append('+').append(SystemClock.uptimeMillis() - capT0).append(' ').append(dev == null ? path : dev)
+                    .append(' ').append(raw.substring(raw.indexOf(':') + 1).trim()).append('\n');
+            if (!raw.contains("EV_SYN")) { Integer n = capCount.get(label); capCount.put(label, n == null ? 1 : n + 1); }
+        }
+    }
+
+    private void startCapture(final String label, long ms) {
+        synchronized (lock) {
+            capLabel = label;
+            capT0 = SystemClock.uptimeMillis();
+            capBuf.append("\n== ").append(label).append(" ==\n");
+            capCount.put(label, 0);
+        }
+        if (main == null) return;
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                synchronized (lock) { if (label.equals(capLabel)) capLabel = null; }
+                Runnable cb = diagCb;
+                if (cb != null) cb.run();
+            }
+        }, ms);
+    }
+
+    private String report() {
+        String pads;
+        try { pads = String.valueOf(padPaths); } catch (RuntimeException e) { pads = "?"; }
+        StringBuilder sb = new StringBuilder("BtRemote v").append(getVersion()).append('\n');
+        sb.append("Shizuku: ").append(readerState).append('\n');
+        synchronized (lock) {
+            sb.append("исключены: ").append(excluded).append("\nгеймпады: ").append(pads).append("\nжурнал:\n");
+            for (String s : evlog) sb.append("  ").append(s).append('\n');
+            sb.append(capBuf);
+        }
+        sb.append("\n== устройства ==\n").append(devDump);
+        String r = sb.toString();
+        return r.length() > 90000 ? r.substring(0, 90000) : r;
+    }
+
+    // ------------------------------------------------------------------ геймпад через getevent (работает и при выключенном экране)
+
+    private static final Map<String, Integer> PAD_KEYS = new HashMap<String, Integer>();
+    static {
+        String[] n = {"BTN_GAMEPAD", "BTN_SOUTH", "BTN_A", "BTN_EAST", "BTN_B", "BTN_NORTH", "BTN_X", "BTN_WEST", "BTN_Y", "BTN_TL", "BTN_TR",
+                "BTN_TL2", "BTN_TR2", "BTN_SELECT", "BTN_START", "BTN_MODE", "BTN_THUMBL", "BTN_THUMBR",
+                "BTN_DPAD_UP", "BTN_DPAD_DOWN", "BTN_DPAD_LEFT", "BTN_DPAD_RIGHT"};
+        int[] k = {KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_BUTTON_B,
+                KeyEvent.KEYCODE_BUTTON_X, KeyEvent.KEYCODE_BUTTON_X, KeyEvent.KEYCODE_BUTTON_Y, KeyEvent.KEYCODE_BUTTON_Y,
+                KeyEvent.KEYCODE_BUTTON_L1, KeyEvent.KEYCODE_BUTTON_R1, KeyEvent.KEYCODE_BUTTON_L2, KeyEvent.KEYCODE_BUTTON_R2,
+                KeyEvent.KEYCODE_BUTTON_SELECT, KeyEvent.KEYCODE_BUTTON_START, KeyEvent.KEYCODE_BUTTON_MODE,
+                KeyEvent.KEYCODE_BUTTON_THUMBL, KeyEvent.KEYCODE_BUTTON_THUMBR,
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT};
+        for (int i = 0; i < n.length; i++) PAD_KEYS.put(n[i], Integer.valueOf(k[i]));
+    }
+
+    /** События геймпада из getevent (поток чтения): кнопки и оси переводятся в события Android и идут в PadMapper плеера. */
+    private void handlePad(String path, String type, String code, String val) {
+        if ("EV_KEY".equals(type)) {
+            Integer k = PAD_KEYS.get(code);
+            if (k == null) return;
+            if ("DOWN".equals(val)) postPadKey(k.intValue(), true);
+            else if ("UP".equals(val)) postPadKey(k.intValue(), false);
+            return;
+        }
+        float[] a = padAxes.get(path);
+        if (a == null) { a = new float[8]; padAxes.put(path, a); padSent.put(path, new float[8]); }
+        if ("EV_SYN".equals(type)) {
+            float[] last = padSent.get(path);
+            boolean changed = false;
+            for (int i = 0; i < 6; i++) if (a[i] != last[i]) { changed = true; break; }
+            if (changed) { System.arraycopy(a, 0, last, 0, 8); postPadAxes(a.clone()); }
+            virt(path, KeyEvent.KEYCODE_BUTTON_L2, a[6]);
+            virt(path, KeyEvent.KEYCODE_BUTTON_R2, a[7]);
+            return;
+        }
+        if (!"EV_ABS".equals(type)) return;
+        Map<String, int[]> rg = absRange.get(path);
+        int[] r = rg == null ? null : rg.get(code);
+        int v = parseHex(val);
+        float span = r == null ? 0f : (float) (r[1] - r[0]);
+        float n = span == 0f ? 0f : (v - r[0]) * 2f / span - 1f;
+        float u = span == 0f ? 0f : (v - r[0]) / span;
+        boolean hasRx = rg != null && rg.containsKey("ABS_RX");
+        if ("ABS_X".equals(code)) a[0] = n;
+        else if ("ABS_Y".equals(code)) a[1] = n;
+        else if ("ABS_RX".equals(code)) a[2] = n;
+        else if ("ABS_RY".equals(code)) a[3] = n;
+        else if ("ABS_Z".equals(code)) { if (hasRx) a[6] = u; else a[2] = n; }
+        else if ("ABS_RZ".equals(code)) { if (hasRx) a[7] = u; else a[3] = n; }
+        else if ("ABS_BRAKE".equals(code)) a[6] = u;
+        else if ("ABS_GAS".equals(code)) a[7] = u;
+        else if ("ABS_HAT0X".equals(code)) a[4] = v;
+        else if ("ABS_HAT0Y".equals(code)) a[5] = v;
+    }
+
+    /** Аналоговые курки как кнопки L2/R2 с гистерезисом 0.55 / 0.35. */
+    private void virt(String path, int key, float v) {
+        String k = path + key;
+        Boolean cur = padVirt.get(k);
+        boolean on = (cur != null && cur.booleanValue()) ? v > 0.35f : v > 0.55f;
+        if (cur == null ? on : on != cur.booleanValue()) { padVirt.put(k, Boolean.valueOf(on)); postPadKey(key, on); }
+    }
+
+    /** PadMapper модуля «Аудиоплеер» (его закрытое поле mapper); null, если плеер не запущен. */
+    private PadMapper padMapper() {
+        try {
+            Object ap = System.getProperties().get(PLAYER_LIVE_KEY);
+            if (ap == null) return null;
+            Field f = ap.getClass().getDeclaredField("mapper");
+            f.setAccessible(true);
+            Object m = f.get(ap);
+            return m instanceof PadMapper ? (PadMapper) m : null;
+        } catch (Throwable t) { return null; }
+    }
+
+    private void postPadKey(final int key, final boolean down) {
+        postMain(new Runnable() {
+            @Override public void run() {
+                PadMapper m = padMapper();
+                if (m == null) return;
+                long t = SystemClock.uptimeMillis();
+                m.onKeyEvent(new KeyEvent(t, t, down ? KeyEvent.ACTION_DOWN : KeyEvent.ACTION_UP, key, 0, 0, -1, 0, 0, InputDevice.SOURCE_GAMEPAD));
+            }
+        });
+    }
+
+    private void postPadAxes(final float[] a) {
+        postMain(new Runnable() {
+            @Override public void run() {
+                PadMapper m = padMapper();
+                if (m == null) return;
+                try {
+                    MotionEvent.PointerProperties pp = new MotionEvent.PointerProperties();
+                    pp.id = 0;
+                    pp.toolType = MotionEvent.TOOL_TYPE_UNKNOWN;
+                    MotionEvent.PointerCoords pc = new MotionEvent.PointerCoords();
+                    pc.setAxisValue(MotionEvent.AXIS_X, a[0]);
+                    pc.setAxisValue(MotionEvent.AXIS_Y, a[1]);
+                    pc.setAxisValue(MotionEvent.AXIS_Z, a[2]);          // PadMapper без устройства читает правый стик из Z и RZ
+                    pc.setAxisValue(MotionEvent.AXIS_RZ, a[3]);
+                    pc.setAxisValue(MotionEvent.AXIS_HAT_X, a[4]);
+                    pc.setAxisValue(MotionEvent.AXIS_HAT_Y, a[5]);
+                    long t = SystemClock.uptimeMillis();
+                    MotionEvent e = MotionEvent.obtain(t, t, MotionEvent.ACTION_MOVE, 1,
+                            new MotionEvent.PointerProperties[]{pp}, new MotionEvent.PointerCoords[]{pc},
+                            0, 0, 1f, 1f, -1, 0, InputDevice.SOURCE_JOYSTICK, 0);
+                    m.onMotionEvent(e);
+                    e.recycle();
+                } catch (Throwable t) { }
+            }
+        });
+    }
+
     // ------------------------------------------------------------------ одно, двойное, долгое нажатие
 
     private long longMs() { return prefs != null ? prefs.getInt("long_ms", 600) : 600; }
@@ -355,6 +556,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         synchronized (lock) {
             evlog.addFirst(describe(sig));
             while (evlog.size() > 12) evlog.removeLast();
+            if (capLabel != null && capBuf.length() < 60000) capBuf.append("  -> ").append(sig).append('\n');
         }
         lastSig = sig;
         lastSigAt = SystemClock.uptimeMillis();
@@ -430,6 +632,22 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
 
     /** Назначения прежних версий (по функциям) переносятся в «кнопка#тип -> функция». */
     private void migrate() {
+        migrateOld();
+        cleanRemoved();
+    }
+
+    /** Убранные из списка действия (стоп, без звука): прежние назначения на них сбрасываются. */
+    private void cleanRemoved() {
+        if (prefs.getBoolean("mig6", false)) return;
+        SharedPreferences.Editor ed = prefs.edit();
+        for (Map.Entry<String, ?> e : prefs.getAll().entrySet()) {
+            if (e.getKey().startsWith("act#") && ("stop".equals(e.getValue()) || "mute".equals(e.getValue()))) ed.remove(e.getKey());
+        }
+        ed.putBoolean("mig6", true);
+        ed.apply();
+    }
+
+    private void migrateOld() {
         if (prefs.getBoolean("mig5", false)) return;
         SharedPreferences.Editor ed = prefs.edit();
         for (String[] f : FNS) {
@@ -647,6 +865,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
             addView(status);
             addView(dia, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             addView(panel, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            addView(diagView(c));
             TextView h = tv(c, "🎮 Геймпад (схема из плеера)", 18f, Color.WHITE);
             h.setPadding(dp(c, 16), dp(c, 24), dp(c, 16), dp(c, 8));
             addView(h);
@@ -657,12 +876,13 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
             super.onAttachedToWindow();
             uiOpen++;
             pressCb = onPress;
+            diagCb = onDiag;
             refreshStatus();
         }
 
         @Override protected void onDetachedFromWindow() {
             if (uiOpen > 0) uiOpen--;
-            if (uiOpen == 0) pressCb = null;
+            if (uiOpen == 0) { pressCb = null; diagCb = null; }
             super.onDetachedFromWindow();
         }
 
@@ -685,6 +905,71 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
             else { pending = sig; current = null; panel.removeAllViews(); otherRow(sig); }
             refreshStatus();
             dia.invalidate();
+        }
+
+        private final Runnable onDiag = new Runnable() { @Override public void run() { refreshDiag(); } };
+        private final List<TextView> diagRows = new ArrayList<TextView>();
+        private final String[] diagNames = {"▲ вверх", "◀ влево", "▶ вправо", "▼ вниз", "♥ сердечко", "📷 камера", "🎮 геймпад (любая кнопка)"};
+
+        private void refreshDiag() {
+            for (int i = 0; i < diagRows.size(); i++) {
+                Integer n;
+                synchronized (lock) { n = capCount.get(diagNames[i]); }
+                String mark = diagNames[i].equals(capLabel) ? "⏺ нажмите сейчас…" : (n == null ? "" : "событий: " + n);
+                diagRows.get(i).setText(diagNames[i] + (mark.length() > 0 ? "  —  " + mark : ""));
+            }
+        }
+
+        private TextView diagButton(final Context c, String text, OnClickListener click) {
+            TextView r = tv(c, text, 16f, Color.WHITE);
+            r.setPadding(dp(c, 16), dp(c, 12), dp(c, 16), dp(c, 12));
+            r.setBackgroundColor(Color.rgb(26, 26, 26));
+            r.setOnClickListener(click);
+            return r;
+        }
+
+        /** Диагностика: записывает сырые события каждой кнопки, отчёт можно скопировать или отправить. */
+        private LinearLayout diagView(final Context c) {
+            LinearLayout box = new LinearLayout(c);
+            box.setOrientation(VERTICAL);
+            TextView h = tv(c, "🔬 Диагностика кнопок", 18f, Color.WHITE);
+            h.setPadding(dp(c, 16), dp(c, 24), dp(c, 16), dp(c, 4));
+            box.addView(h);
+            TextView hint = tv(c, "Нажмите строку и в течение 4 секунд один раз нажмите эту кнопку на пульте. Когда запишете все, нажмите «Отправить отчёт» и пришлите его.", 13f, Color.LTGRAY);
+            hint.setPadding(dp(c, 16), 0, dp(c, 16), dp(c, 8));
+            box.addView(hint);
+            for (final String n : diagNames) {
+                TextView r = diagButton(c, n, new OnClickListener() {
+                    @Override public void onClick(View v) {
+                        startCapture(n, 4000);
+                        refreshDiag();
+                        Toast.makeText(c, "Нажмите кнопку сейчас (4 с)", Toast.LENGTH_SHORT).show();
+                    }
+                });
+                diagRows.add(r);
+                box.addView(r, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+            box.addView(diagButton(c, "📋 Скопировать отчёт", new OnClickListener() {
+                @Override public void onClick(View v) {
+                    try {
+                        ClipboardManager cm = (ClipboardManager) c.getSystemService(Context.CLIPBOARD_SERVICE);
+                        cm.setPrimaryClip(ClipData.newPlainText("BtRemote", report()));
+                        Toast.makeText(c, "Отчёт скопирован", Toast.LENGTH_SHORT).show();
+                    } catch (Throwable t) { Toast.makeText(c, "Не удалось скопировать", Toast.LENGTH_SHORT).show(); }
+                }
+            }), new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            box.addView(diagButton(c, "📤 Отправить отчёт", new OnClickListener() {
+                @Override public void onClick(View v) {
+                    try {
+                        Intent i = new Intent(Intent.ACTION_SEND);
+                        i.setType("text/plain");
+                        i.putExtra(Intent.EXTRA_TEXT, report());
+                        c.startActivity(Intent.createChooser(i, "Отправить отчёт"));
+                    } catch (Throwable t) { Toast.makeText(c, "Не удалось отправить", Toast.LENGTH_SHORT).show(); }
+                }
+            }), new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            refreshDiag();
+            return box;
         }
 
         private boolean hasAnyAct(String sig) { return has(sig, "S") || has(sig, "D") || has(sig, "L"); }
