@@ -338,6 +338,22 @@ public final class YtAudioQueue {
         }
     }
 
+    /**
+     * Попробовать другой способ для ссылки, которая уже в списке (не нашлась дорожка, ошибка): прежние «🧹» и движок
+     * для неё сбрасываются и берутся из нового варианта, статус обнуляется и ссылка идёт в загрузку заново.
+     * Если ссылка сейчас качается или чистится, ничего не меняется, пока она не закончит.
+     */
+    public synchronized void submitAgain(String url, boolean forceClean, boolean video, int engine) {
+        Item it = find(url);
+        if (it == null) { submit(url, null, forceClean, video, engine); return; }
+        boolean busy = active.contains(url) || cleaning.equals(url) || muxing.contains(url)
+                || VOT.equals(it.status) || CLEAN.equals(it.status) || MUX.equals(it.status);
+        if (busy) { toast("⏳ Уже идёт, дождись конца"); return; }
+        it.forceClean = false;
+        it.engine = -1;
+        submit(url, null, forceClean, video, engine);
+    }
+
     public synchronized void remove(String url) {
         Item it = find(url);
         if (it != null && !active.contains(url) && !cleaning.equals(url) && !muxing.contains(url)) items.remove(it);

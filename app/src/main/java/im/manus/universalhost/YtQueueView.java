@@ -266,6 +266,12 @@ public final class YtQueueView extends LinearLayout {
         link.setOnClickListener(new OnClickListener() {
             @Override public void onClick(View v) { openInBrowser(it.url); }
         });
+        link.setOnLongClickListener(new OnLongClickListener() {
+            @Override public boolean onLongClick(View v) {
+                askAnotherWay(it.url);
+                return true;
+            }
+        });
         bar.addView(link);
         TextView del = badge("🗑");
         del.setOnClickListener(new OnClickListener() {
@@ -299,6 +305,16 @@ public final class YtQueueView extends LinearLayout {
             @Override public boolean onTouch(View v, MotionEvent e) { return gd.onTouchEvent(e); }
         });
         return tile;
+    }
+
+    /** Долгое нажатие на 🔗: ссылка не загрузилась (нет дорожки или перевода, ошибка): выбрать другой способ. */
+    private void askAnotherWay(final String url) {
+        String[] labels = new String[YtVariants.ALL.length];
+        for (int i = 0; i < labels.length; i++) labels[i] = YtVariants.ALL[i].label;
+        boolean shown = PanelConfirm.pick(getContext(), "Попробовать другой способ", labels, -1, new PanelConfirm.OnPick() {
+            @Override public void pick(int index) { YtVariants.retry(getContext(), url, YtVariants.ALL[index]); }
+        });
+        if (!shown) q.toast("⚠️");
     }
 
     private void openInBrowser(String url) {

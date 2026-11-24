@@ -64,6 +64,11 @@ public final class YtVariants {
         return true;
     }
 
+    /** Ссылка уже в списке загрузок (не нашлась дорожка, ошибка): пробуем её другим способом. */
+    public static void retry(Context ctx, String url, Variant v) {
+        YtAudioQueue.get(ctx).submitAgain(url, v.clean || v.engine >= 0, v.video, v.engine);
+    }
+
     /** «Поделиться» из скрипта YouTube TTS: ссылка в тексте, название в теме, варианты в типе и полях. */
     public static boolean submitFromIntent(Context ctx, Intent intent) {
         try {
