@@ -147,7 +147,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     private final Runnable readyCb = new Runnable() { @Override public void run() { startReader(); } };
 
     @Override public String getName() { return NAME; }
-    @Override public int getVersion() { return 7; }
+    @Override public int getVersion() { return 8; }
     @Override public String getDescription() {
         return "Bluetooth-пульт через Shizuku: схема кнопок, одно/двойное/долгое нажатие, команды плеера";
     }
@@ -550,7 +550,15 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     private void fire(String sig, String g) {
         if (uiOpen > 0) return;                       // экран настроек открыт: нажатия только выбирают кнопку
         String fn = bound.get(sig + "#" + g);
-        if (fn != null) run(fn);
+        if (fn != null) {
+            synchronized (lock) {
+                evlog.addFirst("   ⚡ " + g + " → " + fn);
+                while (evlog.size() > 12) evlog.removeLast();
+                if (capLabel != null) capBuf.append("  FIRE ").append(g).append(' ').append(fn).append('\n');
+            }
+            Runnable cb = pressCb; if (cb != null) cb.run();
+            run(fn);
+        }
     }
 
     private KeyState stateOf(String sig) {
@@ -629,6 +637,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     /** Завершённое нажатие указки или колеса: длительность известна только в конце, поэтому долгое срабатывает при отпускании. */
     private void pressDone(String sig, long dur) {
         note(sig);
+        if (dur > 0) synchronized (lock) { if (!evlog.isEmpty()) evlog.set(0, evlog.getFirst() + " · " + dur + " мс"); }
         if (uiOpen > 0) return;
         if (dur >= longMs() && has(sig, "L")) { fire(sig, "L"); return; }
         shortPress(sig, stateOf(sig), false);
