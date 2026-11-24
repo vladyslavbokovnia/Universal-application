@@ -147,7 +147,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     private final Runnable readyCb = new Runnable() { @Override public void run() { startReader(); } };
 
     @Override public String getName() { return NAME; }
-    @Override public int getVersion() { return 8; }
+    @Override public int getVersion() { return 9; }
     @Override public String getDescription() {
         return "Bluetooth-пульт через Shizuku: схема кнопок, одно/двойное/долгое нажатие, команды плеера";
     }
@@ -411,6 +411,9 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
             }
         }, ms);
     }
+
+    /** Для общей диагностики хоста (значок в верхней панели). */
+    public String diagnosticsReport() { return report(); }
 
     private String report() {
         String pads;
@@ -952,7 +955,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
             TextView h = tv(c, "🔬 Диагностика кнопок", 18f, Color.WHITE);
             h.setPadding(dp(c, 16), dp(c, 24), dp(c, 16), dp(c, 4));
             box.addView(h);
-            TextView hint = tv(c, "Нажмите строку и в течение 4 секунд один раз нажмите эту кнопку на пульте. Когда запишете все, нажмите «Отправить отчёт» и пришлите его.", 13f, Color.LTGRAY);
+            TextView hint = tv(c, "Нажмите строку и в течение 4 секунд один раз нажмите эту кнопку на пульте. Когда запишете все, нажмите значок диагностики 📋 вверху главного экрана (долгое нажатие: отправить) и вставьте текст сюда.", 13f, Color.LTGRAY);
             hint.setPadding(dp(c, 16), 0, dp(c, 16), dp(c, 8));
             box.addView(hint);
             for (final String n : diagNames) {
@@ -966,25 +969,6 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
                 diagRows.add(r);
                 box.addView(r, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             }
-            box.addView(diagButton(c, "📋 Скопировать отчёт", new OnClickListener() {
-                @Override public void onClick(View v) {
-                    try {
-                        ClipboardManager cm = (ClipboardManager) c.getSystemService(Context.CLIPBOARD_SERVICE);
-                        cm.setPrimaryClip(ClipData.newPlainText("BtRemote", report()));
-                        Toast.makeText(c, "Отчёт скопирован", Toast.LENGTH_SHORT).show();
-                    } catch (Throwable t) { Toast.makeText(c, "Не удалось скопировать", Toast.LENGTH_SHORT).show(); }
-                }
-            }), new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            box.addView(diagButton(c, "📤 Отправить отчёт", new OnClickListener() {
-                @Override public void onClick(View v) {
-                    try {
-                        Intent i = new Intent(Intent.ACTION_SEND);
-                        i.setType("text/plain");
-                        i.putExtra(Intent.EXTRA_TEXT, report());
-                        c.startActivity(Intent.createChooser(i, "Отправить отчёт"));
-                    } catch (Throwable t) { Toast.makeText(c, "Не удалось отправить", Toast.LENGTH_SHORT).show(); }
-                }
-            }), new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             refreshDiag();
             return box;
         }

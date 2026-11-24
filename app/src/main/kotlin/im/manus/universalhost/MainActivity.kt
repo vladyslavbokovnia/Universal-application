@@ -45,6 +45,7 @@ class MainActivity : Activity() {
     private lateinit var btnApk: GlyphView
     private lateinit var btnMods: GlyphView
     private lateinit var btnScripts: GlyphView
+    private lateinit var btnDiag: GlyphView
     private var busyApk = false
     private var busyMods = false
     private var busyScripts = false
@@ -72,16 +73,18 @@ class MainActivity : Activity() {
         root.orientation = LinearLayout.VERTICAL
         root.setBackgroundColor(Color.BLACK)
 
-        val bar = FrameLayout(this)
+        // все кнопки слева: справа лежит сенсорная зона панели недавних приложений
+        val bar = LinearLayout(this)
+        bar.orientation = LinearLayout.HORIZONTAL
         back = GlyphView(this, GlyphView.ARROW)
         back.alpha = 0.6f
         back.setOnClickListener { leaveFolder() }
-        bar.addView(back, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.START or Gravity.CENTER_VERTICAL))
+        bar.addView(back, LinearLayout.LayoutParams(dp(56), dp(56)))
         gear = GlyphView(this, GlyphView.GEAR)
         gear.setOnClickListener {
             currentFolder?.let { openSettings(ModuleStorage.folderTarget(it), it) }
         }
-        bar.addView(gear, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.END or Gravity.CENTER_VERTICAL))
+        bar.addView(gear, LinearLayout.LayoutParams(dp(56), dp(56)))
         updBox = LinearLayout(this)
         updBox.orientation = LinearLayout.HORIZONTAL
         btnApk = GlyphView(this, GlyphView.APK)
@@ -97,7 +100,12 @@ class MainActivity : Activity() {
         btnScripts = GlyphView(this, GlyphView.SCRIPTS)
         btnScripts.setOnClickListener { updateScripts() }
         updBox.addView(btnScripts, LinearLayout.LayoutParams(dp(56), dp(56)))
-        bar.addView(updBox, FrameLayout.LayoutParams(-2, dp(56), Gravity.END or Gravity.CENTER_VERTICAL))
+        btnDiag = GlyphView(this, GlyphView.DIAG)
+        btnDiag.contentDescription = "Диагностика: скопировать отчёт всех модулей. Долгое нажатие: отправить"
+        btnDiag.setOnClickListener { copyDiagnostics(false) }
+        btnDiag.setOnLongClickListener { copyDiagnostics(true); true }
+        updBox.addView(btnDiag, LinearLayout.LayoutParams(dp(56), dp(56)))
+        bar.addView(updBox, LinearLayout.LayoutParams(-2, dp(56)))
         root.addView(bar, LinearLayout.LayoutParams(-1, dp(56)))
 
         scroll = ScrollView(this)
@@ -247,6 +255,30 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    /** Единая диагностика: один отчёт всех модулей в буфер обмена ([share] = ещё и меню «Отправить»). */
+    private fun copyDiagnostics(share: Boolean) {
+        val ctx = applicationContext
+        Toast.makeText(this, "Собираю диагностику…", Toast.LENGTH_SHORT).show()
+        Thread {
+            val text = DiagnosticsCollector.collect(ctx)
+            runOnUiThread {
+                try {
+                    val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("Диагностика", text))
+                    Toast.makeText(ctx, "Диагностика скопирована (" + text.length + " зн.)", Toast.LENGTH_LONG).show()
+                } catch (t: Throwable) {
+                    Toast.makeText(ctx, "Не удалось скопировать: $t", Toast.LENGTH_LONG).show()
+                }
+                if (share) {
+                    try {
+                        val i = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)
+                        startActivity(Intent.createChooser(i, "Отправить диагностику"))
+                    } catch (t: Throwable) { }
+                }
+            }
+        }.start()
+    }
+
     private fun statusText(s: ModuleUpdater.Status): String {
         if (s.host == null && s.modules == null && s.scripts == null) return "Не удалось проверить: нет связи с GitHub"
         val parts = ArrayList<String>()
@@ -357,9 +389,6 @@ class MainActivity : Activity() {
         val inFolder = currentFolder != null
         back.visibility = if (inFolder) View.VISIBLE else View.INVISIBLE
         gear.visibility = if (inFolder) View.VISIBLE else View.GONE
-        // в папке значки обновления стоят левее шестерёнки
-        (updBox.layoutParams as FrameLayout.LayoutParams).rightMargin = if (inFolder) dp(56) else 0
-        updBox.requestLayout()
         grid.dropOutView = if (inFolder) back else null
     }
 
@@ -467,6 +496,7 @@ class GlyphView(context: Context, private val kind: Int) : View(context) {
         const val APK = 2
         const val MODULES = 3
         const val SCRIPTS = 4
+        const val DIAG = 5
     }
 
     var badge: Int = 0
@@ -554,6 +584,13 @@ class GlyphView(context: Context, private val kind: Int) : View(context) {
                 canvas.drawLine(cx + s * 0.45f, cy - s * 0.8f, cx + s * 1.15f, cy, p)
                 canvas.drawLine(cx + s * 1.15f, cy, cx + s * 0.45f, cy + s * 0.8f, p)
                 canvas.drawLine(cx + s * 0.2f, cy - s * 0.9f, cx - s * 0.2f, cy + s * 0.9f, p)
+            }
+            DIAG -> {
+                canvas.drawRoundRect(cx - s * 0.85f, cy - s * 1.1f, cx + s * 0.85f, cy + s * 1.2f, s * 0.2f, s * 0.2f, p)
+                canvas.drawLine(cx - s * 0.35f, cy - s * 1.3f, cx + s * 0.35f, cy - s * 1.3f, p)
+                canvas.drawLine(cx - s * 0.45f, cy - s * 0.3f, cx + s * 0.45f, cy - s * 0.3f, p)
+                canvas.drawLine(cx - s * 0.45f, cy + s * 0.2f, cx + s * 0.45f, cy + s * 0.2f, p)
+                canvas.drawLine(cx - s * 0.45f, cy + s * 0.7f, cx + s * 0.1f, cy + s * 0.7f, p)
             }
             else -> {
                 canvas.drawCircle(cx, cy, s * 0.7f, p)

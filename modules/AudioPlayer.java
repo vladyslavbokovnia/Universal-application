@@ -1186,6 +1186,12 @@ public class AudioPlayer implements IPlugin, ISettingsProvider, ISettingsViewPro
         }
     }
 
+    /** Для общей диагностики хоста (значок в верхней панели). */
+    public String diagnosticsReport() {
+        String r = hsReport();
+        return (r == null || r.isEmpty()) ? "журнал пуст" : r;
+    }
+
     String hsReport() {
         synchronized (hsLog) {
             if (hsLog.isEmpty()) return "";
