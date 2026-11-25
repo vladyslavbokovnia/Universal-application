@@ -147,8 +147,8 @@ diff --git a/modules/BtRemoteModule.java b/modules/BtRemoteModule.java
 +        loadPre();
      }
 @@ -809,4 +911,4 @@
-         for (String k : new ArrayList<String>(prefs.getAll().keySet())) {
--            if (k.startsWith("act#") || k.startsWith("slot_")) ed.remove(k);
-+            if (k.startsWith("act#") || k.startsWith("slot_") || k.startsWith("pre#")) ed.remove(k);
-         }
-         ed.apply();
+             for (String k : new ArrayList<String>(prefs.getAll().keySet())) {
+-                if (k.startsWith("act#") || k.startsWith("slot_")) ed.remove(k);
++                if (k.startsWith("act#") || k.startsWith("slot_") || k.startsWith("pre#")) ed.remove(k);
+             }
+             ed.apply();
