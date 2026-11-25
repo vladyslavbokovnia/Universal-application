@@ -1,0 +1,84 @@
+diff --git a/modules/BtRemoteModule.java b/modules/BtRemoteModule.java
+index 6b2b4b7..9287bb9 100644
+--- a/modules/BtRemoteModule.java
++++ b/modules/BtRemoteModule.java
+@@ -54,8 +54,8 @@ import java.util.regex.Pattern;
+  * Кнопки-«указка» (клик или свайп по экрану, которыми пульт имитирует касания) различаются по движению: тап или свайп
+  * в какую сторону, поэтому центральная кнопка не срабатывает от стрелок.
+  * Ниже схемы пульта показывается схема геймпада из модуля «Аудиоплеер» (его PadMapper).
+- * Действие «Циферблат»: после его нажатия (голос: «Циферблат») стрелки пульта вверх, вниз, влево, вправо переходят на
+- * 0, 25, 50, 75% трека, каждый переход озвучивается; выключается тем же действием или сам через несколько секунд.
++ * Действие «Циферблат»: после его нажатия (голос: «Циферблат») стрелки пульта вверх, вправо, вниз, влево переходят на
++ * 0, 25, 50, 75% трека (по часовой стрелке, как стик-циферблат геймпада), каждый переход озвучивается; выключается тем же действием или сам через несколько секунд.
+  */
+ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsViewProvider {
+ 
+@@ -78,6 +78,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+             {"ap:stop_after", "🛑 Плеер: стоп после трека"}, {"ap:lock", "🔒 Плеер: блок касаний"},
+             {"ap:auto_delete", "🗑 Плеер: автоудаление (вкл/выкл)"},
+             {"dial", "🕒 Циферблат: стрелки → 0/25/50/75% трека"},
++            {"alarm_snooze", "💤 Будильник: отложить"}, {"alarm_dismiss", "⏹ Будильник: выключить"},
+     };
+ 
+     /** Типы нажатия: S — одно, D — двойное, L — долгое. */
+@@ -92,8 +93,8 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+ 
+     private static final long GESTURE_GAP_MS = 150;
+ 
+-    /** Циферблат: стрелки схемы по порядку (вверх, вниз, влево, вправо) и доля трека, на которую каждая переходит. */
+-    private static final String[] DIAL_SLOTS = {"up", "down", "left", "right"};
++    /** Циферблат: стрелки схемы по часовой стрелке (вверх, вправо, вниз, влево) и доля трека, на которую каждая переходит. */
++    private static final String[] DIAL_SLOTS = {"up", "right", "down", "left"};
+     private static final int[] DIAL_PCT = {0, 25, 50, 75};
+ 
+     private Context ctx;
+@@ -165,9 +166,9 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+     private final Runnable readyCb = new Runnable() { @Override public void run() { startReader(); } };
+ 
+     @Override public String getName() { return NAME; }
+-    @Override public int getVersion() { return 11; }
++    @Override public int getVersion() { return 12; }
+     @Override public String getDescription() {
+-        return "Bluetooth-пульт через Shizuku: схема кнопок, одно/двойное/долгое нажатие, команды плеера, циферблат по треку";
++        return "Bluetooth-пульт через Shizuku: схема кнопок, одно/двойное/долгое нажатие, команды плеера, циферблат по треку, будильник";
+     }
+     @Override public String getIconName() { return "ic_launcher"; }
+ 
+@@ -764,7 +765,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+ 
+     // ------------------------------------------------------------------ циферблат: стрелки пульта -> место в треке
+ 
+-    /** Номер стрелки циферблата (0 вверх, 1 вниз, 2 влево, 3 вправо) для кнопки; -1, если это не стрелка. */
++    /** Номер стрелки циферблата (0 вверх, 1 вправо, 2 вниз, 3 влево) для кнопки; -1, если это не стрелка. */
+     private int dialIndex(String sig) {
+         if (sig == null || prefs == null) return -1;
+         for (int i = 0; i < DIAL_SLOTS.length; i++) {
+@@ -917,6 +918,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+         if (c == null || fn == null) return;
+         if (fn.startsWith("ap:")) { runPlayer(fn.substring(3)); return; }
+         if ("dial".equals(fn)) { toggleDial(); return; }
++        if (fn.startsWith("alarm_")) { runAlarm(fn.substring(6)); return; }
+         AudioManager am = (AudioManager) c.getSystemService(Context.AUDIO_SERVICE);
+         if (am == null) return;
+         try {
+@@ -932,6 +934,20 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+         } catch (Throwable t) { t.printStackTrace(); }
+     }
+ 
++    /**
++     * Команды модуля «Будильник» (отложить, выключить): его приёмник команд ALARM_SNOOZE / ALARM_DISMISS.
++     * Звонящий будильник их выполняет и сам озвучивает («Отложено на 10 минут», «Будильник выключен»); если не звонит, ничего не происходит.
++     */
++    private void runAlarm(String cmd) {
++        Context c = ctx;
++        if (c == null) return;
++        try {
++            Intent i = new Intent("snooze".equals(cmd) ? "im.manus.universalhost.ALARM_SNOOZE" : "im.manus.universalhost.ALARM_DISMISS");
++            i.setPackage(c.getPackageName());
++            c.sendBroadcast(i);
++        } catch (Throwable t) { t.printStackTrace(); toast("Не удалось передать команду будильнику"); }
++    }
++
+     private static void media(AudioManager am, int code) {
+         long t = SystemClock.uptimeMillis();
+         am.dispatchMediaKeyEvent(new KeyEvent(t, t, KeyEvent.ACTION_DOWN, code, 0));
