@@ -91,6 +91,9 @@ public class AlarmClock implements IPlugin, ISettingsProvider, ISettingsViewProv
     private static final String ACT_SNOOZE = "im.manus.universalhost.ALARM_SNOOZE";
     private static final String ACT_DISMISS = "im.manus.universalhost.ALARM_DISMISS";
 
+    /** Метка «будильник звонит» в System properties (как у плеера): по ней модуль пульта понимает, что любая его кнопка = «выключить». */
+    private static final String LIVE_KEY = "manus.alarmclock.ringing";
+
     private static final String CHANNEL = "alarmclock";
     private static final int NOTIF_ID = 7311;
     private static final int REQ_FIRE = 7301;
@@ -178,7 +181,7 @@ public class AlarmClock implements IPlugin, ISettingsProvider, ISettingsViewProv
     private int expandedId = -1;
 
     @Override public String getName() { return "AlarmClock"; }
-    @Override public int getVersion() { return 1; }
+    @Override public int getVersion() { return 2; }
     @Override public String getDescription() { return "Будильник без экрана: жесты, кнопки, гарнитура"; }
     @Override public String getIconName() { return "ic_launcher"; }
 
@@ -405,6 +408,7 @@ public class AlarmClock implements IPlugin, ISettingsProvider, ISettingsViewProv
     private void startRing() {
         if (ringing) return;
         ringing = true;
+        try { System.getProperties().put(LIVE_KEY, Boolean.TRUE); } catch (Throwable ignored) { }
         int tmo = clamp(cfg.getInt("ring_timeout", 10), 1, 30);
         try {
             if (wl == null) {
@@ -436,6 +440,7 @@ public class AlarmClock implements IPlugin, ISettingsProvider, ISettingsViewProv
     private void stopRinging() {
         boolean was = ringing;
         ringing = false;
+        try { System.getProperties().remove(LIVE_KEY); } catch (Throwable ignored) { }
         if (main != null) {
             main.removeCallbacks(timeoutTask);
             main.removeCallbacks(rampTask);

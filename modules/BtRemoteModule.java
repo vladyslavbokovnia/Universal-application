@@ -56,12 +56,16 @@ import java.util.regex.Pattern;
  * Ниже схемы пульта показывается схема геймпада из модуля «Аудиоплеер» (его PadMapper).
  * Действие «Циферблат»: после его нажатия (голос: «Циферблат») стрелки пульта вверх, вправо, вниз, влево переходят на
  * 0, 25, 50, 75% трека (по часовой стрелке, как стик-циферблат геймпада), каждый переход озвучивается; выключается тем же действием или сам через несколько секунд.
+ * Будильник: пока он звонит, любая кнопка пульта его выключает (кнопка с назначенным «отложить» откладывает), а действия кнопок
+ * в это время не выполняются. Когда будильник не звонит, кнопки работают как обычно: под выключение ничего назначать не нужно.
  */
 public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsViewProvider {
 
     private static final String NAME = "BtRemote";
     private static final String PREFS = "module_" + NAME;
     private static final String PLAYER_LIVE_KEY = "manus.audioplayer.live";
+    /** Метка модуля «Будильник»: есть, пока будильник звонит. */
+    private static final String ALARM_LIVE_KEY = "manus.alarmclock.ringing";
 
     /** id функции, подпись (эмодзи в начале рисуется на схеме). "ap:<id>" — команда модуля «Аудиоплеер». */
     private static final String[][] FNS = {
@@ -78,8 +82,10 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
             {"ap:stop_after", "🛑 Плеер: стоп после трека"}, {"ap:lock", "🔒 Плеер: блок касаний"},
             {"ap:auto_delete", "🗑 Плеер: автоудаление (вкл/выкл)"},
             {"dial", "🕒 Циферблат: стрелки → 0/25/50/75% трека"},
-            {"alarm_snooze", "💤 Будильник: отложить"}, {"alarm_dismiss", "⏹ Будильник: выключить"},
+            {"alarm_snooze", "💤 Будильник: отложить (только пока звонит)"},
     };
+    // «Будильник: выключить» в списке нет намеренно: пока будильник звонит, его выключает любая кнопка пульта (alarmIntercept),
+    // а в остальное время кнопки работают как обычно, и ни одна из них под выключение не занята.
 
     /** Типы нажатия: S — одно, D — двойное, L — долгое. */
     private static final String[] G = {"S", "D", "L"};
@@ -166,9 +172,9 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     private final Runnable readyCb = new Runnable() { @Override public void run() { startReader(); } };
 
     @Override public String getName() { return NAME; }
-    @Override public int getVersion() { return 12; }
+    @Override public int getVersion() { return 13; }
     @Override public String getDescription() {
-        return "Bluetooth-пульт через Shizuku: схема кнопок, одно/двойное/долгое нажатие, команды плеера, циферблат по треку, будильник";
+        return "Bluetooth-пульт через Shizuku: схема кнопок, одно/двойное/долгое нажатие, команды плеера, циферблат по треку, выключение будильника любой кнопкой";
     }
     @Override public String getIconName() { return "ic_launcher"; }
 
@@ -420,7 +426,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         pr.key = key;
         pr.at = SystemClock.uptimeMillis();
         pre = pr;
-        if (uiOpen > 0) return;
+        if (uiOpen > 0 || alarmRinging()) return;      // при звонке долгое действие не запускаем: жест выключит будильник
         final String sig = preMap.get(key);
         if (sig == null || "?".equals(sig) || !has(sig, "L")) return;
         if (dialMode && dialIndex(sig) >= 0) return;   // циферблат: стрелка не должна запускать своё долгое действие
@@ -703,6 +709,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         st.down = true; st.longFired = false; st.suppress = false;
         note(sig);
         if (uiOpen > 0) { st.suppress = true; return; }
+        if (alarmIntercept(sig)) { st.suppress = true; return; }  // будильник звонит: кнопка его выключает
         if (dialIntercept(sig)) { st.suppress = true; return; }   // циферблат: стрелка = переход по треку
         boolean hasL = has(sig, "L"), hasD = has(sig, "D");
         if (!hasL && !hasD) { fire(sig, "S"); return; }
@@ -747,7 +754,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     }
 
     private void keyRepeat(String sig) {
-        if (uiOpen > 0 || has(sig, "L") || has(sig, "D")) return;
+        if (uiOpen > 0 || has(sig, "L") || has(sig, "D") || alarmRinging()) return;
         if (dialMode && dialIndex(sig) >= 0) return;
         String fn = bound.get(sig + "#S");
         if ("vol_up".equals(fn) || "vol_down".equals(fn)) run(fn);
@@ -758,9 +765,33 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         note(sig);
         if (dur > 0) synchronized (lock) { if (!evlog.isEmpty()) evlog.set(0, evlog.getFirst() + " · " + dur + " мс"); }
         if (uiOpen > 0) return;
+        if (alarmIntercept(sig)) return;              // будильник звонит: кнопка его выключает
         if (dialIntercept(sig)) return;               // циферблат: стрелка = переход по треку
         if (dur >= longMs() && has(sig, "L")) { fire(sig, "L"); return; }
         shortPress(sig, stateOf(sig), false);
+    }
+
+    // ------------------------------------------------------------------ будильник: звонит -> любая кнопка выключает
+
+    /** Модуль «Будильник» сейчас звонит. */
+    private static boolean alarmRinging() {
+        try { return System.getProperties().get(ALARM_LIVE_KEY) != null; } catch (Throwable t) { return false; }
+    }
+
+    /**
+     * Пока будильник звонит, нажатие любой кнопки пульта выключает его, а действие кнопки не выполняется
+     * (кнопка с назначенным «Будильник: отложить» откладывает). Когда будильник молчит, возвращает false и кнопки работают как обычно.
+     * Главный поток; при открытом экране настроек не срабатывает.
+     */
+    private boolean alarmIntercept(String sig) {
+        if (uiOpen > 0 || !alarmRinging()) return false;
+        boolean snooze = "alarm_snooze".equals(bound.get(sig + "#S"));
+        synchronized (lock) {
+            evlog.addFirst("   ⏰ звонит: " + (snooze ? "отложить" : "выключить"));
+            while (evlog.size() > 12) evlog.removeLast();
+        }
+        runAlarm(snooze ? "snooze" : "dismiss");
+        return true;
     }
 
     // ------------------------------------------------------------------ циферблат: стрелки пульта -> место в треке
@@ -854,6 +885,18 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     private void migrate() {
         migrateOld();
         cleanRemoved();
+        cleanAlarmDismiss();
+    }
+
+    /** «Будильник: выключить» больше не назначается на кнопки (выключает любая кнопка, пока звонит): прежние назначения снимаются, кнопки освобождаются. */
+    private void cleanAlarmDismiss() {
+        if (prefs.getBoolean("mig13", false)) return;
+        SharedPreferences.Editor ed = prefs.edit();
+        for (Map.Entry<String, ?> e : prefs.getAll().entrySet()) {
+            if (e.getKey().startsWith("act#") && "alarm_dismiss".equals(e.getValue())) ed.remove(e.getKey());
+        }
+        ed.putBoolean("mig13", true);
+        ed.apply();
     }
 
     /** Убранные из списка действия (стоп, без звука): прежние назначения на них сбрасываются. */
@@ -1129,6 +1172,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
             if (pending != null) sb.append("\nНажата: ").append(describe(pending)).append(". Коснитесь на схеме, какая это кнопка.");
             else if (current == null) sb.append("\nНажмите кнопку на пульте, и откроются её действия.");
             sb.append("\nДействия при открытом экране не выполняются.");
+            sb.append("\nКогда звонит будильник, любая кнопка пульта его выключает: назначать это не нужно.");
             synchronized (lock) {
                 if (!evlog.isEmpty()) sb.append("\nЖурнал:");
                 for (String s : evlog) sb.append("\n  ").append(s);
