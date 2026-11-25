@@ -1,0 +1,109 @@
+diff --git a/modules/Browser.java b/modules/Browser.java
+index 2aaa28d..959d156 100644
+--- a/modules/Browser.java
++++ b/modules/Browser.java
+@@ -2226,9 +2226,7 @@ public class Browser implements IPlugin, ISettingsProvider {
+             float half = dp(73) / 2f;
+             float cx = hp[0] - mp[0] + hub.getWidth() / 2f;
+             float cy = hp[1] - mp[1] + hub.getHeight() / 2f;
+-            float pad = r + half + dp(6);
+-            cx = Math.max(pad, Math.min(getWidth() - pad, cx));
+-            cy = Math.max(pad, Math.min(getHeight() - pad, cy));
++            float[][] spots = ringSpots(items.size(), cx, cy, r, half, getWidth(), getHeight());
+ 
+             FrameLayout l = new FrameLayout(act);
+             l.setClickable(true);
+@@ -2239,7 +2237,6 @@ public class Browser implements IPlugin, ISettingsProvider {
+             });
+             for (int i = 0; i < items.size(); i++) {
+                 final RingItem it = items.get(i);
+-                double ang = -Math.PI / 2 + 2 * Math.PI * i / items.size();
+                 TextView v = glyph(it.glyph, C_TEXT);
+                 v.setTextSize(30);
+                 v.setBackground(glassBmp != null && SystemClock.uptimeMillis() - glassAt < 5000
+@@ -2256,8 +2253,8 @@ public class Browser implements IPlugin, ISettingsProvider {
+                     }
+                 });
+                 FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(73), dp(73), Gravity.TOP | Gravity.START);
+-                lp.leftMargin = Math.round(cx + (float) (r * Math.cos(ang)) - half);
+-                lp.topMargin = Math.round(cy + (float) (r * Math.sin(ang)) - half);
++                lp.leftMargin = Math.round(cx + spots[i][0] - half);
++                lp.topMargin = Math.round(cy + spots[i][1] - half);
+                 l.addView(v, lp);
+                 ringViews.add(v);
+                 ringActions.add(it.on ? it.run : null);
+@@ -2270,6 +2267,74 @@ public class Browser implements IPlugin, ISettingsProvider {
+             l.announceForAccessibility("Кнопки управления браузером");
+         }
+ 
++        /**
++         * Места значков кольца вокруг кнопки: смещения от центра кнопки в пикселях. Если круг помещается на экране, значки стоят
++         * по кругу, первый сверху. У края экрана круг не сдвигается, а перестраивается в дугу по самому длинному свободному
++         * участку; если на дуге тесно, остальные значки уходят на следующее кольцо побольше.
++         */
++        private float[][] ringSpots(int n, float cx, float cy, float r, float half, float w, float h) {
++            final int step = 4;
++            final int cnt = 360 / step;
++            final float margin = half + dp(6);
++            final float gap = 2 * half + dp(8);
++            float[][] out = new float[n][2];
++            int placed = 0;
++            for (int k = 0; placed < n && k < 5; k++) {
++                float rr = r + k * (2 * half + dp(10));
++                boolean[] ok = new boolean[cnt];
++                boolean all = true;
++                for (int s = 0; s < cnt; s++) {
++                    double a = Math.toRadians(s * step);
++                    float x = cx + (float) (rr * Math.cos(a));
++                    float y = cy + (float) (rr * Math.sin(a));
++                    ok[s] = x >= margin && x <= w - margin && y >= margin && y <= h - margin;
++                    if (!ok[s]) all = false;
++                }
++                int left = n - placed;
++                double[] ang = null;
++                if (all) {
++                    int m = Math.min(left, (int) Math.floor(2 * Math.PI * rr / gap));
++                    if (m > 0) {
++                        ang = new double[m];
++                        double start = -Math.PI / 2 + (k % 2 == 1 ? Math.PI / m : 0);
++                        for (int i = 0; i < m; i++) ang[i] = start + 2 * Math.PI * i / m;
++                    }
++                } else {
++                    int bestStart = -1, bestLen = 0;
++                    for (int s0 = 0; s0 < cnt; s0++) {
++                        if (!ok[s0] || ok[(s0 - 1 + cnt) % cnt]) continue;      // начало свободного участка (может переходить через 0)
++                        int len = 0;
++                        while (len < cnt && ok[(s0 + len) % cnt]) len++;
++                        if (len > bestLen) { bestLen = len; bestStart = s0; }
++                    }
++                    if (bestStart >= 0) {
++                        double span = (bestLen - 1) * step;                     // градусов
++                        double arcLen = rr * Math.toRadians(span);
++                        int m = Math.min(left, (int) Math.floor(arcLen / gap) + 1);
++                        if (m > 0) {
++                            double mid = bestStart * step + span / 2;
++                            double stepA = m > 1 ? Math.min(span / (m - 1), Math.toDegrees(gap * 1.4 / rr)) : 0;
++                            double first = mid - stepA * (m - 1) / 2;
++                            ang = new double[m];
++                            for (int i = 0; i < m; i++) ang[i] = Math.toRadians(first + i * stepA);
++                        }
++                    }
++                }
++                if (ang == null) continue;
++                for (double a : ang) {
++                    out[placed][0] = (float) (rr * Math.cos(a));
++                    out[placed][1] = (float) (rr * Math.sin(a));
++                    placed++;
++                }
++            }
++            for (int i = placed; i < n; i++) {          // совсем крошечное окно: остаток кладём на первое кольцо подряд
++                double a = -Math.PI / 2 + 2 * Math.PI * i / n;
++                out[i][0] = (float) (r * Math.cos(a));
++                out[i][1] = (float) (r * Math.sin(a));
++            }
++            return out;
++        }
++
+         /** Снимок окна в малом размере и размытие: фон стеклянных кнопок. Снимок делается заранее, при касании кнопки, пока кольца ещё нет. */
+         private void prepareGlass() {
+             if (Build.VERSION.SDK_INT < 26 || act.getWindow() == null) return;
