@@ -105,12 +105,20 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         Runnable longTimer, tapTimer;
     }
     private final Map<String, KeyState> keyStates = new HashMap<String, KeyState>();
+    /** Нажатие, начатое «прыжком указки»: по нему идёт таймер долгого нажатия (главный поток). */
+    private static final class Pre { String key; long at; boolean fired; Runnable timer; }
+    private Pre pre;
+    /** «Прыжок указки» -> кнопка (выучивается по коротким нажатиям); "?" — у разных кнопок одинаковый прыжок. */
+    private final Map<String, String> preMap = new ConcurrentHashMap<String, String>();
 
     /** Состояние «указки» одного устройства (поток чтения). */
     private static final class Ptr {
         boolean down;
         long t0;
         float sx, sy, cx, cy, rx, ry;
+        long upAt, jAt;                        // конец прошлого жеста; последний «прыжок» указки
+        float jx, jy, ox, oy;                  // «прыжок» в угол и сдвиг после него
+        int oc;                                // сколько компонент сдвига уже пришло
     }
     private final Map<String, Ptr> ptrs = new HashMap<String, Ptr>();
     private final Set<String> excluded = new HashSet<String>();    // сенсорный экран и кнопки самого телефона
@@ -147,7 +155,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     private final Runnable readyCb = new Runnable() { @Override public void run() { startReader(); } };
 
     @Override public String getName() { return NAME; }
-    @Override public int getVersion() { return 9; }
+    @Override public int getVersion() { return 10; }
     @Override public String getDescription() {
         return "Bluetooth-пульт через Shizuku: схема кнопок, одно/двойное/долгое нажатие, команды плеера";
     }
@@ -321,7 +329,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
             int v = parseHex(val);
             if ("REL_X".equals(code) || "REL_Y".equals(code)) {
                 if (p.down) { if ("REL_X".equals(code)) p.rx += v; else p.ry += v; }
-                else addRel(dev, "REL_X".equals(code), v);
+                else { preamble(p, code, v); addRel(dev, "REL_X".equals(code), v); }
             } else if ("REL_WHEEL".equals(code) && v != 0) {
                 postPress("R|WHEEL_" + (v > 0 ? "UP" : "DOWN") + "|" + dev, 0);
             } else if ("REL_HWHEEL".equals(code) && v != 0) {
@@ -333,8 +341,10 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
                 if ("DOWN".equals(val)) {
                     p.down = true; p.t0 = SystemClock.uptimeMillis();
                     p.sx = p.cx; p.sy = p.cy; p.rx = 0; p.ry = 0;
+                    postMain(new Runnable() { @Override public void run() { cancelPre(); } });
                 } else if ("UP".equals(val) && p.down) {
                     p.down = false;
+                    p.upAt = SystemClock.uptimeMillis();
                     float dx = p.cx - p.sx + p.rx, dy = p.cy - p.sy + p.ry;
                     float ax = Math.abs(dx), ay = Math.abs(dy);
                     int min = prefs != null ? prefs.getInt("swipe_min", 20) : 20;
@@ -342,7 +352,9 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
                             : ay >= ax ? (dy > 0 ? "SWIPE_DOWN" : "SWIPE_UP") : (dx > 0 ? "SWIPE_RIGHT" : "SWIPE_LEFT");
                     Long ka; synchronized (keyAt) { ka = keyAt.get(devBase(dev)); }
                     if ("TAP".equals(g) && ka != null && SystemClock.uptimeMillis() - ka < 500) return; // камера: клавиша + тап, тап лишний
-                    postPress("P|" + g + "|" + dev, SystemClock.uptimeMillis() - p.t0);
+                    final String psig = "P|" + g + "|" + dev;
+                    final long pdur = SystemClock.uptimeMillis() - p.t0;
+                    postMain(new Runnable() { @Override public void run() { pointerGesture(psig, pdur); } });
                 }
                 return;
             }
@@ -360,6 +372,95 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
 
     private void postPress(final String sig, final long dur) {
         postMain(new Runnable() { @Override public void run() { pressDone(sig, dur); } });
+    }
+
+    /**
+     * «Прыжок указки» (поток чтения): в начале каждого нажатия пульт бросает указку в угол и сдвигает её на величину,
+     * своя у каждой кнопки. Пока кнопку держат, приходит только он: по нему запускается таймер долгого нажатия.
+     * Такой же прыжок пульт делает сразу после жеста (хвост): его отсекаем по времени.
+     */
+    private void preamble(Ptr p, String code, int v) {
+        boolean isX = "REL_X".equals(code);
+        long now = SystemClock.uptimeMillis();
+        if (now - p.upAt < 250) return;
+        if (Math.abs(v) >= 1500) {
+            if (now - p.jAt > 150) { p.jx = 0; p.jy = 0; p.ox = 0; p.oy = 0; p.oc = 0; }
+            p.jAt = now;
+            if (isX) p.jx = v; else p.jy = v;
+            return;
+        }
+        if (p.jAt == 0 || now - p.jAt > 150) return;
+        if (isX) p.ox = v; else p.oy = v;
+        if (p.oc++ > 0) return;
+        final Ptr fp = p;
+        Handler h = main;
+        if (h != null) h.postDelayed(new Runnable() { @Override public void run() { armPre(preKey(fp)); } }, 40);
+    }
+
+    private static String preKey(Ptr p) {
+        return "c" + (p.jx > 0 ? "p" : "m") + (p.jy > 0 ? "p" : "m") + "_" + (int) p.ox + "_" + (int) p.oy;
+    }
+
+    /** Начало нажатия: если для этого прыжка известна кнопка с долгим действием, запускается таймер (главный поток). */
+    private void armPre(String key) {
+        cancelPre();
+        final Pre pr = new Pre();
+        pr.key = key;
+        pr.at = SystemClock.uptimeMillis();
+        pre = pr;
+        if (uiOpen > 0) return;
+        final String sig = preMap.get(key);
+        if (sig == null || "?".equals(sig) || !has(sig, "L")) return;
+        pr.timer = new Runnable() {
+            @Override public void run() {
+                pr.timer = null;
+                if (pre == pr && uiOpen == 0) { pr.fired = true; fire(sig, "L"); }
+            }
+        };
+        main.postDelayed(pr.timer, longMs());
+    }
+
+    private void cancelPre() {
+        Pre pr = pre;
+        if (pr != null && pr.timer != null) { main.removeCallbacks(pr.timer); pr.timer = null; }
+    }
+
+    /** Жест указки закончился (главный поток): если долгое уже выполнено по таймеру, жест пропускается, иначе идёт как обычно. */
+    private void pointerGesture(String sig, long dur) {
+        Pre pr = pre;
+        cancelPre();
+        pre = null;
+        if (pr != null && pr.fired) {
+            synchronized (lock) { evlog.addFirst("   жест после долгого пропущен"); while (evlog.size() > 12) evlog.removeLast(); }
+            return;
+        }
+        learnPre(pr, sig);
+        pressDone(sig, dur);
+    }
+
+    /** Прыжок указки перед жестом запоминается за кнопкой этого жеста; если за одним прыжком пришли разные жесты, он помечается "?". */
+    private void learnPre(Pre pr, String sig) {
+        if (pr == null || sig == null || prefs == null) return;
+        if (SystemClock.uptimeMillis() - pr.at > 500) return;
+        String old = preMap.get(pr.key);
+        if (old == null) {
+            preMap.put(pr.key, sig);
+            prefs.edit().putString("pre#" + pr.key, sig).apply();
+        } else if (!old.equals(sig) && !"?".equals(old)) {
+            preMap.put(pr.key, "?");
+            prefs.edit().putString("pre#" + pr.key, "?").apply();
+        }
+    }
+
+    /** Выученные соответствия «прыжок указки -> кнопка» из настроек. */
+    private void loadPre() {
+        Map<String, String> pm = new HashMap<String, String>();
+        for (Map.Entry<String, ?> e : prefs.getAll().entrySet()) {
+            String k = e.getKey();
+            if (k.startsWith("pre#") && e.getValue() instanceof String) pm.put(k.substring(4), (String) e.getValue());
+        }
+        preMap.clear();
+        preMap.putAll(pm);
     }
 
     private void addRel(String dev, boolean isX, int v) {
@@ -693,6 +794,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         }
         bound.clear();
         bound.putAll(m);
+        loadPre();
     }
 
     private void setAct(String sig, String g, String fn) {
@@ -808,7 +910,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         if ("unbind_all".equals(key)) {
             SharedPreferences.Editor ed = prefs.edit();
             for (String k : new ArrayList<String>(prefs.getAll().keySet())) {
-                if (k.startsWith("act#") || k.startsWith("slot_")) ed.remove(k);
+                if (k.startsWith("act#") || k.startsWith("slot_") || k.startsWith("pre#")) ed.remove(k);
             }
             ed.apply();
             loadBindings();
