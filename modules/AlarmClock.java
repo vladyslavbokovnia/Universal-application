@@ -91,7 +91,7 @@ public class AlarmClock implements IPlugin, ISettingsProvider, ISettingsViewProv
     private static final String ACT_SNOOZE = "im.manus.universalhost.ALARM_SNOOZE";
     private static final String ACT_DISMISS = "im.manus.universalhost.ALARM_DISMISS";
 
-    /** Метка «будильник звонит» в System properties (как у плеера): по ней модуль пульта понимает, что любая его кнопка = «выключить». */
+    /** Метка «будильник звонит» в System properties (как у плеера): по ней модуль пульта включает свой режим «будильник звонит» (отдельные назначения кнопок, по умолчанию «отложить»). */
     private static final String LIVE_KEY = "manus.alarmclock.ringing";
 
     private static final String CHANNEL = "alarmclock";

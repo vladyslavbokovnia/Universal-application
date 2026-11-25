@@ -56,16 +56,32 @@ import java.util.regex.Pattern;
  * Ниже схемы пульта показывается схема геймпада из модуля «Аудиоплеер» (его PadMapper).
  * Действие «Циферблат»: после его нажатия (голос: «Циферблат») стрелки пульта вверх, вправо, вниз, влево переходят на
  * 0, 25, 50, 75% трека (по часовой стрелке, как стик-циферблат геймпада), каждый переход озвучивается; выключается тем же действием или сам через несколько секунд.
- * Будильник: пока он звонит, любая кнопка пульта его выключает (кнопка с назначенным «отложить» откладывает), а действия кнопок
- * в это время не выполняются. Когда будильник не звонит, кнопки работают как обычно: под выключение ничего назначать не нужно.
+ * Контексты «активная программа» (CTXS): пока программа активна (будильник звонит), кнопки работают в её режиме: действия
+ * «при звонке» назначаются отдельно от обычных (на одну кнопку можно повесить и функцию плеера, и действие будильника),
+ * а кнопки без назначения выполняют действие по умолчанию (у будильника это «отложить»). Другая программа добавляется строкой в CTXS.
  */
 public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsViewProvider {
 
     private static final String NAME = "BtRemote";
     private static final String PREFS = "module_" + NAME;
     private static final String PLAYER_LIVE_KEY = "manus.audioplayer.live";
-    /** Метка модуля «Будильник»: есть, пока будильник звонит. */
-    private static final String ALARM_LIVE_KEY = "manus.alarmclock.ringing";
+    /**
+     * Контекст «активная программа». Пока в System properties есть метка liveKey, кнопки работают в режиме этой программы:
+     * назначения берутся из её собственной таблицы (fns — что можно назначать), а одиночное нажатие без назначения выполняет fallback.
+     */
+    private static final class Ctx {
+        final String id, label, liveKey, fallback;
+        final String[][] fns;
+        Ctx(String id, String label, String liveKey, String fallback, String[][] fns) {
+            this.id = id; this.label = label; this.liveKey = liveKey; this.fallback = fallback; this.fns = fns;
+        }
+    }
+
+    /** Известные активные программы. Новая программа: строка здесь + метка liveKey в System properties, пока она активна. */
+    private static final Ctx[] CTXS = {
+            new Ctx("alarm", "⏰ Будильник звонит", "manus.alarmclock.ringing", "alarm_snooze",
+                    new String[][]{{"alarm_snooze", "💤 Отложить"}, {"alarm_dismiss", "⏹ Выключить"}}),
+    };
 
     /** id функции, подпись (эмодзи в начале рисуется на схеме). "ap:<id>" — команда модуля «Аудиоплеер». */
     private static final String[][] FNS = {
@@ -82,10 +98,9 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
             {"ap:stop_after", "🛑 Плеер: стоп после трека"}, {"ap:lock", "🔒 Плеер: блок касаний"},
             {"ap:auto_delete", "🗑 Плеер: автоудаление (вкл/выкл)"},
             {"dial", "🕒 Циферблат: стрелки → 0/25/50/75% трека"},
-            {"alarm_snooze", "💤 Будильник: отложить (только пока звонит)"},
     };
-    // «Будильник: выключить» в списке нет намеренно: пока будильник звонит, его выключает любая кнопка пульта (alarmIntercept),
-    // а в остальное время кнопки работают как обычно, и ни одна из них под выключение не занята.
+    // Действий будильника (отложить, выключить) здесь нет: они назначаются отдельно, «при звонке» (CTXS), на ту же кнопку,
+    // что и функция плеера, и не отнимают её.
 
     /** Типы нажатия: S — одно, D — двойное, L — долгое. */
     private static final String[] G = {"S", "D", "L"};
@@ -109,6 +124,8 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
 
     /** "<кнопка>#<тип>" -> id функции */
     private final Map<String, String> bound = new ConcurrentHashMap<String, String>();
+    /** "<программа>#<кнопка>#<тип>" -> id функции: назначения «при активной программе» (см. CTXS). */
+    private final Map<String, String> ctxBound = new ConcurrentHashMap<String, String>();
     private volatile int uiOpen;                       // открытых экранов настроек: действия не выполняются
     private volatile String lastSig;
     private volatile long lastSigAt;
@@ -172,9 +189,9 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     private final Runnable readyCb = new Runnable() { @Override public void run() { startReader(); } };
 
     @Override public String getName() { return NAME; }
-    @Override public int getVersion() { return 13; }
+    @Override public int getVersion() { return 14; }
     @Override public String getDescription() {
-        return "Bluetooth-пульт через Shizuku: схема кнопок, одно/двойное/долгое нажатие, команды плеера, циферблат по треку, выключение будильника любой кнопкой";
+        return "Bluetooth-пульт через Shizuku: схема кнопок, одно/двойное/долгое нажатие, команды плеера, циферблат по треку, свои назначения при активной программе (будильник)";
     }
     @Override public String getIconName() { return "ic_launcher"; }
 
@@ -426,7 +443,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         pr.key = key;
         pr.at = SystemClock.uptimeMillis();
         pre = pr;
-        if (uiOpen > 0 || alarmRinging()) return;      // при звонке долгое действие не запускаем: жест выключит будильник
+        if (uiOpen > 0) return;
         final String sig = preMap.get(key);
         if (sig == null || "?".equals(sig) || !has(sig, "L")) return;
         if (dialMode && dialIndex(sig) >= 0) return;   // циферблат: стрелка не должна запускать своё долгое действие
@@ -668,11 +685,15 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
 
     private long longMs() { return prefs != null ? prefs.getInt("long_ms", 600) : 600; }
     private long doubleMs() { return prefs != null ? prefs.getInt("double_ms", 350) : 350; }
-    private boolean has(String sig, String g) { return bound.containsKey(sig + "#" + g); }
+    /** Назначено ли действие на этот тип нажатия: в режиме активной программы — по её таблице (действие по умолчанию не считается). */
+    private boolean has(String sig, String g) {
+        Ctx cx = activeCtx();
+        return cx != null ? ctxBound.containsKey(cx.id + "#" + sig + "#" + g) : bound.containsKey(sig + "#" + g);
+    }
 
     private void fire(String sig, String g) {
         if (uiOpen > 0) return;                       // экран настроек открыт: нажатия только выбирают кнопку
-        String fn = bound.get(sig + "#" + g);
+        String fn = fnFor(sig, g);
         if (fn != null) {
             synchronized (lock) {
                 evlog.addFirst("   ⚡ " + g + " → " + fn);
@@ -709,7 +730,6 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         st.down = true; st.longFired = false; st.suppress = false;
         note(sig);
         if (uiOpen > 0) { st.suppress = true; return; }
-        if (alarmIntercept(sig)) { st.suppress = true; return; }  // будильник звонит: кнопка его выключает
         if (dialIntercept(sig)) { st.suppress = true; return; }   // циферблат: стрелка = переход по треку
         boolean hasL = has(sig, "L"), hasD = has(sig, "D");
         if (!hasL && !hasD) { fire(sig, "S"); return; }
@@ -754,9 +774,9 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     }
 
     private void keyRepeat(String sig) {
-        if (uiOpen > 0 || has(sig, "L") || has(sig, "D") || alarmRinging()) return;
+        if (uiOpen > 0 || has(sig, "L") || has(sig, "D")) return;
         if (dialMode && dialIndex(sig) >= 0) return;
-        String fn = bound.get(sig + "#S");
+        String fn = fnFor(sig, "S");
         if ("vol_up".equals(fn) || "vol_down".equals(fn)) run(fn);
     }
 
@@ -765,33 +785,31 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         note(sig);
         if (dur > 0) synchronized (lock) { if (!evlog.isEmpty()) evlog.set(0, evlog.getFirst() + " · " + dur + " мс"); }
         if (uiOpen > 0) return;
-        if (alarmIntercept(sig)) return;              // будильник звонит: кнопка его выключает
         if (dialIntercept(sig)) return;               // циферблат: стрелка = переход по треку
         if (dur >= longMs() && has(sig, "L")) { fire(sig, "L"); return; }
         shortPress(sig, stateOf(sig), false);
     }
 
-    // ------------------------------------------------------------------ будильник: звонит -> любая кнопка выключает
+    // ------------------------------------------------------------------ контексты: активная программа -> свои назначения
 
-    /** Модуль «Будильник» сейчас звонит. */
-    private static boolean alarmRinging() {
-        try { return System.getProperties().get(ALARM_LIVE_KEY) != null; } catch (Throwable t) { return false; }
+    /** Активная сейчас программа из CTXS (её метка есть в System properties); null — обычный режим. */
+    private static Ctx activeCtx() {
+        for (Ctx c : CTXS) {
+            try { if (System.getProperties().get(c.liveKey) != null) return c; } catch (Throwable ignored) { }
+        }
+        return null;
     }
 
     /**
-     * Пока будильник звонит, нажатие любой кнопки пульта выключает его, а действие кнопки не выполняется
-     * (кнопка с назначенным «Будильник: отложить» откладывает). Когда будильник молчит, возвращает false и кнопки работают как обычно.
-     * Главный поток; при открытом экране настроек не срабатывает.
+     * Функция для нажатия. В обычном режиме — назначение кнопки. Пока активна программа из CTXS — только её назначения
+     * («при звонке»), а одиночное нажатие без назначения выполняет действие по умолчанию (у будильника «отложить»);
+     * обычные функции кнопок в это время не выполняются.
      */
-    private boolean alarmIntercept(String sig) {
-        if (uiOpen > 0 || !alarmRinging()) return false;
-        boolean snooze = "alarm_snooze".equals(bound.get(sig + "#S"));
-        synchronized (lock) {
-            evlog.addFirst("   ⏰ звонит: " + (snooze ? "отложить" : "выключить"));
-            while (evlog.size() > 12) evlog.removeLast();
-        }
-        runAlarm(snooze ? "snooze" : "dismiss");
-        return true;
+    private String fnFor(String sig, String g) {
+        Ctx cx = activeCtx();
+        if (cx == null) return bound.get(sig + "#" + g);
+        String f = ctxBound.get(cx.id + "#" + sig + "#" + g);
+        return f == null && "S".equals(g) ? cx.fallback : f;
     }
 
     // ------------------------------------------------------------------ циферблат: стрелки пульта -> место в треке
@@ -807,7 +825,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
 
     /** Режим «Циферблат» включён и нажата стрелка: переход по треку вместо её обычного действия (главный поток). */
     private boolean dialIntercept(String sig) {
-        if (!dialMode || uiOpen > 0) return false;
+        if (!dialMode || uiOpen > 0 || activeCtx() != null) return false;
         int i = dialIndex(sig);
         if (i < 0) return false;
         dialJump(DIAL_PCT[i]);
@@ -885,17 +903,21 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     private void migrate() {
         migrateOld();
         cleanRemoved();
-        cleanAlarmDismiss();
+        moveAlarmToCtx();
     }
 
-    /** «Будильник: выключить» больше не назначается на кнопки (выключает любая кнопка, пока звонит): прежние назначения снимаются, кнопки освобождаются. */
-    private void cleanAlarmDismiss() {
-        if (prefs.getBoolean("mig13", false)) return;
+    /** Действия будильника переехали из общего списка в контекст «будильник звонит»: прежние назначения переносятся туда, кнопки освобождаются. */
+    private void moveAlarmToCtx() {
+        if (prefs.getBoolean("mig14", false)) return;
         SharedPreferences.Editor ed = prefs.edit();
         for (Map.Entry<String, ?> e : prefs.getAll().entrySet()) {
-            if (e.getKey().startsWith("act#") && "alarm_dismiss".equals(e.getValue())) ed.remove(e.getKey());
+            String k = e.getKey();
+            String v = e.getValue() instanceof String ? (String) e.getValue() : null;
+            if (!k.startsWith("act#") || v == null || !v.startsWith("alarm_")) continue;
+            ed.remove(k);
+            ed.putString("cx#alarm#" + k.substring(4), v);
         }
-        ed.putBoolean("mig13", true);
+        ed.putBoolean("mig14", true);
         ed.apply();
     }
 
@@ -936,11 +958,26 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         }
         bound.clear();
         bound.putAll(m);
+        Map<String, String> cm = new HashMap<String, String>();
+        for (Map.Entry<String, ?> e : prefs.getAll().entrySet()) {
+            String k = e.getKey();
+            if (k.startsWith("cx#") && e.getValue() instanceof String) cm.put(k.substring(3), (String) e.getValue());
+        }
+        ctxBound.clear();
+        ctxBound.putAll(cm);
         loadPre();
     }
 
     private void setAct(String sig, String g, String fn) {
         String k = "act#" + sig + "#" + g;
+        SharedPreferences.Editor ed = prefs.edit();
+        if (fn == null) ed.remove(k); else ed.putString(k, fn);
+        ed.apply();
+        loadBindings();
+    }
+
+    private void setCtxAct(Ctx cx, String sig, String g, String fn) {
+        String k = "cx#" + cx.id + "#" + sig + "#" + g;
         SharedPreferences.Editor ed = prefs.edit();
         if (fn == null) ed.remove(k); else ed.putString(k, fn);
         ed.apply();
@@ -1012,6 +1049,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
 
     private static String fnLabel(String fn) {
         for (String[] f : FNS) if (f[0].equals(fn)) return f[1];
+        for (Ctx c : CTXS) for (String[] f : c.fns) if (f[0].equals(fn)) return f[1];
         return null;
     }
 
@@ -1069,7 +1107,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         if ("unbind_all".equals(key)) {
             SharedPreferences.Editor ed = prefs.edit();
             for (String k : new ArrayList<String>(prefs.getAll().keySet())) {
-                if (k.startsWith("act#") || k.startsWith("slot_") || k.startsWith("pre#")) ed.remove(k);
+                if (k.startsWith("act#") || k.startsWith("cx#") || k.startsWith("slot_") || k.startsWith("pre#")) ed.remove(k);
             }
             ed.apply();
             loadBindings();
@@ -1172,7 +1210,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
             if (pending != null) sb.append("\nНажата: ").append(describe(pending)).append(". Коснитесь на схеме, какая это кнопка.");
             else if (current == null) sb.append("\nНажмите кнопку на пульте, и откроются её действия.");
             sb.append("\nДействия при открытом экране не выполняются.");
-            sb.append("\nКогда звонит будильник, любая кнопка пульта его выключает: назначать это не нужно.");
+            for (Ctx cx : CTXS) sb.append("\n").append(cx.label).append(": работают назначения «при активной программе», остальные кнопки — ").append(fnLabel(cx.fallback));
             synchronized (lock) {
                 if (!evlog.isEmpty()) sb.append("\nЖурнал:");
                 for (String s : evlog) sb.append("\n  ").append(s);
@@ -1235,7 +1273,13 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
             return box;
         }
 
-        private boolean hasAnyAct(String sig) { return has(sig, "S") || has(sig, "D") || has(sig, "L"); }
+        private boolean hasAnyAct(String sig) {
+            for (String g : G) {
+                if (bound.containsKey(sig + "#" + g)) return true;
+                for (Ctx cx : CTXS) if (ctxBound.containsKey(cx.id + "#" + sig + "#" + g)) return true;
+            }
+            return false;
+        }
 
         private void otherRow(final String sig) {
             row(null, "Это другая кнопка (нет на схеме)", new OnClickListener() {
@@ -1266,7 +1310,18 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
                 final int gi = i;
                 String fn = bound.get(sig + "#" + G[i]);
                 row(fn == null ? "○" : fnEmoji(fn), G_NAME[i] + ": " + (fn == null ? "не назначено" : fnLabel(fn)),
-                        new OnClickListener() { @Override public void onClick(View v) { choose(sig, gi); } });
+                        new OnClickListener() { @Override public void onClick(View v) { choose(sig, gi, null); } });
+            }
+            for (final Ctx cx : CTXS) {
+                row(null, cx.label + " — что делает эта кнопка:", null);
+                for (int i = 0; i < 3; i++) {
+                    final int gi = i;
+                    String fn = ctxBound.get(cx.id + "#" + sig + "#" + G[i]);
+                    String shown = fn != null ? fnLabel(fn)
+                            : ("S".equals(G[i]) ? "по умолчанию — " + fnLabel(cx.fallback) : "не назначено");
+                    row(fn == null ? "○" : fnEmoji(fn), G_NAME[i] + ": " + shown,
+                            new OnClickListener() { @Override public void onClick(View v) { choose(sig, gi, cx); } });
+                }
             }
             row(null, "Закрыть", new OnClickListener() {
                 @Override public void onClick(View v) { current = null; panel.removeAllViews(); refreshStatus(); dia.invalidate(); }
@@ -1274,16 +1329,24 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
             dia.invalidate();
         }
 
-        private void choose(final String sig, final int gi) {
+        /** Выбор функции для нажатия: обычной ([cx] == null) или «при активной программе» из её списка. */
+        private void choose(final String sig, final int gi, final Ctx cx) {
             panel.removeAllViews();
-            final String cur = bound.get(sig + "#" + G[gi]);
-            row(null, G_NAME[gi] + ":", null);
-            row(null, (cur == null ? "✓ " : "") + "Не назначено", new OnClickListener() {
-                @Override public void onClick(View v) { setAct(sig, G[gi], null); edit(sig); }
+            final String cur = cx == null ? bound.get(sig + "#" + G[gi]) : ctxBound.get(cx.id + "#" + sig + "#" + G[gi]);
+            row(null, (cx == null ? "" : cx.label + " · ") + G_NAME[gi] + ":", null);
+            String none = "Не назначено" + (cx != null && "S".equals(G[gi]) ? " (по умолчанию: " + fnLabel(cx.fallback) + ")" : "");
+            row(null, (cur == null ? "✓ " : "") + none, new OnClickListener() {
+                @Override public void onClick(View v) {
+                    if (cx == null) setAct(sig, G[gi], null); else setCtxAct(cx, sig, G[gi], null);
+                    edit(sig);
+                }
             });
-            for (final String[] f : FNS) {
+            for (final String[] f : (cx == null ? FNS : cx.fns)) {
                 row(null, (f[0].equals(cur) ? "✓ " : "") + f[1], new OnClickListener() {
-                    @Override public void onClick(View v) { setAct(sig, G[gi], f[0]); edit(sig); }
+                    @Override public void onClick(View v) {
+                        if (cx == null) setAct(sig, G[gi], f[0]); else setCtxAct(cx, sig, G[gi], f[0]);
+                        edit(sig);
+                    }
                 });
             }
             row(null, "← Назад", new OnClickListener() { @Override public void onClick(View v) { edit(sig); } });
