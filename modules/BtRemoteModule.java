@@ -54,6 +54,8 @@ import java.util.regex.Pattern;
  * Кнопки-«указка» (клик или свайп по экрану, которыми пульт имитирует касания) различаются по движению: тап или свайп
  * в какую сторону, поэтому центральная кнопка не срабатывает от стрелок.
  * Ниже схемы пульта показывается схема геймпада из модуля «Аудиоплеер» (его PadMapper).
+ * Действие «Циферблат»: после его нажатия (голос: «Циферблат») стрелки пульта вверх, вниз, влево, вправо переходят на
+ * 0, 25, 50, 75% трека, каждый переход озвучивается; выключается тем же действием или сам через несколько секунд.
  */
 public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsViewProvider {
 
@@ -75,6 +77,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
             {"ap:speed_reset", "🎚 Плеер: скорость 1×"}, {"ap:reverse", "🔃 Плеер: обратный порядок"},
             {"ap:stop_after", "🛑 Плеер: стоп после трека"}, {"ap:lock", "🔒 Плеер: блок касаний"},
             {"ap:auto_delete", "🗑 Плеер: автоудаление (вкл/выкл)"},
+            {"dial", "🕒 Циферблат: стрелки → 0/25/50/75% трека"},
     };
 
     /** Типы нажатия: S — одно, D — двойное, L — долгое. */
@@ -89,6 +92,10 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
 
     private static final long GESTURE_GAP_MS = 150;
 
+    /** Циферблат: стрелки схемы по порядку (вверх, вниз, влево, вправо) и доля трека, на которую каждая переходит. */
+    private static final String[] DIAL_SLOTS = {"up", "down", "left", "right"};
+    private static final int[] DIAL_PCT = {0, 25, 50, 75};
+
     private Context ctx;
     private Handler main;
     private SharedPreferences prefs;
@@ -99,6 +106,9 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     private volatile String lastSig;
     private volatile long lastSigAt;
     private volatile Runnable pressCb;                 // уведомление экрана настроек (главный поток)
+
+    private volatile boolean dialMode;                 // режим «Циферблат»: стрелки переходят по месту в треке
+    private Runnable dialTimer;                        // автовыключение режима (главный поток)
 
     private static final class KeyState {
         boolean down, longFired, suppress;
@@ -155,9 +165,9 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     private final Runnable readyCb = new Runnable() { @Override public void run() { startReader(); } };
 
     @Override public String getName() { return NAME; }
-    @Override public int getVersion() { return 10; }
+    @Override public int getVersion() { return 11; }
     @Override public String getDescription() {
-        return "Bluetooth-пульт через Shizuku: схема кнопок, одно/двойное/долгое нажатие, команды плеера";
+        return "Bluetooth-пульт через Shizuku: схема кнопок, одно/двойное/долгое нажатие, команды плеера, циферблат по треку";
     }
     @Override public String getIconName() { return "ic_launcher"; }
 
@@ -176,6 +186,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     @Override
     public void stop() {
         alive = false;
+        dialMode = false;
         ShizukuBridge.removeReadyListener(readyCb);
         killProcess();
         if (main != null) main.removeCallbacksAndMessages(null);
@@ -411,6 +422,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         if (uiOpen > 0) return;
         final String sig = preMap.get(key);
         if (sig == null || "?".equals(sig) || !has(sig, "L")) return;
+        if (dialMode && dialIndex(sig) >= 0) return;   // циферблат: стрелка не должна запускать своё долгое действие
         pr.timer = new Runnable() {
             @Override public void run() {
                 pr.timer = null;
@@ -690,6 +702,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         st.down = true; st.longFired = false; st.suppress = false;
         note(sig);
         if (uiOpen > 0) { st.suppress = true; return; }
+        if (dialIntercept(sig)) { st.suppress = true; return; }   // циферблат: стрелка = переход по треку
         boolean hasL = has(sig, "L"), hasD = has(sig, "D");
         if (!hasL && !hasD) { fire(sig, "S"); return; }
         if (hasL) {
@@ -734,6 +747,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
 
     private void keyRepeat(String sig) {
         if (uiOpen > 0 || has(sig, "L") || has(sig, "D")) return;
+        if (dialMode && dialIndex(sig) >= 0) return;
         String fn = bound.get(sig + "#S");
         if ("vol_up".equals(fn) || "vol_down".equals(fn)) run(fn);
     }
@@ -743,8 +757,92 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         note(sig);
         if (dur > 0) synchronized (lock) { if (!evlog.isEmpty()) evlog.set(0, evlog.getFirst() + " · " + dur + " мс"); }
         if (uiOpen > 0) return;
+        if (dialIntercept(sig)) return;               // циферблат: стрелка = переход по треку
         if (dur >= longMs() && has(sig, "L")) { fire(sig, "L"); return; }
         shortPress(sig, stateOf(sig), false);
+    }
+
+    // ------------------------------------------------------------------ циферблат: стрелки пульта -> место в треке
+
+    /** Номер стрелки циферблата (0 вверх, 1 вниз, 2 влево, 3 вправо) для кнопки; -1, если это не стрелка. */
+    private int dialIndex(String sig) {
+        if (sig == null || prefs == null) return -1;
+        for (int i = 0; i < DIAL_SLOTS.length; i++) {
+            if (sig.equals(slotSig(DIAL_SLOTS[i]))) return i;
+        }
+        return -1;
+    }
+
+    /** Режим «Циферблат» включён и нажата стрелка: переход по треку вместо её обычного действия (главный поток). */
+    private boolean dialIntercept(String sig) {
+        if (!dialMode || uiOpen > 0) return false;
+        int i = dialIndex(sig);
+        if (i < 0) return false;
+        dialJump(DIAL_PCT[i]);
+        return true;
+    }
+
+    /** Действие «Циферблат»: включает режим стрелок (голос: «Циферблат») или выключает его. */
+    private void toggleDial() {
+        if (dialMode) { dialStop(true); return; }
+        if (playerObj() == null) { toast("Аудиоплеер не запущен"); return; }
+        dialMode = true;
+        armDialTimer();
+        sayPlayer("Циферблат");
+    }
+
+    private void dialStop(boolean say) {
+        dialMode = false;
+        Handler h = main;
+        if (h != null && dialTimer != null) h.removeCallbacks(dialTimer);
+        dialTimer = null;
+        if (say) sayPlayer("Циферблат выключен");
+    }
+
+    /** Режим сам выключается через «dial_sec» секунд без нажатий стрелок; каждый переход отсчёт начинает заново. */
+    private void armDialTimer() {
+        final Handler h = main;
+        if (h == null) return;
+        if (dialTimer != null) h.removeCallbacks(dialTimer);
+        dialTimer = new Runnable() {
+            @Override public void run() {
+                dialTimer = null;
+                if (dialMode) dialStop(true);
+            }
+        };
+        h.postDelayed(dialTimer, (prefs != null ? prefs.getInt("dial_sec", 10) : 10) * 1000L);
+    }
+
+    /** Переход на долю трека: тот же закрытый seekFractionAny плеера, что у стика-циферблата геймпада; голосом называется процент. */
+    private void dialJump(int pct) {
+        armDialTimer();
+        try {
+            Object ap = playerObj();
+            if (ap == null) { toast("Аудиоплеер не запущен"); return; }
+            Method m = ap.getClass().getDeclaredMethod("seekFractionAny", float.class);
+            m.setAccessible(true);
+            m.invoke(ap, Float.valueOf(pct / 100f));
+            synchronized (lock) {
+                evlog.addFirst("   🕒 переход на " + pct + "%");
+                while (evlog.size() > 12) evlog.removeLast();
+            }
+            sayPlayer(pct + " процентов");
+        } catch (Throwable t) { t.printStackTrace(); toast("Не удалось перемотать трек"); }
+    }
+
+    private Object playerObj() {
+        try { return System.getProperties().get(PLAYER_LIVE_KEY); } catch (Throwable t) { return null; }
+    }
+
+    /** Озвучка голосом плеера (его закрытый speak); если плеера нет, текст показывается на экране. */
+    private void sayPlayer(String text) {
+        try {
+            Object ap = playerObj();
+            if (ap == null) { toast(text); return; }
+            Method m = ap.getClass().getDeclaredMethod("speak", String.class);
+            m.setAccessible(true);
+            m.invoke(ap, text);
+        } catch (Throwable t) { toast(text); }
     }
 
     // ------------------------------------------------------------------ назначения
@@ -818,6 +916,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         Context c = ctx;
         if (c == null || fn == null) return;
         if (fn.startsWith("ap:")) { runPlayer(fn.substring(3)); return; }
+        if ("dial".equals(fn)) { toggleDial(); return; }
         AudioManager am = (AudioManager) c.getSystemService(Context.AUDIO_SERVICE);
         if (am == null) return;
         try {
@@ -899,6 +998,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         l.add(SettingItem.slider("long_ms", "⏱ Долгое нажатие, мс", "Сколько держать кнопку", 300, 1500, 50, 600));
         l.add(SettingItem.slider("double_ms", "⚡ Пауза двойного нажатия, мс", "Чем больше, тем позже сработает одиночное", 150, 800, 25, 350));
         l.add(SettingItem.slider("swipe_min", "📏 Порог свайпа указки", "Меньше порога — тап, больше — свайп", 2, 500, 2, 20));
+        l.add(SettingItem.slider("dial_sec", "🕒 Циферблат: ждать стрелку, с", "Через сколько секунд без нажатий стрелок режим «Циферблат» выключится сам", 3, 30, 1, 10));
         l.add(SettingItem.action("restart", "🔄 Перезапустить чтение", "Если пульт переподключали"));
         l.add(SettingItem.action("unbind_all", "🗑 Сбросить все назначения", "Кнопки и действия"));
         return l;
