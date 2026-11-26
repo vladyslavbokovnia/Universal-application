@@ -1,0 +1,73 @@
+diff --git a/modules/BtRemoteModule.java b/modules/BtRemoteModule.java
+index f2f3749..40c3260 100644
+--- a/modules/BtRemoteModule.java
++++ b/modules/BtRemoteModule.java
+@@ -393,6 +393,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+                 }
+                 return;
+             }
++            if (dev.startsWith("BLE-M3") && "KEY_VOLUMEUP".equals(code)) code = "KEY_VOLUMEDOWN";   // камера шлёт то VOLUMEUP, то VOLUMEDOWN: это одна кнопка
+             final String sig = "K|" + code + "|" + dev;
+             if ("DOWN".equals(val)) synchronized (keyAt) { keyAt.put(devBase(dev), SystemClock.uptimeMillis()); }
+             if ("DOWN".equals(val)) postMain(new Runnable() { @Override public void run() { keyDown(sig); } });
+@@ -488,6 +489,15 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+         }
+     }
+ 
++    /** Клавиша пришла сразу после прыжка указки (короткое нажатие): прыжок закрепляется за этой клавишей, прежнее соответствие заменяется. */
++    private void learnPreKey(Pre pr, String sig) {
++        if (pr == null || sig == null || prefs == null) return;
++        if (SystemClock.uptimeMillis() - pr.at > 400) return;
++        if (sig.equals(preMap.get(pr.key))) return;
++        preMap.put(pr.key, sig);
++        prefs.edit().putString("pre#" + pr.key, sig).apply();
++    }
++
+     /** Выученные соответствия «прыжок указки -> кнопка» из настроек. */
+     private void loadPre() {
+         Map<String, String> pm = new HashMap<String, String>();
+@@ -729,6 +739,15 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+         if (st.longTimer != null) { main.removeCallbacks(st.longTimer); st.longTimer = null; }
+         st.down = true; st.longFired = false; st.suppress = false;
+         note(sig);
++        Pre kp = pre;
++        if (kp != null && sig.startsWith("K|") && SystemClock.uptimeMillis() - kp.at < 10000) {
++            if (kp.fired && sig.equals(preMap.get(kp.key))) {   // долгое нажатие уже выполнено по таймеру: клавиша пришла при отпускании
++                pre = null;
++                st.suppress = true;
++                return;
++            }
++            learnPreKey(kp, sig);
++        }
+         if (uiOpen > 0) { st.suppress = true; return; }
+         if (dialIntercept(sig)) { st.suppress = true; return; }   // циферблат: стрелка = переход по треку
+         boolean hasL = has(sig, "L"), hasD = has(sig, "D");
+@@ -904,6 +923,28 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+         migrateOld();
+         cleanRemoved();
+         moveAlarmToCtx();
++        mergeVolKeys();
++    }
++
++    /** Камера пульта шлёт то VOLUMEUP, то VOLUMEDOWN: это одна кнопка (VOLUMEDOWN), прежние назначения на VOLUMEUP переносятся, если место свободно. */
++    private void mergeVolKeys() {
++        if (prefs.getBoolean("mig15", false)) return;
++        final String up = "K|KEY_VOLUMEUP|BLE-M3", down = "K|KEY_VOLUMEDOWN|BLE-M3";
++        Map<String, Object> all = new HashMap<String, Object>(prefs.getAll());
++        SharedPreferences.Editor ed = prefs.edit();
++        for (Map.Entry<String, Object> e : all.entrySet()) {
++            String k = e.getKey();
++            Object v = e.getValue();
++            if ((k.startsWith("act#") || k.startsWith("cx#")) && k.contains(up)) {
++                String nk = k.replace(up, down);
++                ed.remove(k);
++                if (!all.containsKey(nk) && v instanceof String) ed.putString(nk, (String) v);
++            } else if ((k.startsWith("slot_") || k.startsWith("pre#")) && v instanceof String && ((String) v).startsWith(up)) {
++                ed.putString(k, down + ((String) v).substring(up.length()));
++            }
++        }
++        ed.putBoolean("mig15", true);
++        ed.apply();
+     }
+ 
+     /** Действия будильника переехали из общего списка в контекст «будильник звонит»: прежние назначения переносятся туда, кнопки освобождаются. */
