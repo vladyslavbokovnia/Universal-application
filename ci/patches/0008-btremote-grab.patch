@@ -1,5 +1,5 @@
 diff --git a/modules/BtRemoteModule.java b/modules/BtRemoteModule.java
-index 9287bb9..bb88cf8 100644
+index 40c3260..148c6d4 100644
 --- a/modules/BtRemoteModule.java
 +++ b/modules/BtRemoteModule.java
 @@ -37,6 +37,7 @@ import java.io.InputStreamReader;
@@ -10,17 +10,17 @@ index 9287bb9..bb88cf8 100644
  import java.util.HashMap;
  import java.util.HashSet;
  import java.util.LinkedList;
-@@ -56,6 +57,9 @@ import java.util.regex.Pattern;
-  * Ниже схемы пульта показывается схема геймпада из модуля «Аудиоплеер» (его PadMapper).
-  * Действие «Циферблат»: после его нажатия (голос: «Циферблат») стрелки пульта вверх, вправо, вниз, влево переходят на
-  * 0, 25, 50, 75% трека (по часовой стрелке, как стик-циферблат геймпада), каждый переход озвучивается; выключается тем же действием или сам через несколько секунд.
+@@ -59,6 +60,9 @@ import java.util.regex.Pattern;
+  * Контексты «активная программа» (CTXS): пока программа активна (будильник звонит), кнопки работают в её режиме: действия
+  * «при звонке» назначаются отдельно от обычных (на одну кнопку можно повесить и функцию плеера, и действие будильника),
+  * а кнопки без назначения выполняют действие по умолчанию (у будильника это «отложить»). Другая программа добавляется строкой в CTXS.
 + * Настройка «Забирать пульт у Android»: помощник (класс Grab, запускается через Shizuku от имени оболочки) берёт устройства пульта
 + * в исключительное пользование (EVIOCGRAB), Android перестаёт получать их события (указка и клавиши не дёргают экран), а модуль
 + * получает те же события от помощника.
   */
  public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsViewProvider {
  
-@@ -111,6 +115,15 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+@@ -134,6 +138,15 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
      private volatile boolean dialMode;                 // режим «Циферблат»: стрелки переходят по месту в треке
      private Runnable dialTimer;                        // автовыключение режима (главный поток)
  
@@ -36,7 +36,7 @@ index 9287bb9..bb88cf8 100644
      private static final class KeyState {
          boolean down, longFired, suppress;
          Runnable longTimer, tapTimer;
-@@ -163,10 +176,10 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+@@ -186,10 +199,10 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
      private String gDev = "";
  
      private final Runnable gestureEnd = new Runnable() { @Override public void run() { finishGesture(); } };
@@ -44,12 +44,12 @@ index 9287bb9..bb88cf8 100644
 +    private final Runnable readyCb = new Runnable() { @Override public void run() { startReader(); startGrab(); } };
  
      @Override public String getName() { return NAME; }
--    @Override public int getVersion() { return 12; }
-+    @Override public int getVersion() { return 13; }
+-    @Override public int getVersion() { return 14; }
++    @Override public int getVersion() { return 15; }
      @Override public String getDescription() {
-         return "Bluetooth-пульт через Shizuku: схема кнопок, одно/двойное/долгое нажатие, команды плеера, циферблат по треку, будильник";
+         return "Bluetooth-пульт через Shizuku: схема кнопок, одно/двойное/долгое нажатие, команды плеера, циферблат по треку, свои назначения при активной программе (будильник)";
      }
-@@ -182,6 +195,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+@@ -205,6 +218,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
          loadBindings();
          ShizukuBridge.addReadyListener(readyCb);
          startReader();
@@ -57,7 +57,7 @@ index 9287bb9..bb88cf8 100644
      }
  
      @Override
-@@ -189,6 +203,8 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+@@ -212,6 +226,8 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
          alive = false;
          dialMode = false;
          ShizukuBridge.removeReadyListener(readyCb);
@@ -66,7 +66,7 @@ index 9287bb9..bb88cf8 100644
          killProcess();
          if (main != null) main.removeCallbacksAndMessages(null);
          ctx = null;
-@@ -280,7 +296,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+@@ -303,7 +319,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
                  BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
                  try {
                      String line;
@@ -75,7 +75,7 @@ index 9287bb9..bb88cf8 100644
                  } finally { r.close(); }
              } catch (Throwable t) { }
              killProcess();
-@@ -493,6 +509,270 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+@@ -526,6 +542,270 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
          pressDone("R|MOVE_" + d + "|" + dev, 0);
      }
  
@@ -346,7 +346,7 @@ index 9287bb9..bb88cf8 100644
      // ------------------------------------------------------------------ диагностика кнопок
  
      /** Запись сырых строк getevent выбранной кнопки (поток чтения). */
-@@ -534,6 +814,8 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+@@ -567,6 +847,8 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
          try { pads = String.valueOf(padPaths); } catch (RuntimeException e) { pads = "?"; }
          StringBuilder sb = new StringBuilder("BtRemote v").append(getVersion()).append('\n');
          sb.append("Shizuku: ").append(readerState).append('\n');
@@ -355,7 +355,7 @@ index 9287bb9..bb88cf8 100644
          synchronized (lock) {
              sb.append("исключены: ").append(excluded).append("\nгеймпады: ").append(pads).append("\nжурнал:\n");
              for (String s : evlog) sb.append("  ").append(s).append('\n');
-@@ -1015,6 +1297,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+@@ -1137,6 +1419,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
          l.add(SettingItem.slider("double_ms", "⚡ Пауза двойного нажатия, мс", "Чем больше, тем позже сработает одиночное", 150, 800, 25, 350));
          l.add(SettingItem.slider("swipe_min", "📏 Порог свайпа указки", "Меньше порога — тап, больше — свайп", 2, 500, 2, 20));
          l.add(SettingItem.slider("dial_sec", "🕒 Циферблат: ждать стрелку, с", "Через сколько секунд без нажатий стрелок режим «Циферблат» выключится сам", 3, 30, 1, 10));
@@ -363,7 +363,7 @@ index 9287bb9..bb88cf8 100644
          l.add(SettingItem.action("restart", "🔄 Перезапустить чтение", "Если пульт переподключали"));
          l.add(SettingItem.action("unbind_all", "🗑 Сбросить все назначения", "Кнопки и действия"));
          return l;
-@@ -1031,9 +1314,13 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+@@ -1153,9 +1436,13 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
              ed.apply();
              loadBindings();
              toast("Все назначения сброшены");
@@ -377,7 +377,7 @@ index 9287bb9..bb88cf8 100644
              toast("Чтение событий перезапущено");
          }
      }
-@@ -1126,6 +1413,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
+@@ -1248,6 +1535,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
  
          private void refreshStatus() {
              StringBuilder sb = new StringBuilder("Shizuku: " + readerState);
