@@ -1139,7 +1139,18 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         if (playerObj() == null) { toast("Аудиоплеер не запущен"); return; }
         dialMode = true;
         armDialTimer();
-        sayPlayer("Циферблат");
+        sayPlayerPercent();
+    }
+
+    /** При включении режима голос называет только текущий процент трека (его собственный sayPercent у плеера). */
+    private void sayPlayerPercent() {
+        try {
+            Object ap = playerObj();
+            if (ap == null) { toast("Аудиоплеер не запущен"); return; }
+            Method m = ap.getClass().getDeclaredMethod("sayPercent");
+            m.setAccessible(true);
+            m.invoke(ap);
+        } catch (Throwable t) { }
     }
 
     private void dialStop(boolean say) {
@@ -1158,7 +1169,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         dialTimer = new Runnable() {
             @Override public void run() {
                 dialTimer = null;
-                if (dialMode) dialStop(true);
+                if (dialMode) dialStop(false);   // автовыключение молча
             }
         };
         h.postDelayed(dialTimer, (prefs != null ? prefs.getInt("dial_sec", 10) : 10) * 1000L);
