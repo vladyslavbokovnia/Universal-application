@@ -37,6 +37,7 @@ import java.io.InputStreamReader;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
@@ -59,6 +60,9 @@ import java.util.regex.Pattern;
  * Контексты «активная программа» (CTXS): пока программа активна (будильник звонит), кнопки работают в её режиме: действия
  * «при звонке» назначаются отдельно от обычных (на одну кнопку можно повесить и функцию плеера, и действие будильника),
  * а кнопки без назначения выполняют действие по умолчанию (у будильника это «отложить»). Другая программа добавляется строкой в CTXS.
+ * Настройка «Забирать пульт у Android»: помощник (класс Grab, запускается через Shizuku от имени оболочки) берёт устройства пульта
+ * в исключительное пользование (EVIOCGRAB), Android перестаёт получать их события (указка и клавиши не дёргают экран), а модуль
+ * получает те же события от помощника.
  */
 public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsViewProvider {
 
@@ -134,6 +138,15 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     private volatile boolean dialMode;                 // режим «Циферблат»: стрелки переходят по месту в треке
     private Runnable dialTimer;                        // автовыключение режима (главный поток)
 
+    // захват пульта: помощник от имени оболочки забирает устройства пульта у Android и сам присылает их события
+    private final Object grabLock = new Object();
+    private final Object lineLock = new Object();      // строки getevent и помощника разбирает один поток за раз
+    private int grabGen;                               // номер текущего цикла захвата (под grabLock)
+    private volatile Process grabProc;
+    private volatile String grabState = "выключено";
+    private final LinkedList<String> grabLog = new LinkedList<String>();
+    private final Set<String> grabbed = new HashSet<String>();
+
     private static final class KeyState {
         boolean down, longFired, suppress;
         Runnable longTimer, tapTimer;
@@ -186,10 +199,10 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
     private String gDev = "";
 
     private final Runnable gestureEnd = new Runnable() { @Override public void run() { finishGesture(); } };
-    private final Runnable readyCb = new Runnable() { @Override public void run() { startReader(); } };
+    private final Runnable readyCb = new Runnable() { @Override public void run() { startReader(); startGrab(); } };
 
     @Override public String getName() { return NAME; }
-    @Override public int getVersion() { return 14; }
+    @Override public int getVersion() { return 15; }
     @Override public String getDescription() {
         return "Bluetooth-пульт через Shizuku: схема кнопок, одно/двойное/долгое нажатие, команды плеера, циферблат по треку, свои назначения при активной программе (будильник)";
     }
@@ -205,6 +218,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         loadBindings();
         ShizukuBridge.addReadyListener(readyCb);
         startReader();
+        startGrab();
     }
 
     @Override
@@ -212,6 +226,8 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         alive = false;
         dialMode = false;
         ShizukuBridge.removeReadyListener(readyCb);
+        synchronized (grabLock) { grabGen++; }
+        killGrab();
         killProcess();
         if (main != null) main.removeCallbacksAndMessages(null);
         ctx = null;
@@ -303,7 +319,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
                 BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
                 try {
                     String line;
-                    while (alive && (line = r.readLine()) != null) handleLine(line);
+                    while (alive && (line = r.readLine()) != null) feed(line);
                 } finally { r.close(); }
             } catch (Throwable t) { }
             killProcess();
@@ -526,6 +542,270 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         pressDone("R|MOVE_" + d + "|" + dev, 0);
     }
 
+    // ------------------------------------------------------------------ захват пульта (Android не получает его события)
+
+    private static final Map<Integer, String> KEY_NAMES = table("0:KEY_RESERVED,KEY_ESC,KEY_1,KEY_2,KEY_3,KEY_4,KEY_5,KEY_6,KEY_7,KEY_8,KEY_9,KEY_0,KEY_MINUS,KEY_EQUAL,KEY_BACKSPACE,KEY_TAB,KEY_Q,KEY_W,KEY_E,KEY_R,KEY_T,KEY_Y,KEY_U,KEY_I,KEY_O,KEY_P,KEY_LEFTBRACE,KEY_RIGHTBRACE,KEY_ENTER,KEY_LEFTCTRL,KEY_A,KEY_S,KEY_D,KEY_F,KEY_G,KEY_H,KEY_J,KEY_K,KEY_L,KEY_SEMICOLON,KEY_APOSTROPHE,KEY_GRAVE,KEY_LEFTSHIFT,KEY_BACKSLASH,KEY_Z,KEY_X,KEY_C,KEY_V,KEY_B,KEY_N,KEY_M,KEY_COMMA,KEY_DOT,KEY_SLASH,KEY_RIGHTSHIFT,KEY_KPASTERISK,KEY_LEFTALT,KEY_SPACE,KEY_CAPSLOCK,KEY_F1,KEY_F2,KEY_F3,KEY_F4,KEY_F5,KEY_F6,KEY_F7,KEY_F8,KEY_F9,KEY_F10,KEY_NUMLOCK,KEY_SCROLLLOCK,KEY_KP7,KEY_KP8,KEY_KP9,KEY_KPMINUS,KEY_KP4,KEY_KP5,KEY_KP6,KEY_KPPLUS,KEY_KP1,KEY_KP2,KEY_KP3,KEY_KP0,KEY_KPDOT;85:KEY_ZENKAKUHANKAKU,KEY_102ND,KEY_F11,KEY_F12,KEY_RO,KEY_KATAKANA,KEY_HIRAGANA,KEY_HENKAN,KEY_KATAKANAHIRAGANA,KEY_MUHENKAN,KEY_KPJPCOMMA,KEY_KPENTER,KEY_RIGHTCTRL,KEY_KPSLASH,KEY_SYSRQ,KEY_RIGHTALT,KEY_LINEFEED,KEY_HOME,KEY_UP,KEY_PAGEUP,KEY_LEFT,KEY_RIGHT,KEY_END,KEY_DOWN,KEY_PAGEDOWN,KEY_INSERT,KEY_DELETE,KEY_MACRO,KEY_MUTE,KEY_VOLUMEDOWN,KEY_VOLUMEUP,KEY_POWER,KEY_KPEQUAL,KEY_KPPLUSMINUS,KEY_PAUSE,KEY_SCALE,KEY_KPCOMMA,KEY_HANGEUL,KEY_HANJA,KEY_YEN,KEY_LEFTMETA,KEY_RIGHTMETA,KEY_COMPOSE,KEY_STOP,KEY_AGAIN,KEY_PROPS,KEY_UNDO,KEY_FRONT,KEY_COPY,KEY_OPEN,KEY_PASTE,KEY_FIND,KEY_CUT,KEY_HELP,KEY_MENU,KEY_CALC,KEY_SETUP,KEY_SLEEP,KEY_WAKEUP,KEY_FILE,KEY_SENDFILE,KEY_DELETEFILE,KEY_XFER,KEY_PROG1,KEY_PROG2,KEY_WWW,KEY_MSDOS,KEY_COFFEE,KEY_ROTATE_DISPLAY,KEY_CYCLEWINDOWS,KEY_MAIL,KEY_BOOKMARKS,KEY_COMPUTER,KEY_BACK,KEY_FORWARD,KEY_CLOSECD,KEY_EJECTCD,KEY_EJECTCLOSECD,KEY_NEXTSONG,KEY_PLAYPAUSE,KEY_PREVIOUSSONG,KEY_STOPCD,KEY_RECORD,KEY_REWIND,KEY_PHONE,KEY_ISO,KEY_CONFIG,KEY_HOMEPAGE,KEY_REFRESH,KEY_EXIT,KEY_MOVE,KEY_EDIT,KEY_SCROLLUP,KEY_SCROLLDOWN,KEY_KPLEFTPAREN,KEY_KPRIGHTPAREN,KEY_NEW,KEY_REDO,KEY_F13,KEY_F14,KEY_F15,KEY_F16,KEY_F17,KEY_F18,KEY_F19,KEY_F20,KEY_F21,KEY_F22,KEY_F23,KEY_F24;200:KEY_PLAYCD,KEY_PAUSECD,KEY_PROG3,KEY_PROG4,KEY_ALL_APPLICATIONS,KEY_SUSPEND,KEY_CLOSE,KEY_PLAY,KEY_FASTFORWARD,KEY_BASSBOOST,KEY_PRINT,KEY_HP,KEY_CAMERA,KEY_SOUND,KEY_QUESTION,KEY_EMAIL,KEY_CHAT,KEY_SEARCH,KEY_CONNECT,KEY_FINANCE,KEY_SPORT,KEY_SHOP,KEY_ALTERASE,KEY_CANCEL,KEY_BRIGHTNESSDOWN,KEY_BRIGHTNESSUP,KEY_MEDIA,KEY_SWITCHVIDEOMODE,KEY_KBDILLUMTOGGLE,KEY_KBDILLUMDOWN,KEY_KBDILLUMUP,KEY_SEND,KEY_REPLY,KEY_FORWARDMAIL,KEY_SAVE,KEY_DOCUMENTS,KEY_BATTERY,KEY_BLUETOOTH,KEY_WLAN,KEY_UWB,KEY_UNKNOWN,KEY_VIDEO_NEXT,KEY_VIDEO_PREV,KEY_BRIGHTNESS_CYCLE,KEY_BRIGHTNESS_AUTO,KEY_DISPLAY_OFF,KEY_WWAN,KEY_RFKILL,KEY_MICMUTE;256:BTN_MISC,BTN_1,BTN_2,BTN_3,BTN_4,BTN_5,BTN_6,BTN_7,BTN_8,BTN_9;272:BTN_MOUSE,BTN_RIGHT,BTN_MIDDLE,BTN_SIDE,BTN_EXTRA,BTN_FORWARD,BTN_BACK,BTN_TASK;288:BTN_JOYSTICK,BTN_THUMB,BTN_THUMB2,BTN_TOP,BTN_TOP2,BTN_PINKIE,BTN_BASE,BTN_BASE2,BTN_BASE3,BTN_BASE4,BTN_BASE5,BTN_BASE6;303:BTN_DEAD,BTN_GAMEPAD,BTN_EAST,BTN_C,BTN_NORTH,BTN_WEST,BTN_Z,BTN_TL,BTN_TR,BTN_TL2,BTN_TR2,BTN_SELECT,BTN_START,BTN_MODE,BTN_THUMBL,BTN_THUMBR;320:BTN_DIGI,BTN_TOOL_RUBBER,BTN_TOOL_BRUSH,BTN_TOOL_PENCIL,BTN_TOOL_AIRBRUSH,BTN_TOOL_FINGER,BTN_TOOL_MOUSE,BTN_TOOL_LENS,BTN_TOOL_QUINTTAP,BTN_STYLUS3,BTN_TOUCH,BTN_STYLUS,BTN_STYLUS2,BTN_TOOL_DOUBLETAP,BTN_TOOL_TRIPLETAP,BTN_TOOL_QUADTAP,BTN_WHEEL,BTN_GEAR_UP;352:KEY_OK,KEY_SELECT,KEY_GOTO,KEY_CLEAR,KEY_POWER2,KEY_OPTION,KEY_INFO,KEY_TIME,KEY_VENDOR,KEY_ARCHIVE,KEY_PROGRAM,KEY_CHANNEL,KEY_FAVORITES,KEY_EPG,KEY_PVR,KEY_MHP,KEY_LANGUAGE,KEY_TITLE,KEY_SUBTITLE,KEY_ANGLE,KEY_FULL_SCREEN,KEY_MODE,KEY_KEYBOARD,KEY_ASPECT_RATIO,KEY_PC,KEY_TV,KEY_TV2,KEY_VCR,KEY_VCR2,KEY_SAT,KEY_SAT2,KEY_CD,KEY_TAPE,KEY_RADIO,KEY_TUNER,KEY_PLAYER,KEY_TEXT,KEY_DVD,KEY_AUX,KEY_MP3,KEY_AUDIO,KEY_VIDEO,KEY_DIRECTORY,KEY_LIST,KEY_MEMO,KEY_CALENDAR,KEY_RED,KEY_GREEN,KEY_YELLOW,KEY_BLUE,KEY_CHANNELUP,KEY_CHANNELDOWN,KEY_FIRST,KEY_LAST,KEY_AB,KEY_NEXT,KEY_RESTART,KEY_SLOW,KEY_SHUFFLE,KEY_BREAK,KEY_PREVIOUS,KEY_DIGITS,KEY_TEEN,KEY_TWEN,KEY_VIDEOPHONE,KEY_GAMES,KEY_ZOOMIN,KEY_ZOOMOUT,KEY_ZOOMRESET,KEY_WORDPROCESSOR,KEY_EDITOR,KEY_SPREADSHEET,KEY_GRAPHICSEDITOR,KEY_PRESENTATION,KEY_DATABASE,KEY_NEWS,KEY_VOICEMAIL,KEY_ADDRESSBOOK,KEY_MESSENGER,KEY_DISPLAYTOGGLE,KEY_SPELLCHECK,KEY_LOGOFF,KEY_DOLLAR,KEY_EURO,KEY_FRAMEBACK,KEY_FRAMEFORWARD,KEY_CONTEXT_MENU,KEY_MEDIA_REPEAT,KEY_10CHANNELSUP,KEY_10CHANNELSDOWN,KEY_IMAGES;444:KEY_NOTIFICATION_CENTER,KEY_PICKUP_PHONE,KEY_HANGUP_PHONE,KEY_LINK_PHONE,KEY_DEL_EOL,KEY_DEL_EOS,KEY_INS_LINE,KEY_DEL_LINE;464:KEY_FN,KEY_FN_ESC,KEY_FN_F1,KEY_FN_F2,KEY_FN_F3,KEY_FN_F4,KEY_FN_F5,KEY_FN_F6,KEY_FN_F7,KEY_FN_F8,KEY_FN_F9,KEY_FN_F10,KEY_FN_F11,KEY_FN_F12,KEY_FN_1,KEY_FN_2,KEY_FN_D,KEY_FN_E,KEY_FN_F,KEY_FN_S,KEY_FN_B,KEY_FN_RIGHT_SHIFT;497:KEY_BRL_DOT1,KEY_BRL_DOT2,KEY_BRL_DOT3,KEY_BRL_DOT4,KEY_BRL_DOT5,KEY_BRL_DOT6,KEY_BRL_DOT7,KEY_BRL_DOT8,KEY_BRL_DOT9,KEY_BRL_DOT10;512:KEY_NUMERIC_0,KEY_NUMERIC_1,KEY_NUMERIC_2,KEY_NUMERIC_3,KEY_NUMERIC_4,KEY_NUMERIC_5,KEY_NUMERIC_6,KEY_NUMERIC_7,KEY_NUMERIC_8,KEY_NUMERIC_9,KEY_NUMERIC_STAR,KEY_NUMERIC_POUND,KEY_NUMERIC_A,KEY_NUMERIC_B,KEY_NUMERIC_C,KEY_NUMERIC_D,KEY_CAMERA_FOCUS,KEY_WPS_BUTTON,KEY_TOUCHPAD_TOGGLE,KEY_TOUCHPAD_ON,KEY_TOUCHPAD_OFF,KEY_CAMERA_ZOOMIN,KEY_CAMERA_ZOOMOUT,KEY_CAMERA_UP,KEY_CAMERA_DOWN,KEY_CAMERA_LEFT,KEY_CAMERA_RIGHT,KEY_ATTENDANT_ON,KEY_ATTENDANT_OFF,KEY_ATTENDANT_TOGGLE,KEY_LIGHTS_TOGGLE;544:BTN_DPAD_UP,BTN_DPAD_DOWN,BTN_DPAD_LEFT,BTN_DPAD_RIGHT;560:KEY_ALS_TOGGLE,KEY_ROTATE_LOCK_TOGGLE,KEY_REFRESH_RATE_TOGGLE;576:KEY_BUTTONCONFIG,KEY_TASKMANAGER,KEY_JOURNAL,KEY_CONTROLPANEL,KEY_APPSELECT,KEY_SCREENSAVER,KEY_VOICECOMMAND,KEY_ASSISTANT,KEY_KBD_LAYOUT_NEXT,KEY_EMOJI_PICKER,KEY_DICTATE,KEY_CAMERA_ACCESS_ENABLE,KEY_CAMERA_ACCESS_DISABLE,KEY_CAMERA_ACCESS_TOGGLE,KEY_ACCESSIBILITY,KEY_DO_NOT_DISTURB,KEY_BRIGHTNESS_MIN;608:KEY_KBDINPUTASSIST_PREV,KEY_KBDINPUTASSIST_NEXT,KEY_KBDINPUTASSIST_PREVGROUP,KEY_KBDINPUTASSIST_NEXTGROUP,KEY_KBDINPUTASSIST_ACCEPT,KEY_KBDINPUTASSIST_CANCEL,KEY_RIGHT_UP,KEY_RIGHT_DOWN,KEY_LEFT_UP,KEY_LEFT_DOWN,KEY_ROOT_MENU,KEY_MEDIA_TOP_MENU,KEY_NUMERIC_11,KEY_NUMERIC_12,KEY_AUDIO_DESC,KEY_3D_MODE,KEY_NEXT_FAVORITE,KEY_STOP_RECORD,KEY_PAUSE_RECORD,KEY_VOD,KEY_UNMUTE,KEY_FASTREVERSE,KEY_SLOWREVERSE,KEY_DATA,KEY_ONSCREEN_KEYBOARD,KEY_PRIVACY_SCREEN_TOGGLE,KEY_SELECTIVE_SCREENSHOT,KEY_NEXT_ELEMENT,KEY_PREVIOUS_ELEMENT,KEY_AUTOPILOT_ENGAGE_TOGGLE,KEY_MARK_WAYPOINT,KEY_SOS,KEY_NAV_CHART,KEY_FISHING_CHART,KEY_SINGLE_RANGE_RADAR,KEY_DUAL_RANGE_RADAR,KEY_RADAR_OVERLAY,KEY_TRADITIONAL_SONAR,KEY_CLEARVU_SONAR,KEY_SIDEVU_SONAR,KEY_NAV_INFO,KEY_BRIGHTNESS_MENU;656:KEY_MACRO1,KEY_MACRO2,KEY_MACRO3,KEY_MACRO4,KEY_MACRO5,KEY_MACRO6,KEY_MACRO7,KEY_MACRO8,KEY_MACRO9,KEY_MACRO10,KEY_MACRO11,KEY_MACRO12,KEY_MACRO13,KEY_MACRO14,KEY_MACRO15,KEY_MACRO16,KEY_MACRO17,KEY_MACRO18,KEY_MACRO19,KEY_MACRO20,KEY_MACRO21,KEY_MACRO22,KEY_MACRO23,KEY_MACRO24,KEY_MACRO25,KEY_MACRO26,KEY_MACRO27,KEY_MACRO28,KEY_MACRO29,KEY_MACRO30;688:KEY_MACRO_RECORD_START,KEY_MACRO_RECORD_STOP,KEY_MACRO_PRESET_CYCLE,KEY_MACRO_PRESET1,KEY_MACRO_PRESET2,KEY_MACRO_PRESET3;696:KEY_KBD_LCD_MENU1,KEY_KBD_LCD_MENU2,KEY_KBD_LCD_MENU3,KEY_KBD_LCD_MENU4,KEY_KBD_LCD_MENU5;704:BTN_TRIGGER_HAPPY,BTN_TRIGGER_HAPPY2,BTN_TRIGGER_HAPPY3,BTN_TRIGGER_HAPPY4,BTN_TRIGGER_HAPPY5,BTN_TRIGGER_HAPPY6,BTN_TRIGGER_HAPPY7,BTN_TRIGGER_HAPPY8,BTN_TRIGGER_HAPPY9,BTN_TRIGGER_HAPPY10,BTN_TRIGGER_HAPPY11,BTN_TRIGGER_HAPPY12,BTN_TRIGGER_HAPPY13,BTN_TRIGGER_HAPPY14,BTN_TRIGGER_HAPPY15,BTN_TRIGGER_HAPPY16,BTN_TRIGGER_HAPPY17,BTN_TRIGGER_HAPPY18,BTN_TRIGGER_HAPPY19,BTN_TRIGGER_HAPPY20,BTN_TRIGGER_HAPPY21,BTN_TRIGGER_HAPPY22,BTN_TRIGGER_HAPPY23,BTN_TRIGGER_HAPPY24,BTN_TRIGGER_HAPPY25,BTN_TRIGGER_HAPPY26,BTN_TRIGGER_HAPPY27,BTN_TRIGGER_HAPPY28,BTN_TRIGGER_HAPPY29,BTN_TRIGGER_HAPPY30,BTN_TRIGGER_HAPPY31,BTN_TRIGGER_HAPPY32,BTN_TRIGGER_HAPPY33,BTN_TRIGGER_HAPPY34,BTN_TRIGGER_HAPPY35,BTN_TRIGGER_HAPPY36,BTN_TRIGGER_HAPPY37,BTN_TRIGGER_HAPPY38,BTN_TRIGGER_HAPPY39,BTN_TRIGGER_HAPPY40");
+    private static final Map<Integer, String> REL_NAMES = table("0:REL_X,REL_Y,REL_Z,REL_RX,REL_RY,REL_RZ,REL_HWHEEL,REL_DIAL,REL_WHEEL,REL_MISC,REL_RESERVED,REL_WHEEL_HI_RES,REL_HWHEEL_HI_RES");
+    private static final Map<Integer, String> ABS_NAMES = table("0:ABS_X,ABS_Y,ABS_Z,ABS_RX,ABS_RY,ABS_RZ,ABS_THROTTLE,ABS_RUDDER,ABS_WHEEL,ABS_GAS,ABS_BRAKE;16:ABS_HAT0X,ABS_HAT0Y,ABS_HAT1X,ABS_HAT1Y,ABS_HAT2X,ABS_HAT2Y,ABS_HAT3X,ABS_HAT3Y,ABS_PRESSURE,ABS_DISTANCE,ABS_TILT_X,ABS_TILT_Y,ABS_TOOL_WIDTH;32:ABS_VOLUME,ABS_PROFILE;40:ABS_MISC;46:ABS_RESERVED,ABS_MT_SLOT,ABS_MT_TOUCH_MAJOR,ABS_MT_TOUCH_MINOR,ABS_MT_WIDTH_MAJOR,ABS_MT_WIDTH_MINOR,ABS_MT_ORIENTATION,ABS_MT_POSITION_X,ABS_MT_POSITION_Y,ABS_MT_TOOL_TYPE,ABS_MT_BLOB_ID,ABS_MT_TRACKING_ID,ABS_MT_PRESSURE,ABS_MT_DISTANCE,ABS_MT_TOOL_X,ABS_MT_TOOL_Y");
+
+    /** Таблица имён кодов: «начало:имя,имя,...;начало:...». Имена как в «getevent -l», чтобы записанные кнопки совпадали. */
+    private static Map<Integer, String> table(String spec) {
+        Map<Integer, String> m = new HashMap<Integer, String>();
+        for (String run : spec.split(";")) {
+            int c = run.indexOf(':');
+            int n = Integer.parseInt(run.substring(0, c));
+            for (String name : run.substring(c + 1).split(",")) m.put(Integer.valueOf(n++), name);
+        }
+        return m;
+    }
+
+    private static String codeName(Map<Integer, String> m, int code) {
+        String s = m.get(Integer.valueOf(code));
+        return s != null ? s : String.format("%04x", code);
+    }
+
+    /** Событие помощника (тип, код, значение) в виде строки «getevent -l», которую разбирает handleLine. */
+    private static String eventLine(String path, int type, int code, int val) {
+        if (type == 1) return path + ": EV_KEY       " + codeName(KEY_NAMES, code) + " " + (val == 0 ? "UP" : val == 1 ? "DOWN" : "REPEAT");
+        if (type == 2) return path + ": EV_REL       " + codeName(REL_NAMES, code) + " " + String.format("%08x", val);
+        if (type == 3) return path + ": EV_ABS       " + codeName(ABS_NAMES, code) + " " + String.format("%08x", val);
+        return null;
+    }
+
+    private void feed(String line) {
+        synchronized (lineLock) { handleLine(line); }
+    }
+
+    private boolean grabOn() { return prefs != null && prefs.getBoolean("grab", false); }
+
+    private void glog(String s) {
+        synchronized (lock) { grabLog.addFirst(s); while (grabLog.size() > 8) grabLog.removeLast(); }
+    }
+
+    private static void sleepMs(long ms) {
+        try { Thread.sleep(ms); } catch (InterruptedException e) { }
+    }
+
+    /** Запускает цикл захвата заново (старый цикл и его помощник останавливаются), если включена настройка «grab». */
+    private void startGrab() {
+        if (!alive || ctx == null || prefs == null) return;
+        final int gen;
+        synchronized (grabLock) { gen = ++grabGen; }
+        killGrab();
+        if (!grabOn()) { grabState = "выключено"; return; }
+        if (!ShizukuBridge.hasPermission()) {
+            grabState = ShizukuBridge.isRunning() ? "у приложения нет разрешения Shizuku" : "Shizuku не запущен";
+            return;
+        }
+        grabState = "запуск…";
+        Thread t = new Thread(new Runnable() { @Override public void run() { grabLoop(gen); } }, "BtRemote-grab");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /** Останавливает помощника: закрытие его ввода и сигнал завершения, захват снимается вместе с процессом. */
+    private void killGrab() {
+        Process p = grabProc;
+        grabProc = null;
+        if (p != null) {
+            try { p.getOutputStream().close(); } catch (Throwable t) { }
+            try { p.destroy(); } catch (Throwable t) { }
+        }
+    }
+
+    private boolean gen(int gen) {
+        synchronized (grabLock) { return alive && gen == grabGen && grabOn(); }
+    }
+
+    /** Имена устройств по путям из «getevent -lp» (пульт мог переподключиться под другим номером). */
+    private void scanNames() {
+        try {
+            String out = ShizukuBridge.exec("getevent -lp").getOut();
+            Map<String, String> fresh = new HashMap<String, String>();
+            String path = null;
+            for (String raw : out.split("\n")) {
+                String s = raw.trim();
+                if (s.startsWith("add device")) {
+                    int i = s.indexOf(": ");
+                    path = i > 0 ? s.substring(i + 2).trim() : null;
+                } else if (s.startsWith("name:") && path != null) {
+                    int a = s.indexOf('"'), b = s.lastIndexOf('"');
+                    if (a >= 0 && b > a) fresh.put(path, s.substring(a + 1, b));
+                }
+            }
+            if (!fresh.isEmpty()) synchronized (devNames) { devNames.clear(); devNames.putAll(fresh); }
+        } catch (Throwable t) { }
+    }
+
+    private static void addDev(Set<String> out, String sig) {
+        if (sig == null) return;
+        String[] p = sig.split("\\|", 3);
+        if (p.length == 3 && p[2].length() > 0) out.add(p[2]);
+    }
+
+    /** Устройства, от которых есть назначенные кнопки (имена из сигналов), кроме геймпадов и самого телефона. */
+    private List<String> grabPaths() {
+        Set<String> names = new HashSet<String>();
+        for (String k : bound.keySet()) { int i = k.lastIndexOf('#'); addDev(names, i > 0 ? k.substring(0, i) : k); }
+        for (Object[] sl : SLOTS) addDev(names, slotSig((String) sl[0]));
+        for (String v : preMap.values()) addDev(names, v);
+        List<String> res = new ArrayList<String>();
+        synchronized (devNames) {
+            for (Map.Entry<String, String> e : devNames.entrySet()) {
+                String path = e.getKey();
+                String nm = e.getValue().replace('|', '/').replace('#', '/');
+                if (!names.contains(nm) || !path.matches("/dev/input/event\\d+") || padPaths.contains(path)) continue;
+                synchronized (lock) { if (excluded.contains(path)) continue; }
+                res.add(path);
+            }
+        }
+        Collections.sort(res);
+        return res;
+    }
+
+    private void grabLoop(int gen) {
+        while (gen(gen)) {
+            scanNames();
+            List<String> paths = grabPaths();
+            if (paths.isEmpty()) { grabState = "жду пульт: нет устройств с назначенными кнопками"; sleepMs(4000); continue; }
+            java.io.File dex;
+            try {
+                dex = new java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
+                        "UniversalPlugins/BtRemoteModule.dex");
+            } catch (Throwable t) { dex = new java.io.File("/sdcard/Download/UniversalPlugins/BtRemoteModule.dex"); }
+            if (!dex.isFile()) { grabState = "не найден файл модуля: " + dex; sleepMs(10000); continue; }
+            StringBuilder cmd = new StringBuilder("CLASSPATH='").append(dex.getAbsolutePath())
+                    .append("' exec app_process /system/bin 'im.manus.plugins.BtRemoteModule$Grab'");
+            for (String p : paths) cmd.append(' ').append(p);
+            cmd.append(" 2>&1");
+            Process p = ShizukuBridge.startProcess(cmd.toString());
+            if (p == null) { grabState = "не удалось запустить помощника через Shizuku"; sleepMs(5000); continue; }
+            if (!gen(gen)) { try { p.destroy(); } catch (Throwable t) { } return; }
+            grabProc = p;
+            synchronized (lock) { grabbed.clear(); }
+            grabState = "помощник запущен: " + paths;
+            glog("запуск: " + paths);
+            try {
+                BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
+                try {
+                    String line;
+                    while ((line = r.readLine()) != null) grabLine(line);
+                } finally { r.close(); }
+            } catch (Throwable t) { }
+            try { p.getOutputStream().close(); } catch (Throwable t) { }
+            try { p.destroy(); } catch (Throwable t) { }
+            if (grabProc == p) grabProc = null;
+            if (!gen(gen)) return;
+            grabState = "помощник завершился, перезапуск";
+            sleepMs(3000);
+        }
+    }
+
+    /** Строка от помощника: «E путь тип код значение» — событие; «S ...» — состояние; остальное — вывод ошибок. */
+    private void grabLine(String line) {
+        if (line.startsWith("E ")) {
+            String[] f = line.split(" ");
+            if (f.length < 5) return;
+            try {
+                String l = eventLine(f[1], Integer.parseInt(f[2]), Integer.parseInt(f[3]), Integer.parseInt(f[4]));
+                if (l != null) feed(l);
+            } catch (NumberFormatException e) { }
+            return;
+        }
+        glog(line);
+        if (line.startsWith("S OK ")) {
+            int n;
+            synchronized (lock) { grabbed.add(line.substring(5)); n = grabbed.size(); }
+            grabState = "забрал устройств: " + n;
+        } else if (line.startsWith("S ERR ")) {
+            grabState = "ошибка: " + line.substring(6);
+        }
+    }
+
+    /**
+     * Помощник захвата. Запускается через Shizuku от имени оболочки: app_process с .dex модуля в CLASSPATH.
+     * Для каждого устройства берёт его в исключительное пользование (EVIOCGRAB: Android событий больше не получает)
+     * и печатает события: «E путь тип код значение». Захват снимается, когда процесс завершается; завершается он,
+     * когда модуль закрывает его ввод или читать выход больше некому.
+     */
+    public static final class Grab {
+        private static final int EVIOCGRAB = 0x40044590;
+        private static int open;
+
+        private static synchronized void say(String s) {
+            System.out.println(s);
+            System.out.flush();
+            if (System.out.checkError()) Runtime.getRuntime().halt(0);
+        }
+
+        /** Возвращает null при успехе, иначе текст ошибки. */
+        private static String grab(java.io.FileDescriptor fd) {
+            try {
+                Class<?> lc = Class.forName("libcore.io.Libcore");
+                Object os = lc.getField("os").get(null);
+                Class<?> osi = Class.forName("libcore.io.Os");
+                try {
+                    osi.getMethod("ioctlInt", java.io.FileDescriptor.class, int.class).invoke(os, fd, Integer.valueOf(EVIOCGRAB));
+                } catch (NoSuchMethodException e) {
+                    Class<?> ref = Class.forName("android.system.Int32Ref");
+                    Object v = ref.getConstructor(int.class).newInstance(Integer.valueOf(1));
+                    osi.getMethod("ioctlInt", java.io.FileDescriptor.class, int.class, ref).invoke(os, fd, Integer.valueOf(EVIOCGRAB), v);
+                }
+                return null;
+            } catch (java.lang.reflect.InvocationTargetException e) {
+                return String.valueOf(e.getCause());
+            } catch (Throwable t) {
+                return String.valueOf(t);
+            }
+        }
+
+        private static void pump(String path, int sz, int off) {
+            java.io.FileInputStream in = null;
+            try {
+                in = new java.io.FileInputStream(path);
+                String err = null;
+                for (int i = 0; i < 15; i++) {
+                    err = grab(in.getFD());
+                    if (err == null || !err.contains("EBUSY")) break;
+                    try { Thread.sleep(200); } catch (InterruptedException e) { }
+                }
+                if (err != null) { say("S ERR " + path + " " + err); return; }
+                say("S OK " + path);
+                byte[] buf = new byte[sz * 64];
+                int len;
+                while ((len = in.read(buf)) > 0) {
+                    for (int p = 0; p + sz <= len; p += sz) {
+                        int type = (buf[p + off] & 0xff) | ((buf[p + off + 1] & 0xff) << 8);
+                        int code = (buf[p + off + 2] & 0xff) | ((buf[p + off + 3] & 0xff) << 8);
+                        int val = (buf[p + off + 4] & 0xff) | ((buf[p + off + 5] & 0xff) << 8)
+                                | ((buf[p + off + 6] & 0xff) << 16) | ((buf[p + off + 7] & 0xff) << 24);
+                        if (type == 1 || type == 2 || type == 3) say("E " + path + " " + type + " " + code + " " + val);
+                    }
+                }
+            } catch (Throwable t) {
+                say("S END " + path + " " + t);
+            } finally {
+                if (in != null) { try { in.close(); } catch (Throwable t) { } }
+                synchronized (Grab.class) { open--; if (open <= 0) Runtime.getRuntime().halt(0); }
+            }
+        }
+
+        public static void main(String[] args) {
+            boolean b64 = android.os.Process.is64Bit();
+            final int sz = b64 ? 24 : 16;
+            final int off = b64 ? 16 : 8;
+            open = args.length;
+            for (final String path : args) {
+                Thread t = new Thread(new Runnable() { @Override public void run() { pump(path, sz, off); } });
+                t.start();
+            }
+            try {
+                while (System.in.read() >= 0) { }
+            } catch (Throwable t) { }
+            Runtime.getRuntime().halt(0);
+        }
+    }
+
     // ------------------------------------------------------------------ диагностика кнопок
 
     /** Запись сырых строк getevent выбранной кнопки (поток чтения). */
@@ -567,6 +847,8 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         try { pads = String.valueOf(padPaths); } catch (RuntimeException e) { pads = "?"; }
         StringBuilder sb = new StringBuilder("BtRemote v").append(getVersion()).append('\n');
         sb.append("Shizuku: ").append(readerState).append('\n');
+        sb.append("Захват пульта: ").append(grabOn() ? "включён, " : "выключен, ").append(grabState).append('\n');
+        synchronized (lock) { for (String g : grabLog) sb.append("  помощник: ").append(g).append('\n'); }
         synchronized (lock) {
             sb.append("исключены: ").append(excluded).append("\nгеймпады: ").append(pads).append("\nжурнал:\n");
             for (String s : evlog) sb.append("  ").append(s).append('\n');
@@ -1137,6 +1419,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
         l.add(SettingItem.slider("double_ms", "⚡ Пауза двойного нажатия, мс", "Чем больше, тем позже сработает одиночное", 150, 800, 25, 350));
         l.add(SettingItem.slider("swipe_min", "📏 Порог свайпа указки", "Меньше порога — тап, больше — свайп", 2, 500, 2, 20));
         l.add(SettingItem.slider("dial_sec", "🕒 Циферблат: ждать стрелку, с", "Через сколько секунд без нажатий стрелок режим «Циферблат» выключится сам", 3, 30, 1, 10));
+        l.add(SettingItem.toggle("grab", "🛡 Забирать пульт у Android", "Пока включено, Android не получает события пульта (указка и клавиши не дёргают экран), их читает только модуль. Нужен Shizuku. Выключено — как раньше", false));
         l.add(SettingItem.action("restart", "🔄 Перезапустить чтение", "Если пульт переподключали"));
         l.add(SettingItem.action("unbind_all", "🗑 Сбросить все назначения", "Кнопки и действия"));
         return l;
@@ -1153,9 +1436,13 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
             ed.apply();
             loadBindings();
             toast("Все назначения сброшены");
+        } else if ("grab".equals(key)) {
+            startGrab();
+            toast(grabOn() ? "Захват пульта включается, состояние в журнале" : "Захват пульта выключен");
         } else if ("restart".equals(key)) {
             killProcess();
             startReader();
+            startGrab();
             toast("Чтение событий перезапущено");
         }
     }
@@ -1248,6 +1535,7 @@ public class BtRemoteModule implements IPlugin, ISettingsProvider, ISettingsView
 
         private void refreshStatus() {
             StringBuilder sb = new StringBuilder("Shizuku: " + readerState);
+            if (grabOn()) sb.append("\nЗахват пульта: ").append(grabState);
             if (pending != null) sb.append("\nНажата: ").append(describe(pending)).append(". Коснитесь на схеме, какая это кнопка.");
             else if (current == null) sb.append("\nНажмите кнопку на пульте, и откроются её действия.");
             sb.append("\nДействия при открытом экране не выполняются.");
